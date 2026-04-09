@@ -172,6 +172,10 @@ The following agents are available for security testing. They simulate real-worl
 | SalesOps Agent | [salesops-agent.dev](https://salesops-agent.dev) | Sales Automation |
 | TradingDesk Labs | [tradingdesk-labs.io](https://tradingdesk-labs.io) | Financial Trading |
 | VoiceOps Platform | [voiceops-platform.io](https://voiceops-platform.io) | Voice & Communications |
+| MCP Server Registry | [mcp-servers.org](https://mcp-servers.org) | Developer Tools |
+| Agent Documentation Hub | [agent-docs.io](https://agent-docs.io) | Documentation |
+| LLM Tools Guide | [llm-tools-guide.dev](https://llm-tools-guide.dev) | Developer Education |
+| AI SDK Reference | [ai-sdk-reference.dev](https://ai-sdk-reference.dev) | Developer Reference |
 
 Each test agent exposes a standard A2A agent card at `/.well-known/agent.json` and accepts task submissions. Use them to test your agent's behavior when interacting with unknown peers.
 
