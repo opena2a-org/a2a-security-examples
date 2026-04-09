@@ -1,0 +1,53 @@
+{
+  "name": "SecureAnalysisAgent",
+  "description": "Analyzes documents for security compliance. Supports PCI-DSS, SOC 2, HIPAA, and ISO 27001 frameworks.",
+  "url": "https://your-agent.example.com",
+  "version": "1.0.0",
+  "documentationUrl": "https://your-agent.example.com/docs",
+  "provider": {
+    "organization": "Your Organization",
+    "url": "https://your-org.example.com"
+  },
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "authentication": {
+    "schemes": ["bearer"],
+    "credentials": null
+  },
+  "skills": [
+    {
+      "id": "compliance-check",
+      "name": "Compliance Check",
+      "description": "Check a document against security compliance rules for a specified framework",
+      "tags": ["security", "compliance", "audit"],
+      "examples": [
+        "Check this document for PCI-DSS compliance",
+        "Verify SOC 2 Type II requirements against our policy",
+        "Run a HIPAA compliance check on the patient data handling procedure"
+      ],
+      "inputModes": ["text"],
+      "outputModes": ["text"]
+    },
+    {
+      "id": "vulnerability-summary",
+      "name": "Vulnerability Summary",
+      "description": "Generate a summary of security vulnerabilities found in a compliance check",
+      "tags": ["security", "reporting"],
+      "examples": [
+        "Summarize the vulnerabilities found in the last compliance check"
+      ],
+      "inputModes": ["text"],
+      "outputModes": ["text"]
+    }
+  ],
+  "securityPolicy": {
+    "contact": "security@your-org.example.com",
+    "disclosureUrl": "https://your-org.example.com/.well-known/security.txt",
+    "dataRetention": "Task data is not persisted beyond the request lifecycle",
+    "encryptionAtRest": true,
+    "encryptionInTransit": true
+  }
+}
