@@ -207,11 +207,13 @@ function groupRunning(pid) {
   }
 }
 
-// Why ps cannot run here, or false when it can. Some container images do not
-// install ps, and the tests that read processes with it are skipped there.
-function psUnavailable() {
-  const { error } = spawnSync("ps", ["-o", "pid=", "-p", String(process.pid)]);
-  return error ? `ps cannot run here: ${error.message}` : false;
+// Why ps cannot run here with args, or false when it can. Some container images
+// do not install ps, and BusyBox ps, in Alpine images, starts but rejects -p.
+// Each test that reads processes with ps is skipped where its ps calls fail.
+function psUnavailable(args) {
+  const { error, status } = spawnSync("ps", args);
+  if (error) return `ps cannot run here: ${error.message}`;
+  return status === 0 ? false : `ps ${args.join(" ")} exits with status ${status} here`;
 }
 
 // The process groups, other than its own, of the processes descended from pid.
@@ -777,9 +779,18 @@ test("stopping a server process that could not be spawned does nothing instead o
   assert.doesNotThrow(() => stopServer(proc));
 });
 
+test("a ps call that ps rejects is a reason to skip the test that makes it, as a missing ps is", () => {
+  // ps on macOS, procps ps and BusyBox ps all reject this option.
+  assert.ok(psUnavailable(["--no-such-option"]), "ps --no-such-option gives a reason to skip");
+});
+
 test(
   "a process group whose processes have exited counts as running until they are reaped, and stopping it does nothing instead of throwing",
-  { skip: (process.platform === "win32" && "process groups are POSIX only") || psUnavailable() },
+  {
+    skip:
+      (process.platform === "win32" && "process groups are POSIX only") ||
+      psUnavailable(["-o", "stat=", "-p", String(process.pid)]),
+  },
   async () => {
     // The holder starts a process that leads a group of its own and exits at
     // once, then blocks its event loop reading its stdin, so that it does not
@@ -840,7 +851,8 @@ test(
   {
     skip:
       (process.platform === "win32" && "on Windows the servers share the console and receive Ctrl-C themselves") ||
-      psUnavailable(),
+      psUnavailable(["-A", "-o", "pid=,ppid=,pgid="]) ||
+      psUnavailable(["-A", "-o", "pgid=,stat="]),
   },
   async () => {
     // Run the stalled-upload test alone in a process group of its own, as a
