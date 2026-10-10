@@ -86,23 +86,30 @@ test("the bearer token sentence names every token the handler rejects", () => {
   }
 });
 
-test("the audit sentence names invalid JSON, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {
+test("the audit sentence names a body that is not a JSON object or array, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
   const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
   const reasons = [
-    "not valid JSON",
+    "not a JSON object or array",
     `over ${limit[1]} MB`,
     "unsupported encoding or charset",
     "compressed body that does not inflate",
     "connection closed before the whole body arrives",
-    "no JSON reply",
+    "at most a bare HTTP 400 with no body",
   ];
   for (const reason of reasons) {
     assert.ok(rejected.includes(reason), `README says request_rejected covers a body ${reason}`);
   }
+});
+
+test("README does not describe the strict JSON parser as accepting any valid JSON", () => {
+  // The parser rejects valid JSON such as 123 or "text" that is not an object
+  // or array, so "not valid JSON" undersells what gets a 400.
+  assert.doesNotMatch(readme, /not valid JSON/);
+  assert.doesNotMatch(readme, /no JSON reply because the connection is already gone/);
 });
 
 test("README names the command that runs the tests", () => {

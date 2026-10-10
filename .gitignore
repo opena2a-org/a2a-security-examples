@@ -4,6 +4,7 @@ dist/
 .env.*
 *.key
 *.pem
+secrets.json
 __pycache__/
 *.pyc
 .DS_Store
