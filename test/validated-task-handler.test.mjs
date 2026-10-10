@@ -327,12 +327,14 @@ test("a body cut off by a closed connection gets at most a bare 400 and a reques
   assert.deepEqual(audited[0].details, { status: 400, reason: "request.aborted" });
 });
 
-// NODE_OPTIONS that load a CommonJS file before the example starts. Every
-// Node.js 18 release accepts --require in NODE_OPTIONS; 18.0 to 18.17 reject
-// --import there. NODE_OPTIONS is split on spaces, so the path is quoted.
-function requireOptions(file) {
+// NODE_OPTIONS that keep the existing value and load a CommonJS file before the
+// example starts. Every Node.js 18 release accepts --require in NODE_OPTIONS;
+// 18.0 to 18.17 reject --import there. NODE_OPTIONS is split on spaces, so the
+// path is quoted, and inside quotes a backslash escapes the next character. It
+// decodes no other escape, so a control character is written as it is.
+function requireOptions(file, existing = process.env.NODE_OPTIONS) {
   const quoted = `"${file.replace(/[\\"]/g, "\\$&")}"`;
-  return [process.env.NODE_OPTIONS, `--require=${quoted}`].filter(Boolean).join(" ");
+  return [existing, `--require=${quoted}`].filter(Boolean).join(" ");
 }
 
 // Node's request timeout is 300 seconds by default. This preload records the
@@ -444,11 +446,12 @@ test("the stalled-upload preload sets the connection check interval when the ser
   }
 });
 
-test("a preload path with a space or a quote reaches Node as one --require option", () => {
+test("a preload path with a space, a quote, a backslash or a tab reaches Node as one --require option", () => {
   const dir = mkdtempSync(join(tmpdir(), "a2a preload-"));
   try {
-    // Windows file names cannot contain a double quote.
-    const file = join(dir, process.platform === "win32" ? "pre load.cjs" : 'pre "load".cjs');
+    // Windows file names cannot contain a double quote or a tab, and the
+    // backslashes that separate its directories are already in the path.
+    const file = join(dir, process.platform === "win32" ? "pre load.cjs" : 'pre "lo\\ad"\t.cjs');
     writeFileSync(file, 'process.stdout.write("preloaded\\n");\n');
     const run = spawnSync(process.execPath, ["-e", ""], {
       env: { ...process.env, NODE_OPTIONS: requireOptions(file) },
@@ -460,6 +463,33 @@ test("a preload path with a space or a quote reaches Node as one --require optio
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a preload's NODE_OPTIONS keep the options already in NODE_OPTIONS", () => {
+  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  try {
+    const file = join(dir, "preload.cjs");
+    writeFileSync(file, 'process.stdout.write("preloaded\\n");\n');
+    const run = spawnSync(process.execPath, ["-p", "process.noDeprecation"], {
+      env: { ...process.env, NODE_OPTIONS: requireOptions(file, "--no-deprecation") },
+      encoding: "utf8",
+      timeout: 30000,
+    });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(run.stdout, "preloaded\ntrue\n", "the preload ran and --no-deprecation still applies");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("every preload in this file gets its NODE_OPTIONS from requireOptions", () => {
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const start = source.indexOf("function requireOptions(");
+  assert.ok(start >= 0, "this file has requireOptions");
+  const outside = source.slice(0, start) + source.slice(source.indexOf("\n}\n", start));
+  // Any other builder reads the existing value or writes its own --require.
+  assert.doesNotMatch(outside, /process\.env\.NODE_OPTIONS/, "only requireOptions reads the existing NODE_OPTIONS");
+  assert.doesNotMatch(outside, /[`"']--require/, "only requireOptions writes a --require option");
 });
 
 test("unknown routes get a JSON 404, not the framework's HTML page", async () => {
@@ -501,17 +531,15 @@ test("a PORT already in use exits with one line naming the port", () => {
 });
 
 // Start the example with a CommonJS module loaded first that changes how the
-// HTTP server listens, and return the finished run. The module is loaded with
-// --require because NODE_OPTIONS accepts --import only from Node.js 18.18.
+// HTTP server listens, and return the finished run.
 function runWithPreload(preload, env) {
   const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
   try {
     const file = join(dir, "preload.cjs");
     writeFileSync(file, preload);
-    const nodeOptions = [process.env.NODE_OPTIONS, `--require ${JSON.stringify(file)}`];
     return spawnSync(process.execPath, [tsx, "handler.ts"], {
       cwd: example,
-      env: { ...process.env, ...env, NODE_OPTIONS: nodeOptions.filter(Boolean).join(" ") },
+      env: { ...process.env, ...env, NODE_OPTIONS: requireOptions(file) },
       encoding: "utf8",
       timeout: 30000,
     });
