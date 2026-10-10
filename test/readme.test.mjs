@@ -105,6 +105,13 @@ test("the audit sentence names a body that is not a JSON object or array, the si
   }
 });
 
+test("the audit sentence limits the bare 400 to a client that closes the connection and names the 408 for a stalled upload", () => {
+  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
+  assert.match(rejected, /at most a bare HTTP 400 with no body when the client closes it/);
+  assert.match(rejected, /a bare HTTP 408 with no body when the upload stalls until Node's request timeout/);
+});
+
 test("README does not describe the strict JSON parser as accepting any valid JSON", () => {
   // The parser rejects valid JSON such as 123 or "text" that is not an object
   // or array, so "not valid JSON" undersells what gets a 400.
