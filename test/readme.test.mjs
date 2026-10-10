@@ -2,7 +2,7 @@
 // repository root runs every test file).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -169,9 +169,32 @@ test("README states the Node.js version npm test needs, as the root package.json
   );
 });
 
+// The Node.js 18 minor release that added each name a test file imports from
+// node:test, from the "Added in" lines of
+// https://nodejs.org/docs/latest-v18.x/api/test.html. node --test itself
+// arrived in 18.1.
+const nodeTestAddedIn = { test: 0, before: 8, after: 8 };
+
+// The lowest Node.js 18 minor release that has node --test and every name the
+// test files import from node:test.
+function lowestMinorThatCanRunTheTests() {
+  let minor = 1;
+  for (const file of readdirSync(join(root, "test")).filter((name) => name.endsWith(".mjs"))) {
+    const text = readFileSync(join(root, "test", file), "utf8");
+    for (const [, names] of text.matchAll(/^import \{([^}]*)\} from "node:test"/gm)) {
+      for (const name of names.split(",").map((n) => n.trim()).filter(Boolean)) {
+        assert.ok(name in nodeTestAddedIn, `test/${file} imports ${name} from node:test; add the release that added it`);
+        minor = Math.max(minor, nodeTestAddedIn[name]);
+      }
+    }
+  }
+  return minor;
+}
+
 test("README says the Node.js version for npm test is the lowest release tested, not a measured minimum", () => {
-  // npm test fails on Node.js 18.0 and passes on 18.17. No release between the
-  // two has been run, so the floor may be higher than the tests need.
+  // npm test cannot run on a release without node --test or without a name the
+  // test files import from node:test, and passes on 18.17. No release between
+  // the two has been run, so the floor may be higher than the tests need.
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const floor = pkg.engines?.node?.match(/^>=(\d+)\.(\d+)(?:\.\d+)?$/);
   assert.ok(floor, "the root package.json sets engines.node to >=X.Y");
@@ -181,9 +204,14 @@ test("README says the Node.js version for npm test is the lowest release tested,
     sentence.includes(`Node.js ${floor[1]}.${floor[2]} is the lowest release the tests have been run on, not a measured minimum`),
     `README says Node.js ${floor[1]}.${floor[2]} is a tested floor, not a measured minimum`
   );
+  const lowest = lowestMinorThatCanRunTheTests();
   assert.ok(
-    sentence.includes(`releases ${floor[1]}.1 to ${floor[1]}.${floor[2] - 1} are untested`),
-    "README says which releases below the floor are untested"
+    sentence.includes(`releases before ${floor[1]}.${lowest} have no`),
+    `README says why releases before ${floor[1]}.${lowest} cannot run the tests`
+  );
+  assert.ok(
+    sentence.includes(`releases ${floor[1]}.${lowest} to ${floor[1]}.${floor[2] - 1} are untested`),
+    "README says which releases below the floor are untested, leaving out releases that cannot run the tests"
   );
 });
 
