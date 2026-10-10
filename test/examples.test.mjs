@@ -96,7 +96,8 @@ function recordedBin({ name, bin }) {
 // as true when that field is truthy or a preinstall, install or postinstall
 // script is a non-empty string, dependencies without the packages
 // optionalDependencies also lists, and bundleDependencies as a list of names,
-// read from bundledDependencies when it is not set.
+// read from bundledDependencies when it is not set. When it leaves out every
+// field, npm writes no root entry, and this function returns undefined.
 //
 // Three measured cases are not handled. In each, npm 11.19.0 can record
 // another bin than this function returns, and the lock file check then fails
@@ -128,7 +129,7 @@ function rootEntry(pkg) {
     const empty = typeof value === "object" && !keptEmpty && Object.keys(value ?? {}).length === 0;
     if (value && !empty) entry[field] = value;
   }
-  return entry;
+  return Object.keys(entry).length ? entry : undefined;
 }
 
 // Fail unless lock, a parsed package-lock.json, is the lock file of pkg, the
@@ -138,7 +139,7 @@ function assertLockMatches(pkg, lock, dir = "") {
   assert.ok(lock.lockfileVersion >= 1, `${dir}package-lock.json has lockfileVersion >= 1`);
   assert.equal(lock.name, pkg.name, `${dir}package-lock.json names the package in ${dir}package.json`);
   const locked = lock.packages?.[""] ?? {};
-  const written = rootEntry(pkg);
+  const written = rootEntry(pkg) ?? {};
   for (const field of rootEntryFields) {
     assert.deepEqual(locked[field], written[field], `${dir}package-lock.json records the ${field} of ${dir}package.json`);
   }
@@ -168,6 +169,21 @@ function lockWith(entry) {
 function stale(field) {
   return new RegExp(`package-lock\\.json records the ${field} of package\\.json`);
 }
+
+test("the lock file check fails for a lock file without a lockfileVersion or with the name of another package", () => {
+  const pkg = { name: "example" };
+  assert.doesNotThrow(() => assertLockMatches(pkg, lockWith({})));
+  // npm ci warns that a lock file without a lockfileVersion is an old one and
+  // fetches from the registry the metadata it lacks.
+  const old = lockWith({});
+  delete old.lockfileVersion;
+  assert.throws(() => assertLockMatches(pkg, old), /package-lock\.json has lockfileVersion >= 1/);
+  // The next npm install writes the name of the package to the lock file.
+  assert.throws(
+    () => assertLockMatches(pkg, { ...lockWith({}), name: "other" }),
+    /package-lock\.json names the package in package\.json/
+  );
+});
 
 test("the lock file check fails for a lock file whose root entry lacks the funding or the bin of package.json", () => {
   const funding = { url: "https://example.com" };
@@ -248,6 +264,8 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
         bin: { a: "bin/a.js", b: "bin/b.js", d: "up/d.js" },
       },
     ],
+    // A backslash or a colon in a command name ends a directory, as a slash does.
+    [{ name: "probe", bin: { "dir\\b": "b.js", "c:d": "d.js" } }, { name: "probe", bin: { b: "b.js", d: "d.js" } }],
     [
       { name: "probe", bin: ["./bin/one.js", "two.js"], funding: { type: "individual", url: "https://example.com/c" } },
       { name: "probe", bin: { "one.js": "bin/one.js", "two.js": "two.js" }, funding: { type: "individual", url: "https://example.com/c" } },
@@ -274,8 +292,9 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
     [{ name: "probe", scripts: { postinstall: "true" } }, { name: "probe", hasInstallScript: true }],
     [{ name: "probe", hasInstallScript: "yes" }, { name: "probe", hasInstallScript: true }],
     [{ name: "probe", scripts: { preinstall: "", install: 7, postinstall: ["true"], prepare: "true" } }, { name: "probe" }],
-    // A bin path has no command name in a package without a name.
-    [{ bin: "cli.js", funding: [] }, {}],
+    // A bin path has no command name in a package without a name, and npm
+    // writes no root entry when it leaves out every field.
+    [{ bin: "cli.js", funding: [] }, undefined],
     // A package in optionalDependencies is left out of dependencies.
     [
       {
@@ -294,6 +313,8 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
       },
       { name: "probe", bundleDependencies: ["one"], optionalDependencies: { one }, workspaces: { packages: ["packages/*"] } },
     ],
+    // Peer dependencies are recorded as they are.
+    [{ name: "probe", peerDependencies: { one } }, { name: "probe", peerDependencies: { one } }],
     // Empty devDependencies, which npm records, and the other forms of bundleDependencies.
     [
       {
@@ -313,6 +334,11 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
     [
       { name: "probe", bundledDependencies: ["two"], devDependencies: { one }, dependencies: { one } },
       { name: "probe", bundleDependencies: ["two"], dependencies: { one }, devDependencies: { one } },
+    ],
+    // bundleDependencies false is set, so npm does not read bundledDependencies.
+    [
+      { name: "probe", dependencies: { two }, bundleDependencies: false, bundledDependencies: ["two"] },
+      { name: "probe", dependencies: { two } },
     ],
     // No other field of this package.json reaches the root entry.
     [
