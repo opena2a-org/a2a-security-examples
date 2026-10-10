@@ -86,13 +86,20 @@ test("the bearer token sentence names every token the handler rejects", () => {
   }
 });
 
-test("the audit sentence names every kind of body the parser rejects", () => {
+test("the audit sentence names invalid JSON, the size limit, an unsupported encoding or charset, and a body cut off by a closed connection", () => {
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
   const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
-  for (const reason of ["not valid JSON", `over ${limit[1]} MB`, "unsupported encoding"]) {
+  const reasons = [
+    "not valid JSON",
+    `over ${limit[1]} MB`,
+    "unsupported encoding or charset",
+    "connection closed before the whole body arrives",
+    "no JSON reply",
+  ];
+  for (const reason of reasons) {
     assert.ok(rejected.includes(reason), `README says request_rejected covers a body ${reason}`);
   }
 });
