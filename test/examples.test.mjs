@@ -1,12 +1,16 @@
-// Example checks. Run with: node --test test/examples.test.mjs (npm test at the
-// repository root runs every test file).
+// Example checks. npm test at the repository root installs the example's
+// dependencies and runs every test file. To run this file alone:
+//   (cd examples/validated-task-handler && npm ci)
+//   node --test test/examples.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const typescript = join(root, "examples/validated-task-handler/node_modules/typescript/lib/typescript.js");
 
 function filesUnder(dir) {
   return readdirSync(dir).flatMap((name) => {
@@ -80,19 +84,100 @@ test("npm test at the repository root installs every example and runs every test
   assert.deepEqual(listed, present, "npm test runs every file in test/");
 });
 
-test("every test file uses each name it imports", () => {
-  for (const name of readdirSync(join(root, "test")).filter((file) => file.endsWith(".mjs"))) {
-    const text = readFileSync(join(root, "test", name), "utf8");
-    const body = text.replace(/^import\s[^;]*;$/gm, "");
-    for (const [, clause] of text.matchAll(/^import\s+([^"';]+?)\s+from\s+["'][^"']+["'];$/gm)) {
-      const names = clause
-        .replace(/[{}]/g, ",")
-        .split(",")
-        .map((part) => part.trim().split(/\s+as\s+/).pop())
-        .filter(Boolean);
-      for (const imported of names) {
-        assert.match(body, new RegExp(`\\b${imported}\\b`), `test/${name} imports ${imported} and never uses it`);
+// The names each module imports and never reads, as the TypeScript compiler
+// the example installs reports them, so a name that appears only in a comment
+// or a string is not a use. sources maps a file name to the module's text.
+function unusedImports(sources) {
+  assert.ok(existsSync(typescript), "run npm ci in examples/validated-task-handler first");
+  const ts = createRequire(import.meta.url)(typescript);
+  const options = { allowJs: true, checkJs: true, noEmit: true, noResolve: true, noUnusedLocals: true, types: [] };
+  const host = ts.createCompilerHost(options);
+  const readLibrary = host.getSourceFile;
+  host.getSourceFile = (file, languageVersion) =>
+    file in sources ? ts.createSourceFile(file, sources[file], languageVersion) : readLibrary(file, languageVersion);
+  const program = ts.createProgram(Object.keys(sources), options, host);
+  const unused = [];
+  for (const file of Object.keys(sources)) {
+    const source = program.getSourceFile(file);
+    // TS6133 starts at the unused name. When no name in an import statement is
+    // read, TS6133 (one name) or TS6192 (several) starts at the statement.
+    const reported = new Set(
+      program
+        .getSemanticDiagnostics(source)
+        .filter((diagnostic) => diagnostic.code === 6133 || diagnostic.code === 6192)
+        .map((diagnostic) => diagnostic.start)
+    );
+    for (const statement of source.statements.filter(ts.isImportDeclaration)) {
+      const { name, namedBindings } = statement.importClause ?? {};
+      const names = [name, namedBindings?.name, ...(namedBindings?.elements ?? []).map((element) => element.name)];
+      for (const imported of names.filter(Boolean)) {
+        if (reported.has(statement.getStart(source)) || reported.has(imported.getStart(source))) {
+          unused.push(`${file} imports ${imported.text} and never uses it`);
+        }
       }
     }
   }
+  return unused;
+}
+
+test("every test file uses each name it imports", () => {
+  const sources = {};
+  for (const name of readdirSync(join(root, "test")).filter((file) => file.endsWith(".mjs"))) {
+    sources[`test/${name}`] = readFileSync(join(root, "test", name), "utf8");
+  }
+  assert.deepEqual(unusedImports(sources), []);
+});
+
+test("the import check reports a name that appears only in a comment, a string or a regular expression", () => {
+  const mentions = {
+    "line-comment.mjs": "// pathToFileURL",
+    "block-comment.mjs": "/* pathToFileURL */",
+    "string.mjs": 'console.log("pathToFileURL");',
+    "template.mjs": "console.log(`pathToFileURL`);",
+    "regular-expression.mjs": "console.log(/pathToFileURL/);",
+  };
+  const sources = {};
+  for (const [file, mention] of Object.entries(mentions)) {
+    sources[file] = `import { fileURLToPath, pathToFileURL } from "node:url";\n${mention}\nfileURLToPath(import.meta.url);\n`;
+  }
+  assert.deepEqual(
+    unusedImports(sources),
+    Object.keys(mentions).map((file) => `${file} imports pathToFileURL and never uses it`)
+  );
+});
+
+test("the import check reads an import statement that has a trailing comment or no semicolon", () => {
+  const endings = {
+    "line-comment.mjs": "; // url helpers",
+    "block-comment.mjs": "; /* url helpers */",
+    "no-semicolon.mjs": "",
+  };
+  const sources = {};
+  for (const [file, ending] of Object.entries(endings)) {
+    sources[file] = `import { fileURLToPath, pathToFileURL } from "node:url"${ending}\nfileURLToPath(import.meta.url);\n`;
+  }
+  assert.deepEqual(
+    unusedImports(sources),
+    Object.keys(endings).map((file) => `${file} imports pathToFileURL and never uses it`)
+  );
+});
+
+test("the import check reports every form of import and counts only a read of the imported name as a use", () => {
+  const sources = {
+    "forms.mjs": 'import fallback, * as everything from "a";\nimport { first as renamed, second } from "b";\nimport alone from "c";\nimport "d";\n',
+    "partly-used.mjs": 'import fallback, { first as renamed, second } from "a";\nimport other, * as everything from "b";\nconsole.log(second, other);\n',
+    "shadowed.mjs": 'import { join } from "node:path";\nconst paths = { join: 1 };\nfunction last(join) {\n  return join;\n}\nconsole.log(last(paths.join));\n',
+    "used.mjs": 'import { join } from "node:path";\nimport fallback, * as everything from "a";\nconsole.log(`${join("a", "b")}`, { fallback }, everything.name);\n',
+  };
+  assert.deepEqual(unusedImports(sources), [
+    "forms.mjs imports fallback and never uses it",
+    "forms.mjs imports everything and never uses it",
+    "forms.mjs imports renamed and never uses it",
+    "forms.mjs imports second and never uses it",
+    "forms.mjs imports alone and never uses it",
+    "partly-used.mjs imports fallback and never uses it",
+    "partly-used.mjs imports renamed and never uses it",
+    "partly-used.mjs imports everything and never uses it",
+    "shadowed.mjs imports join and never uses it",
+  ]);
 });

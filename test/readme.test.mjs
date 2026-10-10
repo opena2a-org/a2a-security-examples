@@ -169,6 +169,24 @@ test("README states the Node.js version npm test needs, as the root package.json
   );
 });
 
+test("README says the Node.js version for npm test is the lowest release tested, not a measured minimum", () => {
+  // npm test fails on Node.js 18.0 and passes on 18.17. No release between the
+  // two has been run, so the floor may be higher than the tests need.
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const floor = pkg.engines?.node?.match(/^>=(\d+)\.(\d+)(?:\.\d+)?$/);
+  assert.ok(floor, "the root package.json sets engines.node to >=X.Y");
+  const sentence = lines.find((l) => l.includes("`npm test` from the repository root"));
+  assert.ok(sentence, "README names the command that runs the tests");
+  assert.ok(
+    sentence.includes(`Node.js ${floor[1]}.${floor[2]} is the lowest release the tests have been run on, not a measured minimum`),
+    `README says Node.js ${floor[1]}.${floor[2]} is a tested floor, not a measured minimum`
+  );
+  assert.ok(
+    sentence.includes(`releases ${floor[1]}.1 to ${floor[1]}.${floor[2] - 1} are untested`),
+    "README says which releases below the floor are untested"
+  );
+});
+
 test("the license section matches the LICENSE file", () => {
   const license = readFileSync(join(root, "LICENSE"), "utf8");
   assert.match(license, /Apache License\s+Version 2\.0/);
