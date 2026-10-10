@@ -207,6 +207,13 @@ function groupRunning(pid) {
   }
 }
 
+// Why ps cannot run here, or false when it can. Some container images do not
+// install ps, and the tests that read processes with it are skipped there.
+function psUnavailable() {
+  const { error } = spawnSync("ps", ["-o", "pid=", "-p", String(process.pid)]);
+  return error ? `ps cannot run here: ${error.message}` : false;
+}
+
 // The process groups, other than its own, of the processes descended from pid.
 function descendantGroups(pid) {
   const ps = spawnSync("ps", ["-A", "-o", "pid=,ppid=,pgid="], { encoding: "utf8" });
@@ -761,22 +768,26 @@ test("stopping a server process that could not be spawned does nothing instead o
 
 test(
   "a process group whose processes have exited counts as running until they are reaped, and stopping it does nothing instead of throwing",
-  { skip: process.platform === "win32" && "process groups are POSIX only" },
+  { skip: (process.platform === "win32" && "process groups are POSIX only") || psUnavailable() },
   async () => {
     // The holder starts a process that leads a group of its own and exits at
-    // once, then blocks its event loop so that it does not reap the process.
+    // once, then blocks its event loop reading its stdin, so that it does not
+    // reap the process until the test closes its stdin. The holder reaps it
+    // itself: killed, it would leave the process to whichever process adopts
+    // it, and in a container whose first process is not an init process, that
+    // process never reaps it.
     const holder = spawn(
       process.execPath,
       [
         "-e",
         `const { spawn } = require("node:child_process");
-const { writeSync } = require("node:fs");
+const { readSync, writeSync } = require("node:fs");
 const child = spawn(process.execPath, ["-e", ""], { detached: true, stdio: "ignore" });
 writeSync(1, child.pid + "\\n");
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
+readSync(0, Buffer.alloc(1));
 `,
       ],
-      { stdio: ["ignore", "pipe", "ignore"] }
+      { stdio: ["pipe", "pipe", "ignore"] }
     );
     const closed = new Promise((resolve) => holder.once("close", resolve));
     let out = "";
@@ -788,18 +799,24 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
       }
       pid = Number(out);
       assert.ok(pid > 0, `the holder started a process: ${JSON.stringify(out)}`);
-      const state = () => spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+      const state = () => {
+        const ps = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+        if (ps.error) throw ps.error;
+        return ps.stdout.trim();
+      };
       for (let i = 0; i < 200 && !state().startsWith("Z"); i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       assert.match(state(), /^Z/, "the process has exited and is not yet reaped");
       assert.equal(groupRunning(pid), true, "the group counts as running until its process is reaped");
       assert.doesNotThrow(() => stopServer({ pid }));
+      holder.stdin.end();
+      await within(closed, 10000, "the holder did not exit within 10 seconds of its stdin closing");
     } finally {
       holder.kill("SIGKILL");
       await within(closed, 10000, "the holder did not exit within 10 seconds of SIGKILL");
     }
-    // With the holder gone, the process is reaped and its group goes away.
+    // The holder reaped the process before it exited, so its group goes away.
     for (let i = 0; i < 100 && groupRunning(pid); i++) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
