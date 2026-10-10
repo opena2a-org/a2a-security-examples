@@ -112,6 +112,19 @@ test("README does not describe the strict JSON parser as accepting any valid JSO
   assert.doesNotMatch(readme, /no JSON reply because the connection is already gone/);
 });
 
+test("step 3 limits the Invalid JSON reply to a non-empty body sent as application/json", () => {
+  // The parser reads an empty body as {} and skips a body that is not declared
+  // as JSON, so both fail schema validation in step 4, not JSON parsing.
+  const step = lines.find((l) => l.startsWith("3. JSON parsing:"));
+  assert.ok(step, "README lists JSON parsing as step 3");
+  const [claim, exceptions = ""] = step.split('`{"error":"Invalid JSON"}`');
+  assert.ok(claim.includes("non-empty body sent as `application/json`"), "step 3 applies to a non-empty body sent as application/json");
+  assert.ok(claim.includes("not a JSON object or array"), "step 3 names a body that is not a JSON object or array");
+  assert.match(exceptions, /empty body/, "README says an empty body does not get the Invalid JSON reply");
+  assert.match(exceptions, /not sent as `application\/json`/, "README says a body with another content type does not get the Invalid JSON reply");
+  assert.match(exceptions, /step 4/, "README says which step answers those bodies instead");
+});
+
 test("README names the command that runs the tests", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.ok(pkg.scripts?.test, "the root package.json defines npm test");

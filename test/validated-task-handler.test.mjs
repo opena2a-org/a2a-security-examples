@@ -171,6 +171,28 @@ test("a JSON body that is not an object or array gets the same 400 as malformed 
   }
 });
 
+test("an empty body or a body not sent as application/json fails schema validation, not JSON parsing", async () => {
+  // The parser reads an empty body as {} and skips a body that is not declared
+  // as JSON, so the schema step answers both.
+  const cases = [
+    { name: "an empty application/json body", headers: {}, body: undefined },
+    { name: "a text/plain body", headers: { "Content-Type": "text/plain" }, body: "hello" },
+  ];
+  for (const { name, headers, body } of cases) {
+    const seen = auditLines().length;
+    const res = await postTask({ Authorization: "Bearer demo-token", ...headers }, body);
+    assert.equal(res.status, 400, name);
+    assert.deepEqual(
+      await res.json(),
+      { error: "Invalid task format", details: [{ field: "task", message: "Required" }] },
+      name
+    );
+    const audited = (await waitForAudit(seen + 1)).slice(seen);
+    assert.equal(audited.length, 1, `one audit line for ${name}:\n${output}`);
+    assert.equal(audited[0].action, "validation_failed");
+  }
+});
+
 test("a compressed body that does not inflate gets a JSON 400 and a request_rejected audit line naming the inflate failure", async () => {
   const cases = [
     { encoding: "gzip", body: "notgzipdata-notgzipdata-xxxx" },
