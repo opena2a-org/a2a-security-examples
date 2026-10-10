@@ -47,7 +47,7 @@ Requests to `/tasks` that pass authentication write JSON audit lines to the serv
 
 To run compiled JavaScript instead of the TypeScript source, run `npm run build` (writes `dist/handler.js`), then `npm start`.
 
-To run the repository's tests, run `npm test` from the repository root. It installs the example's dependencies, then runs every file in `test/`.
+To run the repository's tests, run `npm test` from the repository root with Node.js 18.17 or later (the quick start runs on any Node.js 18, but Node.js 18.0 has no `node --test`). It installs the example's dependencies, then runs every file in `test/`.
 
 ## Examples
 
