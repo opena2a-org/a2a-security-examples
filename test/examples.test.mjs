@@ -135,7 +135,8 @@ test(".gitignore excludes environment, key and secrets files", () => {
 });
 
 // The fields of package.json that npm install records in the lock file's root
-// entry, as measured with npm 11.19.0.
+// entry, as measured with npm 11.19.0. npm 10.8.2, the npm in the node:20
+// images, records no libc: see fieldsNotEveryNpmRecords.
 const rootEntryFields = [
   "name",
   "version",
@@ -157,6 +158,14 @@ const rootEntryFields = [
   "bundleDependencies",
   "workspaces",
 ];
+
+// The fields of rootEntryFields that one measured npm records and another
+// leaves out. npm 10.8.2 writes no libc and removes the one npm 11.19.0 wrote,
+// and npm 11.19.0 adds it again, so neither lock file is the one both write.
+// npm ci of each installs from the lock file of the other and leaves it as it
+// is. The lock file check accepts a root entry without such a field, and
+// fails for one that holds another value than package.json.
+const fieldsNotEveryNpmRecords = ["libc"];
 
 // The bin npm records for a package.json: each command with the path of its
 // file inside the package. In a command name and in a path, a backslash or a
@@ -230,9 +239,16 @@ function asWritten(value) {
 // __proto__ is recorded as an empty object. When it leaves out every
 // field, npm writes no root entry, and this function returns undefined.
 //
-// One measured case is not handled. With directories.bin and no bin, npm
-// 11.19.0 fills bin from that directory, which this function does not read, so
-// the lock file check fails for a lock file npm has just written.
+// Two measured cases are not handled, and in each the lock file check fails
+// for a lock file npm has just written. With directories.bin and no bin, npm
+// 11.19.0 fills bin from that directory, which this function does not read,
+// and npm 10.8.2 fills it too. npm 10.8.2, the npm in the node:20 images,
+// records another bin than npm 11.19.0 for some bin values, which the npm
+// 10.8.2 test below lists. In those it records no command for a command name
+// that ends in a . or .. segment, keeps a colon in a bin path, keeps the file
+// of a later command when it renames a command to that one's name, and writes
+// no bin where npm 11.19.0 keeps only a command named __proto__ and writes an
+// empty bin.
 function rootEntry(pkg) {
   const installScripts = ["preinstall", "install", "postinstall"].map((name) => pkg.scripts?.[name]);
   const optional = pkg.optionalDependencies && typeof pkg.optionalDependencies === "object" ? pkg.optionalDependencies : {};
@@ -263,7 +279,8 @@ function rootEntry(pkg) {
 // parsed package.json beside it in dir. A lock file whose root entry differs
 // from the one npm install writes is rewritten by the next npm install. For a
 // package.json without a name, npm names the lock file after its directory, so
-// any lock file name passes.
+// any lock file name passes. A root entry without a field of
+// fieldsNotEveryNpmRecords is one npm writes.
 function assertLockMatches(pkg, lock, dir = "") {
   assert.ok(lock.lockfileVersion >= 1, `${dir}package-lock.json has lockfileVersion >= 1`);
   if (pkg.name) {
@@ -272,6 +289,7 @@ function assertLockMatches(pkg, lock, dir = "") {
   const locked = lock.packages?.[""] ?? {};
   const written = rootEntry(pkg) ?? {};
   for (const field of rootEntryFields) {
+    if (locked[field] === undefined && fieldsNotEveryNpmRecords.includes(field)) continue;
     assert.deepEqual(locked[field], written[field], `${dir}package-lock.json records the ${field} of ${dir}package.json`);
   }
 }
@@ -378,11 +396,14 @@ test("the bin the lock file check expects for a command renamed to __proto__ is 
   }
 });
 
-test("the lock file check fails for a lock file whose root entry lacks the libc of package.json or holds another", () => {
+test("the lock file check passes for a lock file whose root entry has the libc of package.json or none, and fails for one that holds another", () => {
   const pkg = { name: "example", libc: ["glibc"] };
+  // npm 11.19.0 records libc and npm 10.8.2 records none.
   assert.doesNotThrow(() => assertLockMatches(pkg, lockWith({ libc: ["glibc"] })));
-  assert.throws(() => assertLockMatches(pkg, lockWith({})), stale("libc"));
+  assert.doesNotThrow(() => assertLockMatches(pkg, lockWith({})));
   assert.throws(() => assertLockMatches(pkg, lockWith({ libc: ["musl"] })), stale("libc"));
+  // The next npm install, 10.8.2 or 11.19.0, removes a libc that package.json does not set.
+  assert.throws(() => assertLockMatches({ name: "example" }, lockWith({ libc: ["glibc"] })), stale("libc"));
 });
 
 test("the lock file check expects hasInstallScript in the root entry when package.json has an install script", () => {
@@ -593,6 +614,51 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
   // npm install stops with ERR_INVALID_ARG_TYPE for a bin list entry that is
   // not a string.
   assert.throws(() => rootEntry({ name: "probe", bin: [7] }), { code: "ERR_INVALID_ARG_TYPE" });
+});
+
+test("the lock file check passes for the root entry npm 10.8.2 writes without libc, and fails for one it writes with another bin than npm 11.19.0", () => {
+  // Each pair is a package.json of the npm 11.19.0 test above and the root
+  // entry of the lock file that npm install --package-lock-only, npm 10.8.2 in
+  // the node:20 image, wrote for it where npm 11.19.0 wrote another. For every
+  // other package.json of that test, npm 10.8.2 wrote the root entry npm
+  // 11.19.0 wrote: on Linux with glibc, and on macOS for the two that set os to
+  // darwin, for which npm install stops with EBADPLATFORM on Linux.
+  const lockOf = (pkg, entry) => ({ name: pkg.name, lockfileVersion: 3, requires: true, packages: { "": entry } });
+  // No libc, measured on Linux with glibc.
+  const libc = { name: "probe", libc: ["glibc"] };
+  assert.doesNotThrow(() => assertLockMatches(libc, lockOf(libc, { name: "probe" })));
+  // Another bin, which rootEntry does not handle.
+  const otherBin = [
+    // No command for a command name that ends in a . or .. segment.
+    [
+      {
+        name: "probe", license: { type: {} },
+        bin: { "a/b/..": "x.js", "c\\d\\.": "y.js", "e/f/../../g/h/..": "z.js", "..": "w.js", "i:..": "v.js" },
+      },
+      { name: "probe", license: {} },
+    ],
+    [{ name: "probe", bin: { "a/.": "x.js" } }, { name: "probe" }],
+    [{ name: "probe", bin: { "a\\__proto__": "x.js", "c:__proto__/..": "y.js" } }, { name: "probe" }],
+    // A colon kept in a bin path.
+    [{ name: "probe", bin: { a: "c:d.js" } }, { name: "probe", bin: { a: "c:d.js" } }],
+    [{ name: "probe", bin: ["a", "a:", "a/"] }, { name: "probe", bin: { a: "a:" } }],
+    // The file of a later command kept when a command is renamed to its name.
+    [{ name: "probe", bin: { "a/b": "x.js", b: "y.js" } }, { name: "probe", bin: { b: "y.js" } }],
+    [{ name: "probe", bin: ["a\\", "a", "a/\\"] }, { name: "probe", bin: { a: "a" } }],
+    ...[
+      ['{"name":"probe","bin":{"__proto__":"x.js","a/b":"y.js","b":"z.js"}}', { name: "probe", bin: { b: "z.js" } }],
+      // No bin where npm 11.19.0 keeps only a command named __proto__ and
+      // writes an empty bin.
+      ['{"name":"probe","bin":{"__proto__":"x.js"}}', { name: "probe" }],
+      ['{"name":"__proto__","bin":"x.js"}', { name: "__proto__" }],
+      ['{"name":"probe","bin":{"a/__proto__":"y.js","__proto__":"x.js"}}', { name: "probe" }],
+      ['{"name":"probe","bin":{"a/__proto__":"y.js","__proto__":7}}', { name: "probe" }],
+      ['{"name":"probe","bin":{"__proto__":"./x.js","a/__proto__":""}}', { name: "probe" }],
+    ].map(([pkg, entry]) => [JSON.parse(pkg), entry]),
+  ];
+  for (const [pkg, entry] of otherBin) {
+    assert.throws(() => assertLockMatches(pkg, lockOf(pkg, entry)), stale("bin"), `the root entry for ${JSON.stringify(pkg)}`);
+  }
 });
 
 test("npm test at the repository root installs every example and runs every test file", () => {
