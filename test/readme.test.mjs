@@ -33,7 +33,9 @@ test("the clone block is followed by captured output", () => {
   const blocks = codeBlocks(readme);
   const i = blocks.findIndex((b) => b.body.includes("git clone "));
   assert.ok(i >= 0, "a code block runs git clone");
-  assert.ok(lines.findIndex((l) => l.startsWith("git clone ")) < 30, "first command is within 30 lines");
+  const cloneLine = lines.findIndex((l) => l.startsWith("git clone "));
+  assert.ok(cloneLine >= 0, "a line starts with git clone");
+  assert.ok(cloneLine < 30, "first command is within 30 lines");
   const next = blocks[i + 1];
   assert.ok(next && next.lang === "text", "the block after the clone block is a text block of output");
   assert.ok(next.body.trim().length > 0, "the output block is not empty");
@@ -70,6 +72,21 @@ test("the audit sentence names the handler's audit actions and scopes them to au
   }
   assert.doesNotMatch(sentence, /^Every request/, "unauthenticated requests write no audit line");
   assert.match(sentence, /pass authentication/, "README scopes audit lines to authenticated requests");
+});
+
+test("the bearer token sentence names every token the handler rejects", () => {
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const rejected = [...handler.matchAll(/token !== "([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(rejected.length > 0, "isValidToken rejects at least one literal token");
+  const sentence = lines.find((l) => /accepts any non-empty bearer token/.test(l));
+  assert.ok(sentence, "README describes which bearer tokens the example accepts");
+  for (const token of rejected) {
+    assert.ok(sentence.includes(`\`${token}\``), `README says the token ${token} is rejected`);
+  }
+});
+
+test("README does not link repositories that are not public", () => {
+  assert.doesNotMatch(readme, /github\.com\/opena2a-org\/trapmyagent/i, "the trapmyagent repository returns 404 to visitors");
 });
 
 test("the license section matches the LICENSE file", () => {

@@ -19,7 +19,7 @@ import { randomUUID } from "crypto";
 import { RateLimiterMemory } from "rate-limiter-flexible";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+const port = parseInt(process.env.PORT || "3000", 10);
 
 // --- Rate Limiting ---
 
@@ -124,25 +124,40 @@ function isValidToken(token: string): boolean {
   return token.length > 0 && token !== "undefined";
 }
 
-// --- Task Handler ---
+// --- Rate Limiting Middleware ---
 
-app.post("/tasks", authenticate, async (req, res) => {
+async function rateLimit(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+): Promise<void> {
   const clientIp = req.ip || "unknown";
-  const requestId = randomUUID();
-
-  // Rate limiting
   try {
     await rateLimiter.consume(clientIp);
   } catch {
     audit({
       timestamp: new Date().toISOString(),
-      taskId: requestId,
+      taskId: randomUUID(),
       clientIp,
       action: "rate_limited",
       details: {},
     });
-    return res.status(429).json({ error: "Too many requests" });
+    res.status(429).json({ error: "Too many requests" });
+    return;
   }
+
+  next();
+}
+
+// --- Task Handler ---
+
+// Parse the body only after authentication and rate limiting pass, so
+// unauthenticated and rate-limited clients never reach the JSON parser.
+const parseJson = express.json({ limit: "1mb" });
+
+app.post("/tasks", authenticate, rateLimit, parseJson, async (req, res) => {
+  const clientIp = req.ip || "unknown";
+  const requestId = randomUUID();
 
   // Schema validation
   const parsed = TaskRequestSchema.safeParse(req.body);
@@ -215,7 +230,7 @@ app.get("/.well-known/agent.json", (_req, res) => {
   res.json({
     name: "SecureAnalysisAgent",
     description: "Analyzes documents for security compliance",
-    url: process.env.AGENT_URL || "http://localhost:3000",
+    url: process.env.AGENT_URL || `http://localhost:${port}`,
     version: "1.0.0",
     capabilities: {
       streaming: false,
@@ -239,6 +254,48 @@ app.get("/.well-known/agent.json", (_req, res) => {
     ],
   });
 });
+
+// --- Error Handling ---
+
+// Errors raised before a route handler runs, such as a body that is not valid
+// JSON, would otherwise reach Express's default handler, which answers with an
+// HTML page containing the stack trace.
+app.use(
+  (
+    err: unknown,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+
+    const { status, type } = (err ?? {}) as { status?: unknown; type?: unknown };
+    const clientError = typeof status === "number" && status >= 400 && status < 500;
+    const responseStatus = clientError ? status : 500;
+
+    audit({
+      timestamp: new Date().toISOString(),
+      taskId: randomUUID(),
+      clientIp: req.ip || "unknown",
+      action: "request_rejected",
+      details: {
+        status: responseStatus,
+        reason: typeof type === "string" ? type : "unknown",
+      },
+    });
+
+    if (type === "entity.parse.failed") {
+      res.status(400).json({ error: "Invalid JSON" });
+    } else if (clientError) {
+      res.status(responseStatus).json({ error: "Invalid request body" });
+    } else {
+      res.status(500).json({ error: "Request failed" });
+    }
+  }
+);
 
 // --- Task Processing ---
 
@@ -270,7 +327,6 @@ async function processTask(
 
 // --- Start Server ---
 
-const port = parseInt(process.env.PORT || "3000", 10);
 app.listen(port, () => {
   console.log(`Secure A2A agent listening on port ${port}`);
   console.log(`Agent card: http://localhost:${port}/.well-known/agent.json`);
