@@ -58,3 +58,20 @@ test("npm test at the repository root installs every example and runs every test
     .sort();
   assert.deepEqual(listed, present, "npm test runs every file in test/");
 });
+
+test("every test file uses each name it imports", () => {
+  for (const name of readdirSync(join(root, "test")).filter((file) => file.endsWith(".mjs"))) {
+    const text = readFileSync(join(root, "test", name), "utf8");
+    const body = text.replace(/^import\s[^;]*;$/gm, "");
+    for (const [, clause] of text.matchAll(/^import\s+([^"';]+?)\s+from\s+["'][^"']+["'];$/gm)) {
+      const names = clause
+        .replace(/[{}]/g, ",")
+        .split(",")
+        .map((part) => part.trim().split(/\s+as\s+/).pop())
+        .filter(Boolean);
+      for (const imported of names) {
+        assert.match(body, new RegExp(`\\b${imported}\\b`), `test/${name} imports ${imported} and never uses it`);
+      }
+    }
+  }
+});
