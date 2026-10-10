@@ -280,7 +280,8 @@ app.use((_req, res) => {
 //
 // A client that closes the connection before sending the whole body is
 // reported here as request.aborted only once the connection has closed, so the
-// rejection is audited but the JSON reply below never reaches the client.
+// rejection is audited but the JSON reply below never reaches the client; it
+// gets at most the bare HTTP 400 that Node's HTTP server writes.
 app.use(
   (
     err: unknown,
@@ -293,7 +294,11 @@ app.use(
       return;
     }
 
-    const { status, type } = (err ?? {}) as { status?: unknown; type?: unknown };
+    const { status, type, code } = (err ?? {}) as {
+      status?: unknown;
+      type?: unknown;
+      code?: unknown;
+    };
     const clientError = typeof status === "number" && status >= 400 && status < 500;
     const responseStatus = clientError ? status : 500;
 
@@ -304,7 +309,7 @@ app.use(
       action: "request_rejected",
       details: {
         status: responseStatus,
-        reason: typeof type === "string" ? type : "unknown",
+        reason: rejectionReason(type, code),
       },
     });
 
@@ -317,6 +322,15 @@ app.use(
     }
   }
 );
+
+// The parser names most rejections in the error's type. A compressed body that
+// does not inflate arrives as the zlib error instead, which has no type and a
+// Z_* code such as Z_DATA_ERROR.
+function rejectionReason(type: unknown, code: unknown): string {
+  if (typeof type === "string") return type;
+  if (typeof code === "string" && code.startsWith("Z_")) return "body.inflate.failed";
+  return "unknown";
+}
 
 // --- Task Processing ---
 
@@ -354,13 +368,17 @@ const server = app.listen(port, () => {
 });
 
 // Without a listener, a port that is already taken ends the process with the
-// stack trace of an unhandled 'error' event.
+// stack trace of an unhandled 'error' event. The listener also receives errors
+// raised after the server is listening, such as a failed accept, so only an
+// error raised before then is reported as a listen failure.
 server.on("error", (err: NodeJS.ErrnoException) => {
-  console.error(
-    err.code === "EADDRINUSE"
-      ? `Port ${port} is already in use; set PORT to a free port`
-      : `Cannot listen on port ${port}: ${err.message}`
-  );
+  if (server.listening) {
+    console.error(`Server error on port ${port}: ${err.message}`);
+  } else if (err.code === "EADDRINUSE") {
+    console.error(`Port ${port} is already in use; set PORT to a free port`);
+  } else {
+    console.error(`Cannot listen on port ${port}: ${err.message}`);
+  }
   process.exit(1);
 });
 

@@ -5,11 +5,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const example = join(root, "examples/validated-task-handler");
@@ -156,23 +157,40 @@ test("a body over 1 MB or in an unsupported encoding or charset gets a JSON erro
   }
 });
 
-test("a compressed body that does not inflate gets a JSON 400 and a request_rejected audit line", async () => {
-  for (const encoding of ["gzip", "deflate"]) {
+test("a JSON body that is not an object or array gets the same 400 as malformed JSON", async () => {
+  // The parser runs in strict mode, so valid JSON such as 123 is rejected.
+  for (const body of ["123", '"text"', "null"]) {
     const seen = auditLines().length;
-    const res = await postTask(
-      { Authorization: "Bearer demo-token", "Content-Encoding": encoding },
-      "notgzipdata-notgzipdata-xxxx"
-    );
+    const res = await postTask({ Authorization: "Bearer demo-token" }, body);
+    assert.equal(res.status, 400, `body ${body}`);
+    assert.deepEqual(await res.json(), { error: "Invalid JSON" });
+    const audited = (await waitForAudit(seen + 1)).slice(seen);
+    assert.equal(audited.length, 1, `one audit line for the body ${body}:\n${output}`);
+    assert.equal(audited[0].action, "request_rejected");
+    assert.deepEqual(audited[0].details, { status: 400, reason: "entity.parse.failed" });
+  }
+});
+
+test("a compressed body that does not inflate gets a JSON 400 and a request_rejected audit line naming the inflate failure", async () => {
+  const cases = [
+    { encoding: "gzip", body: "notgzipdata-notgzipdata-xxxx" },
+    { encoding: "deflate", body: "notgzipdata-notgzipdata-xxxx" },
+    // A real gzip stream cut off part way fails with a different zlib code.
+    { encoding: "gzip", body: gzipSync(validTask).subarray(0, 20) },
+  ];
+  for (const { encoding, body } of cases) {
+    const seen = auditLines().length;
+    const res = await postTask({ Authorization: "Bearer demo-token", "Content-Encoding": encoding }, body);
     assert.equal(res.status, 400);
     assert.deepEqual(await res.json(), { error: "Invalid request body" });
     const audited = (await waitForAudit(seen + 1)).slice(seen);
     assert.equal(audited.length, 1, `one audit line for the ${encoding} body:\n${output}`);
     assert.equal(audited[0].action, "request_rejected");
-    assert.equal(audited[0].details.status, 400);
+    assert.deepEqual(audited[0].details, { status: 400, reason: "body.inflate.failed" });
   }
 });
 
-test("a body cut off by a closed connection gets no JSON reply and a request_rejected audit line", async () => {
+test("a body cut off by a closed connection gets at most a bare 400 and a request_rejected audit line", async () => {
   const seen = auditLines().length;
   const head = [
     "POST /tasks HTTP/1.1",
@@ -196,7 +214,12 @@ test("a body cut off by a closed connection gets no JSON reply and a request_rej
     socket.on("error", reject);
     socket.on("close", () => resolve(data));
   });
-  assert.doesNotMatch(reply, /\{/, `the client gets no JSON body:\n${reply}`);
+  // Either nothing, or a 400 status line and headers with no body after them.
+  assert.match(
+    reply,
+    /^(HTTP\/1\.1 400 Bad Request\r\n(?:[^\r\n]+\r\n)*\r\n)?$/,
+    `the client gets at most a bare HTTP 400 with no body:\n${reply}`
+  );
   const audited = (await waitForAudit(seen + 1)).slice(seen);
   assert.equal(audited.length, 1, `one audit line for the truncated body:\n${output}`);
   assert.equal(audited[0].action, "request_rejected");
@@ -239,6 +262,61 @@ test("a PORT already in use exits with one line naming the port", () => {
   assert.equal(run.status, 1, `PORT=${port}:\n${run.stdout}${run.stderr}`);
   assert.equal(run.stdout, "", "no listening message for a port the server could not bind");
   assert.deepEqual(run.stderr.trim().split("\n"), [`Port ${port} is already in use; set PORT to a free port`]);
+});
+
+// Start the example with a module loaded first that changes how the HTTP
+// server listens, and return the finished run.
+function runWithPreload(preload, env) {
+  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  try {
+    const file = join(dir, "preload.mjs");
+    writeFileSync(file, preload);
+    const nodeOptions = [process.env.NODE_OPTIONS, `--import=${pathToFileURL(file).href}`];
+    return spawnSync(process.execPath, [tsx, "handler.ts"], {
+      cwd: example,
+      env: { ...process.env, ...env, NODE_OPTIONS: nodeOptions.filter(Boolean).join(" ") },
+      encoding: "utf8",
+      timeout: 30000,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a listen failure other than a port in use exits with one line naming the port and the error", () => {
+  // Fail the listen call the way a refused bind would, without binding.
+  const run = runWithPreload(
+    `import { Server } from "node:http";
+Server.prototype.listen = function () {
+  process.nextTick(() => this.emit("error", Object.assign(new Error("listen EACCES: permission denied"), { code: "EACCES" })));
+  return this;
+};
+`,
+    { PORT: "3999" }
+  );
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.equal(run.stdout, "", "no listening message for a port the server could not bind");
+  assert.deepEqual(run.stderr.trim().split("\n"), ["Cannot listen on port 3999: listen EACCES: permission denied"]);
+});
+
+test("a server error after the server is listening is not reported as a listen failure", async () => {
+  // Raise an accept failure once the server has started listening.
+  const errorPort = await freePort();
+  const run = runWithPreload(
+    `import { Server } from "node:http";
+const listen = Server.prototype.listen;
+Server.prototype.listen = function (...args) {
+  this.once("listening", () =>
+    setImmediate(() => this.emit("error", Object.assign(new Error("accept EMFILE"), { code: "EMFILE" })))
+  );
+  return listen.apply(this, args);
+};
+`,
+    { PORT: String(errorPort) }
+  );
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.match(run.stdout, /listening on port/, "the error came after the server started listening");
+  assert.deepEqual(run.stderr.trim().split("\n"), [`Server error on port ${errorPort}: accept EMFILE`]);
 });
 
 test("malformed JSON without a bearer token gets 401 and no audit line", async () => {

@@ -34,6 +34,13 @@ test("README and example sources link no private repository or missing page", ()
   }
 });
 
+test(".gitignore excludes environment, key and secrets files", () => {
+  const patterns = readFileSync(join(root, ".gitignore"), "utf8").split("\n").map((l) => l.trim());
+  for (const pattern of [".env", ".env.*", "*.key", "*.pem", "secrets.json"]) {
+    assert.ok(patterns.includes(pattern), `.gitignore lists ${pattern}`);
+  }
+});
+
 test("npm test at the repository root installs every example and runs every test file", () => {
   const script = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts?.test ?? "";
   const examples = readdirSync(join(root, "examples")).filter((name) =>
