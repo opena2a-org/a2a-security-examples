@@ -82,15 +82,38 @@ function stopServer(proc, signal = "SIGTERM") {
   }
 }
 
+// Servers spawnExample has started whose output pipes are still open. The pipes
+// close only once tsx and the server it started have both exited.
+const started = new Set();
+
 // Start tsx and the example. On POSIX tsx leads a process group of its own, so
 // stopServer reaches the server tsx starts without tsx passing a signal on.
 function spawnExample(env, cwd = example) {
-  return spawn(process.execPath, [tsx, "handler.ts"], {
+  const proc = spawn(process.execPath, [tsx, "handler.ts"], {
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
+  if (proc.pid !== undefined) {
+    started.add(proc);
+    proc.once("close", () => started.delete(proc));
+  }
+  return proc;
+}
+
+// Ctrl-C signals only the terminal's foreground process group, which the
+// servers have left, and an interrupted run never reaches the after() hook or
+// the finally blocks that stop them. So stop every server still running, then
+// let the signal end this process as it would have. On Windows the servers
+// share the console and receive Ctrl-C themselves.
+if (process.platform !== "win32") {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.once(signal, () => {
+      for (const proc of started) stopServer(proc);
+      process.kill(process.pid, signal);
+    });
+  }
 }
 
 // Wait for promise, and fail with message after ms instead of waiting forever.
@@ -177,6 +200,24 @@ function groupRunning(pid) {
     if (err.code === "ESRCH") return false;
     throw err;
   }
+}
+
+// The process groups, other than its own, of the processes descended from pid.
+function descendantGroups(pid) {
+  const ps = spawnSync("ps", ["-A", "-o", "pid=,ppid=,pgid="], { encoding: "utf8" });
+  if (ps.error) throw ps.error;
+  const rows = ps.stdout.trim().split("\n").map((line) => line.trim().split(/\s+/).map(Number));
+  const tree = new Set([pid]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [child, parent] of rows) {
+      if (tree.has(parent) && !tree.has(child)) {
+        tree.add(child);
+        grew = true;
+      }
+    }
+  }
+  return new Set(rows.filter(([child, , group]) => tree.has(child) && group !== pid).map(([, , group]) => group));
 }
 
 before(async () => {
@@ -712,6 +753,44 @@ test("stopping a server process that could not be spawned does nothing instead o
   assert.equal(proc.pid, undefined, "a process that could not be spawned has no pid");
   assert.doesNotThrow(() => stopServer(proc));
 });
+
+test(
+  "interrupting a test run stops the servers it started",
+  { skip: process.platform === "win32" && "on Windows the servers share the console and receive Ctrl-C themselves" },
+  async () => {
+    // Run the stalled-upload test alone in a process group of its own, as a
+    // shell runs a job, and once the run has started the main server and the
+    // stalled-upload server, send SIGINT to that group, as Ctrl-C does.
+    const env = { ...process.env };
+    // Left set, the nested run reports to this run instead of running on its own.
+    delete env.NODE_TEST_CONTEXT;
+    const run = spawn(
+      process.execPath,
+      ["--test", "--test-name-pattern=^an upload that stalls", fileURLToPath(import.meta.url)],
+      { env, stdio: "ignore", detached: true }
+    );
+    const exited = new Promise((resolve) => run.once("exit", resolve));
+    let groups = new Set();
+    try {
+      for (let i = 0; i < 600 && groups.size < 2; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        groups = descendantGroups(run.pid);
+      }
+      assert.equal(groups.size, 2, "the run started the main server and the stalled-upload server");
+      process.kill(-run.pid, "SIGINT");
+      await within(exited, 10000, "the interrupted run did not exit within 10 seconds");
+      const running = () => [...groups].filter(groupRunning);
+      for (let i = 0; i < 100 && running().length > 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.deepEqual(running(), [], "no server the interrupted run started is still running");
+    } finally {
+      // Stop the run and whatever it left running, even when an assertion failed.
+      stopServer(run);
+      for (const pid of groups) stopServer({ pid });
+    }
+  }
+);
 
 test("malformed JSON without a bearer token gets 401 and no audit line", async () => {
   const seen = auditLines().length;
