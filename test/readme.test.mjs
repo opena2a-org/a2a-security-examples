@@ -175,21 +175,48 @@ test("README states the Node.js version npm test needs, as the root package.json
 // arrived in 18.1.
 const nodeTestAddedIn = { test: 0, before: 8, after: 8 };
 
+// The names an import declaration at the start of a line takes from node:test,
+// with either quote, a default import, renamed names and a list over several
+// lines. The default export is test(). A namespace import gives "*", as it does
+// not show which names the file uses.
+function namesImportedFromNodeTest(text) {
+  const names = [];
+  const declaration = /^import\s+(?:([\w$]+)\s*,?\s*)?(?:\{([^}]*)\}|(\*)\s*as\s+[\w$]+)?\s*from\s*["']node:test["']/gm;
+  for (const [, defaultName, list, namespace] of text.matchAll(declaration)) {
+    if (defaultName) names.push("test");
+    if (namespace) names.push("*");
+    for (const entry of (list ?? "").split(",").map((n) => n.trim()).filter(Boolean)) {
+      const name = entry.split(/\s+as\s+/)[0];
+      names.push(name === "default" ? "test" : name);
+    }
+  }
+  return names;
+}
+
 // The lowest Node.js 18 minor release that has node --test and every name the
 // test files import from node:test.
 function lowestMinorThatCanRunTheTests() {
   let minor = 1;
   for (const file of readdirSync(join(root, "test")).filter((name) => name.endsWith(".mjs"))) {
     const text = readFileSync(join(root, "test", file), "utf8");
-    for (const [, names] of text.matchAll(/^import \{([^}]*)\} from "node:test"/gm)) {
-      for (const name of names.split(",").map((n) => n.trim()).filter(Boolean)) {
-        assert.ok(name in nodeTestAddedIn, `test/${file} imports ${name} from node:test; add the release that added it`);
-        minor = Math.max(minor, nodeTestAddedIn[name]);
-      }
+    for (const name of namesImportedFromNodeTest(text)) {
+      assert.notEqual(name, "*", `test/${file} imports node:test as a namespace; import the names it uses instead`);
+      assert.ok(Object.hasOwn(nodeTestAddedIn, name), `test/${file} imports ${name} from node:test; add the release that added it`);
+      minor = Math.max(minor, nodeTestAddedIn[name]);
     }
   }
   return minor;
 }
+
+test("the node:test import reader finds names in every import form", () => {
+  assert.deepEqual(namesImportedFromNodeTest('import { test, before, after } from "node:test";\n'), ["test", "before", "after"]);
+  assert.deepEqual(namesImportedFromNodeTest("import { describe } from 'node:test';\n"), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('import test, { mock } from "node:test";\n'), ["test", "mock"]);
+  assert.deepEqual(namesImportedFromNodeTest("import run from 'node:test';\n"), ["test"]);
+  assert.deepEqual(namesImportedFromNodeTest('import {\n  it as check,\n  default as t,\n} from "node:test";\n'), ["it", "test"]);
+  assert.deepEqual(namesImportedFromNodeTest('import * as nt from "node:test";\n'), ["*"]);
+  assert.deepEqual(namesImportedFromNodeTest('import assert from "node:assert/strict";\nimport { test } from "node:test2";\n'), []);
+});
 
 test("README says the Node.js version for npm test is the lowest release tested, not a measured minimum", () => {
   // npm test cannot run on a release without node --test or without a name the
