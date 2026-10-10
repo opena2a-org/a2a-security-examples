@@ -320,19 +320,28 @@ test("a body cut off by a closed connection gets at most a bare 400 and a reques
   assert.deepEqual(audited[0].details, { status: 400, reason: "request.aborted" });
 });
 
-test("an upload that stalls until the request timeout gets a bare 408 and a request_rejected audit line", async () => {
-  // Node's request timeout is 300 seconds by default. Record the value the
-  // example runs with, then shorten it so the test does not wait that long.
-  // The headers timeout is shortened too: left above the request timeout, it
-  // is the one that applies.
-  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
-  const file = join(dir, "preload.mjs");
-  writeFileSync(
-    file,
-    `import { Server } from "node:http";
-const listen = Server.prototype.listen;
-Server.prototype.listen = function (...args) {
-  this.connectionsCheckingInterval = 100;
+// NODE_OPTIONS that load a CommonJS file before the example starts. Every
+// Node.js 18 release accepts --require in NODE_OPTIONS; 18.0 to 18.17 reject
+// --import there. NODE_OPTIONS is split on spaces, so the path is quoted.
+function requireOptions(file) {
+  const quoted = `"${file.replace(/[\\"]/g, "\\$&")}"`;
+  return [process.env.NODE_OPTIONS, `--require=${quoted}`].filter(Boolean).join(" ");
+}
+
+// Node's request timeout is 300 seconds by default. This preload records the
+// value the example runs with, then shortens it so the stalled-upload test
+// does not wait that long. The headers timeout is shortened too: left above
+// the request timeout, it is the one that applies. The interval between
+// connection checks is passed to createServer because some Node.js 18 releases
+// start the check when the server is created, not when it starts listening.
+const stallPreload = `const http = require("node:http");
+const createServer = http.createServer;
+http.createServer = function (...args) {
+  const options = typeof args[0] === "function" ? {} : args.shift();
+  return createServer({ ...options, connectionsCheckingInterval: 100 }, ...args);
+};
+const listen = http.Server.prototype.listen;
+http.Server.prototype.listen = function (...args) {
   this.once("listening", () => {
     process.stderr.write("requestTimeout " + this.requestTimeout + "\\n");
     this.headersTimeout = 500;
@@ -340,11 +349,14 @@ Server.prototype.listen = function (...args) {
   });
   return listen.apply(this, args);
 };
-`
-  );
+`;
+
+test("an upload that stalls until the request timeout gets a bare 408 and a request_rejected audit line", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  const file = join(dir, "preload.cjs");
+  writeFileSync(file, stallPreload);
   const stallPort = await freePort();
-  const nodeOptions = [process.env.NODE_OPTIONS, `--import=${pathToFileURL(file).href}`];
-  const env = { ...process.env, PORT: String(stallPort), NODE_OPTIONS: nodeOptions.filter(Boolean).join(" ") };
+  const env = { ...process.env, PORT: String(stallPort), NODE_OPTIONS: requireOptions(file) };
   delete env.AGENT_URL;
   const stalled = spawn(process.execPath, [tsx, "handler.ts"], { cwd: example, env });
   let log = "";
@@ -384,6 +396,54 @@ Server.prototype.listen = function (...args) {
     assert.deepEqual(audited()[0].details, { status: 408, reason: "request.aborted" });
   } finally {
     stalled.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the stalled-upload test loads its preload with --require, not --import", () => {
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const start = source.indexOf('test("an upload that stalls until the request timeout');
+  assert.ok(start >= 0, "this file has the stalled-upload test");
+  const stalledTest = source.slice(start, source.indexOf("\ntest(", start));
+  // Node.js 18.0 to 18.17 exit with "--import= is not allowed in NODE_OPTIONS".
+  assert.doesNotMatch(stalledTest, /--import/, "the stalled-upload test passes no --import in NODE_OPTIONS");
+  assert.match(stalledTest, /NODE_OPTIONS: requireOptions\(file\)/, "the stalled-upload test loads its preload with --require");
+});
+
+test("the stalled-upload preload sets the connection check interval when the server is created", () => {
+  // Some Node.js 18 releases start the check in the server's constructor. An
+  // interval set in listen comes too late there: the 408 takes 30 seconds.
+  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  try {
+    const file = join(dir, "preload.cjs");
+    writeFileSync(file, stallPreload);
+    const created = 'require("node:http").createServer(() => {}).connectionsCheckingInterval';
+    const run = spawnSync(process.execPath, ["-p", created], {
+      env: { ...process.env, NODE_OPTIONS: requireOptions(file) },
+      encoding: "utf8",
+      timeout: 30000,
+    });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(run.stdout, "100\n", "a server that is not listening yet has the shortened interval");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a preload path with a space or a quote reaches Node as one --require option", () => {
+  const dir = mkdtempSync(join(tmpdir(), "a2a preload-"));
+  try {
+    // Windows file names cannot contain a double quote.
+    const file = join(dir, process.platform === "win32" ? "pre load.cjs" : 'pre "load".cjs');
+    writeFileSync(file, 'process.stdout.write("preloaded\\n");\n');
+    const run = spawnSync(process.execPath, ["-e", ""], {
+      env: { ...process.env, NODE_OPTIONS: requireOptions(file) },
+      encoding: "utf8",
+      timeout: 30000,
+    });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(run.stdout, "preloaded\n");
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
