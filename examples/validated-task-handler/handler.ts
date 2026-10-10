@@ -19,7 +19,18 @@ import { randomUUID } from "crypto";
 import { RateLimiterMemory } from "rate-limiter-flexible";
 
 const app = express();
-const port = parseInt(process.env.PORT || "3000", 10);
+const port = parsePort(process.env.PORT || "3000");
+
+// Exit with one line naming the variable instead of the stack trace that
+// app.listen throws for a port it cannot use.
+function parsePort(value: string): number {
+  const parsed = /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!(parsed >= 1 && parsed <= 65535)) {
+    console.error(`PORT must be a number from 1 to 65535; got ${JSON.stringify(value)}`);
+    process.exit(1);
+  }
+  return parsed;
+}
 
 // --- Rate Limiting ---
 
@@ -256,6 +267,11 @@ app.get("/.well-known/agent.json", (_req, res) => {
 });
 
 // --- Error Handling ---
+
+// Unknown routes would otherwise get Express's default HTML 404 page.
+app.use((_req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
 
 // Errors raised before a route handler runs, such as a body that is not valid
 // JSON, would otherwise reach Express's default handler, which answers with an
