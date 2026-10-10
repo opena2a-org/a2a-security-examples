@@ -145,7 +145,8 @@ test("step 3 says a body the parser cannot read gets Invalid request body, not I
   assert.match(step, new RegExp(`\\b413\\b[^,]*over ${limit[1]} MB`), "step 3 gives 413 for a body over the size limit");
   assert.match(step, /\b415\b[^,]*unsupported encoding or charset/, "step 3 gives 415 for an unsupported encoding or charset");
   assert.match(step, /\b400\b[^,]*compressed body that does not inflate/, "step 3 gives 400 for a compressed body that does not inflate");
-  assert.match(step, /bare HTTP 400 with no body[^,]*connection closes before the whole body arrives/, "step 3 says a body cut off by a closed connection gets at most a bare 400");
+  assert.match(step, /bare HTTP 400 with no body when the client closes the connection before the whole body arrives/, "step 3 limits the bare 400 to a client that closes the connection");
+  assert.match(step, /bare HTTP 408 with no body when the upload stalls until Node's request timeout/, "step 3 names the bare 408 for a stalled upload");
 });
 
 test("README names the command that runs the tests", () => {

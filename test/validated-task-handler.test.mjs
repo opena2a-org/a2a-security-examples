@@ -64,6 +64,8 @@ const validTask = JSON.stringify({
 // Stop tsx and the server process it starts. On POSIX they share the process
 // group startServer creates, so one signal reaches both.
 function stopServer(proc) {
+  // A process that could not be spawned has no pid and nothing to stop.
+  if (proc.pid === undefined) return;
   try {
     if (process.platform === "win32") proc.kill();
     else process.kill(-proc.pid, "SIGTERM");
@@ -76,11 +78,11 @@ function stopServer(proc) {
 // listening. The process and its pipes are unref'd: Node.js 18 runs a
 // top-level after() hook only once nothing keeps the test process alive, so a
 // referenced server would keep the after() hook that stops it from running.
-async function startServer(serverPort, onOutput = () => {}) {
+async function startServer(serverPort, onOutput = () => {}, cwd = example) {
   const env = { ...process.env, PORT: String(serverPort) };
   delete env.AGENT_URL;
   const proc = spawn(process.execPath, [tsx, "handler.ts"], {
-    cwd: example,
+    cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
@@ -109,6 +111,11 @@ async function startServer(serverPort, onOutput = () => {}) {
     proc.once("exit", (code) => {
       clearTimeout(timer);
       reject(new Error(`server exited with ${code}:\n${seen}`));
+    });
+    // A process that cannot be spawned emits error, never exit.
+    proc.once("error", (err) => {
+      clearTimeout(timer);
+      reject(new Error(`server did not start: ${err.message}\n${seen}`));
     });
   });
   return proc;
@@ -359,6 +366,7 @@ test("an upload that stalls until the request timeout gets a bare 408 and a requ
   const env = { ...process.env, PORT: String(stallPort), NODE_OPTIONS: requireOptions(file) };
   delete env.AGENT_URL;
   const stalled = spawn(process.execPath, [tsx, "handler.ts"], { cwd: example, env });
+  const closed = new Promise((resolve) => stalled.once("close", resolve));
   let log = "";
   stalled.stdout.on("data", (chunk) => (log += chunk));
   stalled.stderr.on("data", (chunk) => (log += chunk));
@@ -395,7 +403,11 @@ test("an upload that stalls until the request timeout gets a bare 408 and a requ
     // parser's request.aborted error carries.
     assert.deepEqual(audited()[0].details, { status: 408, reason: "request.aborted" });
   } finally {
+    // tsx passes the signal on to the server. Wait until both have exited and
+    // their pipes have closed, so no handle of this process closes while a
+    // later test counts the ones that keep the test process alive.
     stalled.kill();
+    await closed;
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -546,16 +558,20 @@ test("a server the tests start does not keep the test process alive, and stoppin
   // Processes and pipes that keep this process alive; unref'd ones are not listed.
   const held = () => process.getActiveResourcesInfo().filter((r) => r === "ProcessWrap" || r === "PipeWrap").length;
   const serverPort = await freePort();
-  // Count on both sides of the start without letting the event loop run in
-  // between: startServer spawns and unrefs the server before its first await,
-  // and a process an earlier test stopped closes its handles only when the
-  // event loop runs.
+  // Count right after the spawn, before startServer's first await, and again
+  // once the server is listening, so a reference taken at either point shows.
+  // The earlier test that starts a server waits for it to close, so no handle
+  // of a stopped process closes while this test counts.
   const baseline = held();
   const starting = startServer(serverPort);
   const added = held() - baseline;
   const extra = await starting;
+  const listening = held() - baseline;
   try {
     assert.equal(added, 0, "starting the server adds no process or pipe that keeps the test process alive");
+    assert.equal(listening, 0, "the listening server holds no process or pipe that keeps the test process alive");
+    // Without a group led by tsx, stopServer's signal reaches no process.
+    if (process.platform !== "win32") assert.ok(groupRunning(extra.pid), "tsx leads its own process group");
   } finally {
     stopServer(extra);
   }
@@ -564,6 +580,14 @@ test("a server the tests start does not keep the test process alive, and stoppin
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal(groupRunning(extra.pid), false, "tsx and the server it started have exited");
+});
+
+test("a server that cannot be spawned fails the start at once instead of hanging", { timeout: 10000 }, async () => {
+  // A missing working directory makes the spawn itself fail.
+  await assert.rejects(
+    startServer(await freePort(), undefined, join(example, "missing")),
+    /^Error: server did not start: spawn .+ ENOENT/
+  );
 });
 
 test("malformed JSON without a bearer token gets 401 and no audit line", async () => {
