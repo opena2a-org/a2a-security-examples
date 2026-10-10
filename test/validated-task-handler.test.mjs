@@ -404,8 +404,10 @@ test("an upload that stalls until the request timeout gets a bare 408 and a requ
     assert.deepEqual(audited()[0].details, { status: 408, reason: "request.aborted" });
   } finally {
     // tsx passes the signal on to the server. Wait until both have exited and
-    // their pipes have closed, so no handle of this process closes while a
-    // later test counts the ones that keep the test process alive.
+    // the stdout and stderr pipes have closed. The process handle and stdin
+    // pipe finish closing only when the event loop runs again; the test that
+    // counts the handles keeping the test process alive lets one timer turn
+    // pass before it counts.
     stalled.kill();
     await closed;
     rmSync(dir, { recursive: true, force: true });
@@ -560,8 +562,10 @@ test("a server the tests start does not keep the test process alive, and stoppin
   const serverPort = await freePort();
   // Count right after the spawn, before startServer's first await, and again
   // once the server is listening, so a reference taken at either point shows.
-  // The earlier test that starts a server waits for it to close, so no handle
-  // of a stopped process closes while this test counts.
+  // The process handle and stdin pipe of a process an earlier test stopped
+  // are still listed after its close event and finish closing only when the
+  // event loop runs, so let one timer turn pass before the first count.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const baseline = held();
   const starting = startServer(serverPort);
   const added = held() - baseline;
