@@ -61,16 +61,48 @@ const validTask = JSON.stringify({
   task: { message: { role: "user", parts: [{ type: "text", text: "Hello" }] } },
 });
 
-// Stop tsx and the server process it starts. On POSIX they share the process
-// group startServer creates, so one signal reaches both.
-function stopServer(proc) {
+// Stop tsx and the server process it starts without relying on tsx to pass a
+// signal on. On POSIX they share the process group spawnExample creates, so one
+// signal reaches both. On Windows ChildProcess.kill() ends tsx alone and the
+// server keeps running with tsx's stdout and stderr open, so taskkill ends the
+// whole process tree. Windows has no signals; signal applies on POSIX only.
+function stopServer(proc, signal = "SIGTERM") {
   // A process that could not be spawned has no pid and nothing to stop.
   if (proc.pid === undefined) return;
+  if (process.platform === "win32") {
+    // A tree that has already exited makes taskkill fail with nothing to stop.
+    const run = spawnSync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { stdio: "ignore" });
+    if (run.error) throw run.error;
+    return;
+  }
   try {
-    if (process.platform === "win32") proc.kill();
-    else process.kill(-proc.pid, "SIGTERM");
+    process.kill(-proc.pid, signal);
   } catch (err) {
     if (err.code !== "ESRCH") throw err;
+  }
+}
+
+// Start tsx and the example. On POSIX tsx leads a process group of its own, so
+// stopServer reaches the server tsx starts without tsx passing a signal on.
+function spawnExample(env, cwd = example) {
+  return spawn(process.execPath, [tsx, "handler.ts"], {
+    cwd,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
+}
+
+// Wait for promise, and fail with message after ms instead of waiting forever.
+async function within(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -81,12 +113,7 @@ function stopServer(proc) {
 async function startServer(serverPort, onOutput = () => {}, cwd = example) {
   const env = { ...process.env, PORT: String(serverPort) };
   delete env.AGENT_URL;
-  const proc = spawn(process.execPath, [tsx, "handler.ts"], {
-    cwd,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: process.platform !== "win32",
-  });
+  const proc = spawnExample(env, cwd);
   proc.unref();
   proc.stdout.unref();
   proc.stderr.unref();
@@ -367,7 +394,7 @@ test("an upload that stalls until the request timeout gets a bare 408 and a requ
   const stallPort = await freePort();
   const env = { ...process.env, PORT: String(stallPort), NODE_OPTIONS: requireOptions(file) };
   delete env.AGENT_URL;
-  const stalled = spawn(process.execPath, [tsx, "handler.ts"], { cwd: example, env });
+  const stalled = spawnExample(env);
   const closed = new Promise((resolve) => stalled.once("close", resolve));
   let log = "";
   stalled.stdout.on("data", (chunk) => (log += chunk));
@@ -405,15 +432,27 @@ test("an upload that stalls until the request timeout gets a bare 408 and a requ
     // parser's request.aborted error carries.
     assert.deepEqual(audited()[0].details, { status: 408, reason: "request.aborted" });
   } finally {
-    // tsx passes the signal on to the server. Wait until both have exited and
-    // the stdout and stderr pipes have closed. The process handle and stdin
-    // pipe finish closing only when the event loop runs again; the test that
-    // counts the handles keeping the test process alive lets one timer turn
-    // pass before it counts.
-    stalled.kill();
-    await closed;
+    // stopServer ends tsx and the server without tsx passing a signal on. Wait
+    // until both have exited and the stdout and stderr pipes have closed, and
+    // fail rather than hang if they do not. The process handle finishes
+    // closing only when the event loop runs again; the test that counts the
+    // handles keeping the test process alive lets one timer turn pass before
+    // it counts.
+    stopServer(stalled);
+    await within(closed, 10000, `tsx and the server it started did not exit within 10 seconds:\n${log}`);
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("stopping a server ends tsx and the server it started even when tsx cannot pass the signal on", async () => {
+  // SIGKILL ends tsx at once, as ChildProcess.kill() ends it on Windows, so tsx
+  // passes nothing on. A server left running keeps tsx's stdout and stderr
+  // open, the close event never comes, and a test that waits for it never
+  // ends. Windows has no signals; there stopServer ends the process tree.
+  const proc = await startServer(await freePort());
+  const closed = new Promise((resolve) => proc.once("close", resolve));
+  stopServer(proc, "SIGKILL");
+  await within(closed, 10000, "tsx and the server it started still hold the output pipes 10 seconds after stopServer");
 });
 
 test("the stalled-upload test loads its preload with --require, not --import", () => {
@@ -590,9 +629,9 @@ test("a server the tests start does not keep the test process alive, and stoppin
   const serverPort = await freePort();
   // Count right after the spawn, before startServer's first await, and again
   // once the server is listening, so a reference taken at either point shows.
-  // The process handle and stdin pipe of a process an earlier test stopped
-  // are still listed after its close event and finish closing only when the
-  // event loop runs, so let one timer turn pass before the first count.
+  // The process handle of a process an earlier test stopped is still listed
+  // after its close event and finishes closing only when the event loop runs,
+  // so let one timer turn pass before the first count.
   await new Promise((resolve) => setTimeout(resolve, 0));
   const baseline = held();
   const starting = startServer(serverPort);
