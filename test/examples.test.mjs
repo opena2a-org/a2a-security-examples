@@ -60,8 +60,13 @@ test("the repository root and every example have a lock file that matches their 
     assert.ok(lock.lockfileVersion >= 1, `${dir}package-lock.json has lockfileVersion >= 1`);
     assert.equal(lock.name, pkg.name, `${dir}package-lock.json names the package in ${dir}package.json`);
     const locked = lock.packages?.[""] ?? {};
-    for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
-      assert.deepEqual(locked[field] ?? {}, pkg[field] ?? {}, `${dir}package-lock.json records the ${field} of ${dir}package.json`);
+    // The fields npm install copies from package.json into the lock file's root
+    // entry (it leaves out empty objects); a lock file missing one of them is
+    // rewritten by the next npm install.
+    const recorded = (value) =>
+      value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0 ? undefined : value;
+    for (const field of ["version", "license", "engines", "os", "cpu", "dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+      assert.deepEqual(recorded(locked[field]), recorded(pkg[field]), `${dir}package-lock.json records the ${field} of ${dir}package.json`);
     }
   }
 });
