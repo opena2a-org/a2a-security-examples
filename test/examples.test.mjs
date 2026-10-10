@@ -41,6 +41,27 @@ test(".gitignore excludes environment, key and secrets files", () => {
   }
 });
 
+test("the repository root and every example have a lock file that matches their package.json, so npm ci can install them", () => {
+  const dirs = [
+    "",
+    ...readdirSync(join(root, "examples"))
+      .filter((name) => existsSync(join(root, "examples", name, "package.json")))
+      .map((name) => `examples/${name}/`),
+  ];
+  for (const dir of dirs) {
+    const lockPath = join(root, dir, "package-lock.json");
+    assert.ok(existsSync(lockPath), `${dir}package-lock.json exists`);
+    const pkg = JSON.parse(readFileSync(join(root, dir, "package.json"), "utf8"));
+    const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+    assert.ok(lock.lockfileVersion >= 1, `${dir}package-lock.json has lockfileVersion >= 1`);
+    assert.equal(lock.name, pkg.name, `${dir}package-lock.json names the package in ${dir}package.json`);
+    const locked = lock.packages?.[""] ?? {};
+    for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+      assert.deepEqual(locked[field] ?? {}, pkg[field] ?? {}, `${dir}package-lock.json records the ${field} of ${dir}package.json`);
+    }
+  }
+});
+
 test("npm test at the repository root installs every example and runs every test file", () => {
   const script = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts?.test ?? "";
   const examples = readdirSync(join(root, "examples")).filter((name) =>
