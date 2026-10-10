@@ -8,9 +8,9 @@
  * - Audit logging
  * - Proper error handling (no internal detail leaks)
  *
- * Test against known A2A attacks:
- * https://agentpwn.com/attacks/a2a-attack/task-injection
- * https://agentpwn.com/attacks/a2a-attack/response-poisoning
+ * Test against known A2A attacks, including task injection and response
+ * poisoning:
+ * https://agentpwn.com/attacks/a2a-attack
  */
 
 import express from "express";
