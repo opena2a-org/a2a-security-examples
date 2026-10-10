@@ -1,4 +1,5 @@
-// README checks. Run with: node --test test/readme.test.mjs
+// README checks. Run with: node --test test/readme.test.mjs (npm test at the
+// repository root runs every test file).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -85,8 +86,21 @@ test("the bearer token sentence names every token the handler rejects", () => {
   }
 });
 
-test("README does not link repositories that are not public", () => {
-  assert.doesNotMatch(readme, /github\.com\/opena2a-org\/trapmyagent/i, "the trapmyagent repository returns 404 to visitors");
+test("the audit sentence names every kind of body the parser rejects", () => {
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
+  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
+  for (const reason of ["not valid JSON", `over ${limit[1]} MB`, "unsupported encoding"]) {
+    assert.ok(rejected.includes(reason), `README says request_rejected covers a body ${reason}`);
+  }
+});
+
+test("README names the command that runs the tests", () => {
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.ok(pkg.scripts?.test, "the root package.json defines npm test");
+  assert.match(readme, /`npm test` from the repository root/);
 });
 
 test("the license section matches the LICENSE file", () => {

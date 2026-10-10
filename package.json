@@ -1,0 +1,9 @@
+{
+  "name": "a2a-security-examples",
+  "private": true,
+  "description": "Security examples for Agent2Agent (A2A) protocol agents",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "npm ci --prefix examples/validated-task-handler --no-audit --no-fund && node --test test/readme.test.mjs test/examples.test.mjs test/validated-task-handler.test.mjs"
+  }
+}

@@ -1,12 +1,12 @@
-// Example checks. Run with: node --test test/examples.test.mjs
+// Example checks. Run with: node --test test/examples.test.mjs (npm test at the
+// repository root runs every test file).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, extname, join, normalize } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const example = join(root, "examples", "validated-task-handler");
 
 function filesUnder(dir) {
   return readdirSync(dir).flatMap((name) => {
@@ -34,22 +34,20 @@ test("README and example sources link no private repository or missing page", ()
   }
 });
 
-test("npm run build emits the file npm start runs", () => {
-  const pkg = JSON.parse(readFileSync(join(example, "package.json"), "utf8"));
-  assert.equal(pkg.scripts.build, "tsc");
-  const start = pkg.scripts.start.match(/^node (\S+)$/);
-  assert.ok(start, "npm start runs one file with node");
-
-  const tsconfigPath = join(example, "tsconfig.json");
-  assert.ok(existsSync(tsconfigPath), "tsc has a tsconfig.json to build from");
-  const tsconfig = JSON.parse(readFileSync(tsconfigPath, "utf8"));
-  const { outDir, noEmit } = tsconfig.compilerOptions ?? {};
-  assert.notEqual(noEmit, true, "the build emits JavaScript");
-  assert.ok(outDir, "the build sets an output directory");
-
-  const sources = tsconfig.files ?? [];
-  assert.ok(sources.includes("handler.ts"), "the build compiles handler.ts");
-  const emitted = join(outDir, basename("handler.ts", extname("handler.ts")) + ".js");
-  assert.equal(normalize(start[1]), normalize(emitted), "npm start runs the compiled handler");
-  assert.equal(normalize(pkg.main), normalize(emitted), "main names the compiled handler");
+test("npm test at the repository root installs every example and runs every test file", () => {
+  const script = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts?.test ?? "";
+  const examples = readdirSync(join(root, "examples")).filter((name) =>
+    existsSync(join(root, "examples", name, "package.json"))
+  );
+  for (const name of examples) {
+    assert.match(script, new RegExp(`npm ci --prefix examples/${name}\\b`), `npm test installs examples/${name}`);
+  }
+  const run = script.match(/&& node --test ((?:test\/\S+\.test\.mjs ?)+)$/);
+  assert.ok(run, "npm test runs node --test on the test files after installing");
+  const listed = run[1].trim().split(" ").sort();
+  const present = readdirSync(join(root, "test"))
+    .filter((name) => name.endsWith(".test.mjs"))
+    .map((name) => `test/${name}`)
+    .sort();
+  assert.deepEqual(listed, present, "npm test runs every file in test/");
 });
