@@ -106,6 +106,21 @@ async function within(promise, ms, message) {
   }
 }
 
+// Wait for closed, the close event of proc, and fail with message after ms
+// instead of waiting forever. When the wait fails, proc and its stdout and
+// stderr pipes are unref'd: a process still running would otherwise keep the
+// test process alive, and the run would never end or print the failure.
+async function closedWithin(proc, closed, ms, message) {
+  try {
+    await within(closed, ms, message);
+  } catch (err) {
+    proc.unref();
+    proc.stdout?.unref();
+    proc.stderr?.unref();
+    throw err;
+  }
+}
+
 // Start the example on a port and resolve with its process once it is
 // listening. The process and its pipes are unref'd: Node.js 18 runs a
 // top-level after() hook only once nothing keeps the test process alive, so a
@@ -146,6 +161,11 @@ async function startServer(serverPort, onOutput = () => {}, cwd = example) {
     });
   });
   return proc;
+}
+
+// Processes and pipes that keep this process alive; unref'd ones are not listed.
+function heldHandles() {
+  return process.getActiveResourcesInfo().filter((r) => r === "ProcessWrap" || r === "PipeWrap").length;
 }
 
 // Whether any process in the group led by pid is still running.
@@ -437,10 +457,32 @@ test("an upload that stalls until the request timeout gets a bare 408 and a requ
     // fail rather than hang if they do not. The process handle finishes
     // closing only when the event loop runs again; the test that counts the
     // handles keeping the test process alive lets one timer turn pass before
-    // it counts.
-    stopServer(stalled);
-    await within(closed, 10000, `tsx and the server it started did not exit within 10 seconds:\n${log}`);
-    rmSync(dir, { recursive: true, force: true });
+    // it counts. The preload directory is removed even when the wait fails.
+    try {
+      stopServer(stalled);
+      await closedWithin(stalled, closed, 10000, `tsx and the server it started did not exit within 10 seconds:\n${log}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a process that has not closed when the wait fails no longer keeps the test process alive", async () => {
+  // The process is left running. Were it and its output pipes still
+  // referenced, the test run would neither end nor print the failure.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const baseline = heldHandles();
+  const proc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const closed = new Promise((resolve) => proc.once("close", resolve));
+  try {
+    assert.ok(heldHandles() > baseline, "a running process with output pipes keeps the test process alive");
+    await assert.rejects(closedWithin(proc, closed, 200, "still running"), /^Error: still running$/);
+    assert.equal(heldHandles(), baseline, "the process and its pipes no longer keep the test process alive");
+  } finally {
+    proc.kill("SIGKILL");
+    await within(closed, 10000, "the process did not exit within 10 seconds of SIGKILL");
   }
 });
 
@@ -624,8 +666,6 @@ Server.prototype.listen = function (...args) {
 });
 
 test("a server the tests start does not keep the test process alive, and stopping it ends tsx and the server", async () => {
-  // Processes and pipes that keep this process alive; unref'd ones are not listed.
-  const held = () => process.getActiveResourcesInfo().filter((r) => r === "ProcessWrap" || r === "PipeWrap").length;
   const serverPort = await freePort();
   // Count right after the spawn, before startServer's first await, and again
   // once the server is listening, so a reference taken at either point shows.
@@ -633,11 +673,11 @@ test("a server the tests start does not keep the test process alive, and stoppin
   // after its close event and finishes closing only when the event loop runs,
   // so let one timer turn pass before the first count.
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const baseline = held();
+  const baseline = heldHandles();
   const starting = startServer(serverPort);
-  const added = held() - baseline;
+  const added = heldHandles() - baseline;
   const extra = await starting;
-  const listening = held() - baseline;
+  const listening = heldHandles() - baseline;
   try {
     assert.equal(added, 0, "starting the server adds no process or pipe that keeps the test process alive");
     assert.equal(listening, 0, "the listening server holds no process or pipe that keeps the test process alive");
