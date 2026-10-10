@@ -212,23 +212,25 @@ test("a compressed body that does not inflate gets a JSON 400 and a request_reje
   }
 });
 
+// A task request that declares 100 body bytes and carries only the first 6.
+const truncatedTask = [
+  "POST /tasks HTTP/1.1",
+  "Host: 127.0.0.1",
+  "Authorization: Bearer demo-token",
+  "Content-Type: application/json",
+  "Content-Length: 100",
+  "",
+  '{"a":1',
+].join("\r\n");
+
 test("a body cut off by a closed connection gets at most a bare 400 and a request_rejected audit line", async () => {
   const seen = auditLines().length;
-  const head = [
-    "POST /tasks HTTP/1.1",
-    "Host: 127.0.0.1",
-    "Authorization: Bearer demo-token",
-    "Content-Type: application/json",
-    "Content-Length: 100",
-    "",
-    "",
-  ].join("\r\n");
   // Send 6 of the 100 bytes, then stop sending. The half-closed socket can
   // still read whatever the server answers before it closes the connection.
   const reply = await new Promise((resolve, reject) => {
     let data = "";
     const socket = connect(port, "127.0.0.1", () => {
-      socket.write(head + '{"a":1');
+      socket.write(truncatedTask);
       setTimeout(() => socket.end(), 300);
     });
     socket.setEncoding("utf8");
@@ -246,6 +248,72 @@ test("a body cut off by a closed connection gets at most a bare 400 and a reques
   assert.equal(audited.length, 1, `one audit line for the truncated body:\n${output}`);
   assert.equal(audited[0].action, "request_rejected");
   assert.deepEqual(audited[0].details, { status: 400, reason: "request.aborted" });
+});
+
+test("an upload that stalls until the request timeout gets a bare 408 and a request_rejected audit line", async () => {
+  // Node's request timeout is 300 seconds by default. Record the value the
+  // example runs with, then shorten it so the test does not wait that long.
+  // The headers timeout is shortened too: left above the request timeout, it
+  // is the one that applies.
+  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  const file = join(dir, "preload.mjs");
+  writeFileSync(
+    file,
+    `import { Server } from "node:http";
+const listen = Server.prototype.listen;
+Server.prototype.listen = function (...args) {
+  this.connectionsCheckingInterval = 100;
+  this.once("listening", () => {
+    process.stderr.write("requestTimeout " + this.requestTimeout + "\\n");
+    this.headersTimeout = 500;
+    this.requestTimeout = 1000;
+  });
+  return listen.apply(this, args);
+};
+`
+  );
+  const stallPort = await freePort();
+  const nodeOptions = [process.env.NODE_OPTIONS, `--import=${pathToFileURL(file).href}`];
+  const env = { ...process.env, PORT: String(stallPort), NODE_OPTIONS: nodeOptions.filter(Boolean).join(" ") };
+  delete env.AGENT_URL;
+  const stalled = spawn(process.execPath, [tsx, "handler.ts"], { cwd: example, env });
+  let log = "";
+  stalled.stdout.on("data", (chunk) => (log += chunk));
+  stalled.stderr.on("data", (chunk) => (log += chunk));
+  const logLines = () => log.split("\n").slice(0, -1);
+  const audited = () => logLines().filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+  try {
+    for (let i = 0; i < 600 && !log.includes("listening on port"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.match(log, /listening on port/, `server did not start:\n${log}`);
+    assert.ok(logLines().includes("requestTimeout 300000"), `the example runs with Node's default request timeout:\n${log}`);
+    // Send 6 of the 100 bytes, then send nothing more and keep the connection open.
+    const reply = await new Promise((resolve, reject) => {
+      let data = "";
+      const socket = connect(stallPort, "127.0.0.1", () => socket.write(truncatedTask));
+      socket.setEncoding("utf8");
+      socket.setTimeout(10000, () => socket.destroy(new Error(`no reply within 10 seconds:\n${data}`)));
+      socket.on("data", (chunk) => (data += chunk));
+      socket.on("error", reject);
+      socket.on("close", () => resolve(data));
+    });
+    // A 408 status line and headers with no body after them.
+    assert.match(
+      reply,
+      /^HTTP\/1\.1 408 Request Timeout\r\n(?:[^\r\n]+\r\n)*\r\n$/,
+      `the client gets a bare HTTP 408 with no body:\n${reply}`
+    );
+    for (let i = 0; i < 100 && audited().length < 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(audited().length, 1, `one audit line for the stalled body:\n${log}`);
+    assert.equal(audited()[0].action, "request_rejected");
+    assert.equal(audited()[0].details.reason, "request.aborted");
+  } finally {
+    stalled.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("unknown routes get a JSON 404, not the framework's HTML page", async () => {
