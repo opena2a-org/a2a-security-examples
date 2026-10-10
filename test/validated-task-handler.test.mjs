@@ -232,6 +232,17 @@ function descendantGroups(pid) {
   return new Set(rows.filter(([child, , group]) => tree.has(child) && group !== pid).map(([, , group]) => group));
 }
 
+// The process groups that have a process that has not exited. A process that
+// has exited stays listed, in state Z, until it is reaped. Once its parent has
+// exited, that is up to whichever process adopts it, and in a container whose
+// first process is not an init process, that process never reaps it.
+function liveGroups() {
+  const ps = spawnSync("ps", ["-A", "-o", "pgid=,stat="], { encoding: "utf8" });
+  if (ps.error) throw ps.error;
+  const rows = ps.stdout.trim().split("\n").map((line) => line.trim().split(/\s+/));
+  return new Set(rows.filter(([, stat]) => !stat.startsWith("Z")).map(([group]) => Number(group)));
+}
+
 before(async () => {
   assert.ok(existsSync(tsx), "run npm ci in examples/validated-task-handler first");
   port = await freePort();
@@ -826,7 +837,11 @@ readSync(0, Buffer.alloc(1));
 
 test(
   "interrupting a test run stops the servers it started",
-  { skip: process.platform === "win32" && "on Windows the servers share the console and receive Ctrl-C themselves" },
+  {
+    skip:
+      (process.platform === "win32" && "on Windows the servers share the console and receive Ctrl-C themselves") ||
+      psUnavailable(),
+  },
   async () => {
     // Run the stalled-upload test alone in a process group of its own, as a
     // shell runs a job, and once the run has started the main server and the
@@ -849,7 +864,11 @@ test(
       assert.equal(groups.size, 2, "the run started the main server and the stalled-upload server");
       process.kill(-run.pid, "SIGINT");
       await within(exited, 10000, "the interrupted run did not exit within 10 seconds");
-      const running = () => [...groups].filter(groupRunning);
+      // A server that has exited counts as stopped while it waits to be reaped.
+      const running = () => {
+        const live = liveGroups();
+        return [...groups].filter((pid) => live.has(pid));
+      };
       for (let i = 0; i < 100 && running().length > 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
