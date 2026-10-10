@@ -89,10 +89,21 @@ function recordedBin({ name, bin }) {
 // measured with npm 11.19.0. It leaves out a field whose value is falsy, an
 // empty object or an empty array, except devDependencies, which it leaves out
 // only when falsy. It records a license object as its type, a funding string
-// as an object with that url, bin as recordedBin returns it, dependencies
-// without the packages optionalDependencies also lists, and bundleDependencies
-// as a list of names, read from bundledDependencies when it is not set.
+// as an object with that url, bin as recordedBin returns it, hasInstallScript
+// as true when that field is truthy or a preinstall, install or postinstall
+// script is a non-empty string, dependencies without the packages
+// optionalDependencies also lists, and bundleDependencies as a list of names,
+// read from bundledDependencies when it is not set.
+//
+// Three measured cases are not handled. In each, npm 11.19.0 can record
+// another bin than this function returns, and the lock file check then fails
+// for a lock file npm has just written. With directories.bin and no bin, npm
+// fills bin from that directory, which this function does not read. A colon
+// in a bin path becomes a slash: for bin { a: "c:d.js" }, npm records
+// { a: "c/d.js" }. A command renamed to the name of a later one keeps its own
+// file: for bin { "a/b": "x.js", b: "y.js" }, npm records { b: "x.js" }.
 function rootEntry(pkg) {
+  const installScripts = ["preinstall", "install", "postinstall"].map((name) => pkg.scripts?.[name]);
   const optional = pkg.optionalDependencies && typeof pkg.optionalDependencies === "object" ? pkg.optionalDependencies : {};
   let bundle = pkg.bundleDependencies !== undefined ? pkg.bundleDependencies : pkg.bundledDependencies;
   if (bundle === true) bundle = Object.keys(pkg.dependencies ?? {});
@@ -102,6 +113,7 @@ function rootEntry(pkg) {
     license: pkg.license?.type || pkg.license,
     funding: pkg.funding && typeof pkg.funding === "string" ? { url: pkg.funding } : pkg.funding,
     bin: recordedBin(pkg),
+    hasInstallScript: Boolean(pkg.hasInstallScript) || installScripts.some((script) => script && typeof script === "string"),
     dependencies:
       pkg.dependencies && Object.fromEntries(Object.entries(pkg.dependencies).filter(([name]) => !(name in optional))),
     bundleDependencies: bundle,
@@ -174,6 +186,17 @@ test("the lock file check fails for a lock file whose root entry lacks the libc 
   assert.throws(() => assertLockMatches(pkg, lockWith({ libc: ["musl"] })), stale("libc"));
 });
 
+test("the lock file check expects hasInstallScript in the root entry when package.json has an install script", () => {
+  const pkg = { name: "example", scripts: { preinstall: "node --version" } };
+  assert.doesNotThrow(() => assertLockMatches(pkg, lockWith({ hasInstallScript: true })));
+  // The next npm install adds hasInstallScript to a root entry that lacks it.
+  assert.throws(() => assertLockMatches(pkg, lockWith({})), stale("hasInstallScript"));
+  // npm records a hasInstallScript of "yes" as true.
+  const field = { name: "example", hasInstallScript: "yes" };
+  assert.doesNotThrow(() => assertLockMatches(field, lockWith({ hasInstallScript: true })));
+  assert.throws(() => assertLockMatches(field, lockWith({ hasInstallScript: "yes" })), stale("hasInstallScript"));
+});
+
 test("the lock file check passes for a package.json value npm leaves out of the lock file, and fails for a lock file that holds one", () => {
   const empty = { name: "example", os: [], cpu: [], engines: {}, dependencies: {}, license: "" };
   assert.doesNotThrow(() => assertLockMatches(empty, lockWith({})));
@@ -229,6 +252,13 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
     // Measured on Linux with glibc: on macOS npm install stops with
     // EBADPLATFORM for this package.json.
     [{ name: "probe", libc: ["glibc"] }, { name: "probe", libc: ["glibc"] }],
+    // An install script without the field, a field that is not true, and
+    // scripts that are not install scripts.
+    [{ name: "probe", scripts: { preinstall: "true" } }, { name: "probe", hasInstallScript: true }],
+    [{ name: "probe", scripts: { install: "true" } }, { name: "probe", hasInstallScript: true }],
+    [{ name: "probe", scripts: { postinstall: "true" } }, { name: "probe", hasInstallScript: true }],
+    [{ name: "probe", hasInstallScript: "yes" }, { name: "probe", hasInstallScript: true }],
+    [{ name: "probe", scripts: { preinstall: "", install: 7, postinstall: ["true"], prepare: "true" } }, { name: "probe" }],
     // A bin path has no command name in a package without a name.
     [{ bin: "cli.js", funding: [] }, {}],
     // A package in optionalDependencies is left out of dependencies.
