@@ -622,6 +622,18 @@ test("a server that cannot be spawned fails the start at once instead of hanging
   );
 });
 
+test("stopping a server process that could not be spawned does nothing instead of throwing", async () => {
+  // startServer's error listener rejects before its timer can call
+  // stopServer on such a process, so call stopServer on one directly.
+  const proc = spawn(process.execPath, [tsx, "handler.ts"], {
+    cwd: join(example, "missing"),
+    stdio: "ignore",
+  });
+  await new Promise((resolve) => proc.once("error", resolve));
+  assert.equal(proc.pid, undefined, "a process that could not be spawned has no pid");
+  assert.doesNotThrow(() => stopServer(proc));
+});
+
 test("malformed JSON without a bearer token gets 401 and no audit line", async () => {
   const seen = auditLines().length;
   const res = await postTask({}, "{bad");
