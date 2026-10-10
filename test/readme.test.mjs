@@ -155,6 +155,20 @@ test("README names the command that runs the tests", () => {
   assert.match(readme, /`npm test` from the repository root/);
 });
 
+test("README states the Node.js version npm test needs, as the root package.json engines field sets it", () => {
+  // The quick start runs on any Node.js 18, but Node.js 18.0 has no --test
+  // option and no after() export from node:test, so npm test needs a later 18.
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const floor = pkg.engines?.node?.match(/^>=(\d+)\.(\d+)(?:\.\d+)?$/);
+  assert.ok(floor, "the root package.json sets engines.node to >=X.Y");
+  const sentence = lines.find((l) => l.includes("`npm test` from the repository root"));
+  assert.ok(sentence, "README names the command that runs the tests");
+  assert.ok(
+    sentence.includes(`Node.js ${floor[1]}.${floor[2]} or later`),
+    `README says npm test needs Node.js ${floor[1]}.${floor[2]} or later`
+  );
+});
+
 test("the license section matches the LICENSE file", () => {
   const license = readFileSync(join(root, "LICENSE"), "utf8");
   assert.match(license, /Apache License\s+Version 2\.0/);
