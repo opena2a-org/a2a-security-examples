@@ -56,6 +56,7 @@ const rootEntryFields = [
   "engines",
   "os",
   "cpu",
+  "libc",
   "deprecated",
   "hasInstallScript",
   "dependencies",
@@ -166,6 +167,13 @@ test("the lock file check fails for a lock file whose root entry lacks the fundi
   assert.throws(() => assertLockMatches(short, lockWith({ funding, bin: short.bin })), stale("bin"));
 });
 
+test("the lock file check fails for a lock file whose root entry lacks the libc of package.json or holds another", () => {
+  const pkg = { name: "example", libc: ["glibc"] };
+  assert.doesNotThrow(() => assertLockMatches(pkg, lockWith({ libc: ["glibc"] })));
+  assert.throws(() => assertLockMatches(pkg, lockWith({})), stale("libc"));
+  assert.throws(() => assertLockMatches(pkg, lockWith({ libc: ["musl"] })), stale("libc"));
+});
+
 test("the lock file check passes for a package.json value npm leaves out of the lock file, and fails for a lock file that holds one", () => {
   const empty = { name: "example", os: [], cpu: [], engines: {}, dependencies: {}, license: "" };
   assert.doesNotThrow(() => assertLockMatches(empty, lockWith({})));
@@ -218,6 +226,9 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
       { name: "probe", bin: { "one.js": "bin/one.js", "two.js": "two.js" }, funding: { type: "individual", url: "https://example.com/c" } },
     ],
     [{ name: "probe", license: "", funding: "", bin: {}, cpu: [], os: ["darwin"] }, { name: "probe", os: ["darwin"] }],
+    // Measured on Linux with glibc: on macOS npm install stops with
+    // EBADPLATFORM for this package.json.
+    [{ name: "probe", libc: ["glibc"] }, { name: "probe", libc: ["glibc"] }],
     // A bin path has no command name in a package without a name.
     [{ bin: "cli.js", funding: [] }, {}],
     // A package in optionalDependencies is left out of dependencies.
