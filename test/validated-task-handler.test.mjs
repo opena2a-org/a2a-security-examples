@@ -78,7 +78,9 @@ function stopServer(proc, signal = "SIGTERM") {
   try {
     process.kill(-proc.pid, signal);
   } catch (err) {
-    if (err.code !== "ESRCH") throw err;
+    // macOS answers EPERM for a group whose processes have all exited but are
+    // not yet reaped, which leaves nothing to stop.
+    if (err.code !== "ESRCH" && err.code !== "EPERM") throw err;
   }
 }
 
@@ -191,13 +193,16 @@ function heldHandles() {
   return process.getActiveResourcesInfo().filter((r) => r === "ProcessWrap" || r === "PipeWrap").length;
 }
 
-// Whether any process in the group led by pid is still running.
+// Whether any process in the group led by pid is still running. A group whose
+// processes have all exited counts as running until they are reaped: macOS
+// answers EPERM for it until then and ESRCH after.
 function groupRunning(pid) {
   try {
     process.kill(-pid, 0);
     return true;
   } catch (err) {
     if (err.code === "ESRCH") return false;
+    if (err.code === "EPERM") return true;
     throw err;
   }
 }
@@ -753,6 +758,54 @@ test("stopping a server process that could not be spawned does nothing instead o
   assert.equal(proc.pid, undefined, "a process that could not be spawned has no pid");
   assert.doesNotThrow(() => stopServer(proc));
 });
+
+test(
+  "a process group whose processes have exited counts as running until they are reaped, and stopping it does nothing instead of throwing",
+  { skip: process.platform === "win32" && "process groups are POSIX only" },
+  async () => {
+    // The holder starts a process that leads a group of its own and exits at
+    // once, then blocks its event loop so that it does not reap the process.
+    const holder = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const { spawn } = require("node:child_process");
+const { writeSync } = require("node:fs");
+const child = spawn(process.execPath, ["-e", ""], { detached: true, stdio: "ignore" });
+writeSync(1, child.pid + "\\n");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
+`,
+      ],
+      { stdio: ["ignore", "pipe", "ignore"] }
+    );
+    const closed = new Promise((resolve) => holder.once("close", resolve));
+    let out = "";
+    holder.stdout.on("data", (chunk) => (out += chunk));
+    let pid;
+    try {
+      for (let i = 0; i < 200 && !out.includes("\n"); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      pid = Number(out);
+      assert.ok(pid > 0, `the holder started a process: ${JSON.stringify(out)}`);
+      const state = () => spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+      for (let i = 0; i < 200 && !state().startsWith("Z"); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.match(state(), /^Z/, "the process has exited and is not yet reaped");
+      assert.equal(groupRunning(pid), true, "the group counts as running until its process is reaped");
+      assert.doesNotThrow(() => stopServer({ pid }));
+    } finally {
+      holder.kill("SIGKILL");
+      await within(closed, 10000, "the holder did not exit within 10 seconds of SIGKILL");
+    }
+    // With the holder gone, the process is reaped and its group goes away.
+    for (let i = 0; i < 100 && groupRunning(pid); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(groupRunning(pid), false, "the group no longer counts as running once its process is reaped");
+  }
+);
 
 test(
   "interrupting a test run stops the servers it started",
