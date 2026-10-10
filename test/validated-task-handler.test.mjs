@@ -237,7 +237,8 @@ function descendantGroups(pid) {
 // The process groups that have a process that has not exited. A process that
 // has exited stays listed, in state Z, until it is reaped. Once its parent has
 // exited, that is up to whichever process adopts it, and in a container whose
-// first process is not an init process, that process never reaps it.
+// first process is Node.js, as when docker run starts the tests without
+// --init, that process never reaps it.
 function liveGroups() {
   const ps = spawnSync("ps", ["-A", "-o", "pgid=,stat="], { encoding: "utf8" });
   if (ps.error) throw ps.error;
@@ -796,8 +797,8 @@ test(
     // once, then blocks its event loop reading its stdin, so that it does not
     // reap the process until the test closes its stdin. The holder reaps it
     // itself: killed, it would leave the process to whichever process adopts
-    // it, and in a container whose first process is not an init process, that
-    // process never reaps it.
+    // it, and in a container whose first process is Node.js, as when docker
+    // run starts the tests without --init, that process never reaps it.
     const holder = spawn(
       process.execPath,
       [
@@ -874,13 +875,16 @@ test(
         groups = descendantGroups(run.pid);
       }
       assert.equal(groups.size, 2, "the run started the main server and the stalled-upload server");
-      process.kill(-run.pid, "SIGINT");
-      await within(exited, 10000, "the interrupted run did not exit within 10 seconds");
       // A server that has exited counts as stopped while it waits to be reaped.
       const running = () => {
         const live = liveGroups();
         return [...groups].filter((pid) => live.has(pid));
       };
+      // A check that cannot see the servers while they run would report them
+      // stopped after the interrupt whether or not the run stopped them.
+      assert.deepEqual(running(), [...groups], "ps lists both servers as running before the run is interrupted");
+      process.kill(-run.pid, "SIGINT");
+      await within(exited, 10000, "the interrupted run did not exit within 10 seconds");
       for (let i = 0; i < 100 && running().length > 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
