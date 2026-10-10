@@ -197,6 +197,9 @@ test("an empty body or a body not sent as application/json fails schema validati
   const cases = [
     { name: "an empty application/json body", headers: {}, body: undefined },
     { name: "a text/plain body", headers: { "Content-Type": "text/plain" }, body: "hello" },
+    { name: "an empty text/plain body", headers: { "Content-Type": "text/plain" }, body: "" },
+    // The parser only reads application/json, so a +json subtype is skipped too.
+    { name: "an application/vnd.api+json body", headers: { "Content-Type": "application/vnd.api+json" }, body: "123" },
   ];
   for (const { name, headers, body } of cases) {
     const seen = auditLines().length;
