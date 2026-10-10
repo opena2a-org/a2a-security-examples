@@ -59,6 +59,19 @@ test("every relative link points to a file in the repository", () => {
   }
 });
 
+test("the audit sentence names the handler's audit actions and scopes them to authenticated requests", () => {
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const actions = [...handler.matchAll(/action: "(\w+)"/g)].map((m) => m[1]);
+  assert.ok(actions.length > 0, "handler.ts writes audit entries with an action");
+  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  assert.ok(sentence, "README describes the audit lines");
+  for (const action of actions) {
+    assert.ok(sentence.includes(`\`${action}\``), `README names the ${action} audit action`);
+  }
+  assert.doesNotMatch(sentence, /^Every request/, "unauthenticated requests write no audit line");
+  assert.match(sentence, /pass authentication/, "README scopes audit lines to authenticated requests");
+});
+
 test("the license section matches the LICENSE file", () => {
   const license = readFileSync(join(root, "LICENSE"), "utf8");
   assert.match(license, /Apache License\s+Version 2\.0/);
