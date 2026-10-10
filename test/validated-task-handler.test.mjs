@@ -61,31 +61,78 @@ const validTask = JSON.stringify({
   task: { message: { role: "user", parts: [{ type: "text", text: "Hello" }] } },
 });
 
-before(async () => {
-  assert.ok(existsSync(tsx), "run npm ci in examples/validated-task-handler first");
-  port = await freePort();
-  const env = { ...process.env, PORT: String(port) };
+// Stop tsx and the server process it starts. On POSIX they share the process
+// group startServer creates, so one signal reaches both.
+function stopServer(proc) {
+  try {
+    if (process.platform === "win32") proc.kill();
+    else process.kill(-proc.pid, "SIGTERM");
+  } catch (err) {
+    if (err.code !== "ESRCH") throw err;
+  }
+}
+
+// Start the example on a port and resolve with its process once it is
+// listening. The process and its pipes are unref'd: Node.js 18 runs a
+// top-level after() hook only once nothing keeps the test process alive, so a
+// referenced server would keep the after() hook that stops it from running.
+async function startServer(serverPort, onOutput = () => {}) {
+  const env = { ...process.env, PORT: String(serverPort) };
   delete env.AGENT_URL;
-  server = spawn(process.execPath, [tsx, "handler.ts"], { cwd: example, env });
-  server.stdout.on("data", (chunk) => (output += chunk));
-  server.stderr.on("data", (chunk) => (output += chunk));
+  const proc = spawn(process.execPath, [tsx, "handler.ts"], {
+    cwd: example,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
+  proc.unref();
+  proc.stdout.unref();
+  proc.stderr.unref();
+  let seen = "";
+  const record = (chunk) => {
+    seen += chunk;
+    onOutput(chunk);
+  };
+  proc.stdout.on("data", record);
+  proc.stderr.on("data", record);
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`server did not start:\n${output}`)), 30000);
-    server.stdout.on("data", () => {
-      if (output.includes("listening on port")) {
+    const timer = setTimeout(() => {
+      stopServer(proc);
+      reject(new Error(`server did not start:\n${seen}`));
+    }, 30000);
+    proc.stdout.on("data", () => {
+      if (seen.includes("listening on port")) {
         clearTimeout(timer);
         resolve();
       }
     });
-    server.once("exit", (code) => {
+    proc.once("exit", (code) => {
       clearTimeout(timer);
-      reject(new Error(`server exited with ${code}:\n${output}`));
+      reject(new Error(`server exited with ${code}:\n${seen}`));
     });
   });
+  return proc;
+}
+
+// Whether any process in the group led by pid is still running.
+function groupRunning(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    if (err.code === "ESRCH") return false;
+    throw err;
+  }
+}
+
+before(async () => {
+  assert.ok(existsSync(tsx), "run npm ci in examples/validated-task-handler first");
+  port = await freePort();
+  server = await startServer(port, (chunk) => (output += chunk));
 });
 
 after(() => {
-  server?.kill();
+  if (server) stopServer(server);
 });
 
 test("package-lock.json pins the dependencies package.json declares", () => {
@@ -377,14 +424,15 @@ test("a PORT already in use exits with one line naming the port", () => {
   assert.deepEqual(run.stderr.trim().split("\n"), [`Port ${port} is already in use; set PORT to a free port`]);
 });
 
-// Start the example with a module loaded first that changes how the HTTP
-// server listens, and return the finished run.
+// Start the example with a CommonJS module loaded first that changes how the
+// HTTP server listens, and return the finished run. The module is loaded with
+// --require because NODE_OPTIONS accepts --import only from Node.js 18.18.
 function runWithPreload(preload, env) {
   const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
   try {
-    const file = join(dir, "preload.mjs");
+    const file = join(dir, "preload.cjs");
     writeFileSync(file, preload);
-    const nodeOptions = [process.env.NODE_OPTIONS, `--import=${pathToFileURL(file).href}`];
+    const nodeOptions = [process.env.NODE_OPTIONS, `--require ${JSON.stringify(file)}`];
     return spawnSync(process.execPath, [tsx, "handler.ts"], {
       cwd: example,
       env: { ...process.env, ...env, NODE_OPTIONS: nodeOptions.filter(Boolean).join(" ") },
@@ -399,7 +447,7 @@ function runWithPreload(preload, env) {
 test("a listen failure other than a port in use exits with one line naming the port and the error", () => {
   // Fail the listen call the way a refused bind would, without binding.
   const run = runWithPreload(
-    `import { Server } from "node:http";
+    `const { Server } = require("node:http");
 Server.prototype.listen = function () {
   process.nextTick(() => this.emit("error", Object.assign(new Error("listen EACCES: permission denied"), { code: "EACCES" })));
   return this;
@@ -416,7 +464,7 @@ test("a server error after the server is listening is not reported as a listen f
   // Raise an accept failure once the server has started listening.
   const errorPort = await freePort();
   const run = runWithPreload(
-    `import { Server } from "node:http";
+    `const { Server } = require("node:http");
 const listen = Server.prototype.listen;
 Server.prototype.listen = function (...args) {
   this.once("listening", () =>
@@ -430,6 +478,23 @@ Server.prototype.listen = function (...args) {
   assert.equal(run.status, 1, run.stdout + run.stderr);
   assert.match(run.stdout, /listening on port/, "the error came after the server started listening");
   assert.deepEqual(run.stderr.trim().split("\n"), [`Server error on port ${errorPort}: accept EMFILE`]);
+});
+
+test("a server the tests start does not keep the test process alive, and stopping it ends tsx and the server", async () => {
+  // Processes and pipes that keep this process alive; unref'd ones are not listed.
+  const held = () => process.getActiveResourcesInfo().filter((r) => r === "ProcessWrap" || r === "PipeWrap").length;
+  const baseline = held();
+  const extra = await startServer(await freePort());
+  try {
+    assert.equal(held(), baseline, "the running server does not keep the test process alive");
+  } finally {
+    stopServer(extra);
+  }
+  if (process.platform === "win32") return;
+  for (let i = 0; i < 100 && groupRunning(extra.pid); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(groupRunning(extra.pid), false, "tsx and the server it started have exited");
 });
 
 test("malformed JSON without a bearer token gets 401 and no audit line", async () => {
