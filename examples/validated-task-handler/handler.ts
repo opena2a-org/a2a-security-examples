@@ -281,7 +281,10 @@ app.use((_req, res) => {
 // A client that closes the connection before sending the whole body is
 // reported here as request.aborted only once the connection has closed, so the
 // rejection is audited but the JSON reply below never reaches the client; it
-// gets at most the bare HTTP 400 that Node's HTTP server writes.
+// gets at most the bare HTTP 400 that Node's HTTP server writes. An upload
+// that stalls until the request timeout is reported as request.aborted too,
+// after Node has answered it with a bare HTTP 408, so the audit line records
+// 408 for it.
 app.use(
   (
     err: unknown,
@@ -300,7 +303,7 @@ app.use(
       code?: unknown;
     };
     const clientError = typeof status === "number" && status >= 400 && status < 500;
-    const responseStatus = clientError ? status : 500;
+    const responseStatus = requestTimedOut(req) ? 408 : clientError ? status : 500;
 
     audit({
       timestamp: new Date().toISOString(),
@@ -330,6 +333,14 @@ function rejectionReason(type: unknown, code: unknown): string {
   if (typeof type === "string") return type;
   if (typeof code === "string" && code.startsWith("Z_")) return "body.inflate.failed";
   return "unknown";
+}
+
+// When the request timeout expires, Node writes its bare HTTP 408 and destroys
+// the socket with ERR_HTTP_REQUEST_TIMEOUT before the parser reports the
+// unfinished body.
+function requestTimedOut(req: express.Request): boolean {
+  const errored = req.socket.errored as NodeJS.ErrnoException | null;
+  return errored?.code === "ERR_HTTP_REQUEST_TIMEOUT";
 }
 
 // --- Task Processing ---
