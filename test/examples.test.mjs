@@ -69,16 +69,18 @@ const rootEntryFields = [
   "workspaces",
 ];
 
-// The bin npm records for a package.json: each command name with the path of
-// its file inside the package. A bin that is one path is a command named after
-// the package, a bin that is a list names each command after its file, and an
-// entry left without a name or a path is dropped.
+// The bin npm records for a package.json: each command with the path of its
+// file inside the package. A command is named after the last segment of its
+// name once that name is resolved as a path, so a bin named a/b/.. is a. A bin
+// that is one path is a command named after the package, a bin that is a list
+// names each command after its file, and an entry left without a name or a
+// path is dropped.
 function recordedBin({ name, bin }) {
   if (typeof bin === "string") bin = name ? { [name]: bin } : {};
   if (Array.isArray(bin)) bin = Object.fromEntries(bin.map((path) => [path, path]));
   const recorded = {};
   for (const [command, path] of Object.entries(bin ?? {})) {
-    const base = posix.join("/", posix.basename(command.replace(/[\\:]/g, "/"))).slice(1);
+    const base = posix.basename(posix.join("/", command.replace(/[\\:]/g, "/")));
     const file = typeof path === "string" ? posix.join("/", path.replace(/\\/g, "/")).slice(1) : "";
     if (base && file) recorded[base] = file;
   }
@@ -88,7 +90,8 @@ function recordedBin({ name, bin }) {
 // The root entry npm install writes to the lock file for a package.json,
 // measured with npm 11.19.0. It leaves out a field whose value is falsy, an
 // empty object or an empty array, except devDependencies, which it leaves out
-// only when falsy. It records a license object as its type, a funding string
+// only when falsy. It records a license object as its type when that type is
+// truthy, even an empty object or array, a funding string
 // as an object with that url, bin as recordedBin returns it, hasInstallScript
 // as true when that field is truthy or a preinstall, install or postinstall
 // script is a non-empty string, dependencies without the packages
@@ -121,7 +124,8 @@ function rootEntry(pkg) {
   const entry = {};
   for (const field of rootEntryFields) {
     const value = field in rewritten ? rewritten[field] : pkg[field];
-    const empty = typeof value === "object" && field !== "devDependencies" && Object.keys(value ?? {}).length === 0;
+    const keptEmpty = field === "devDependencies" || (field === "license" && Boolean(pkg.license?.type));
+    const empty = typeof value === "object" && !keptEmpty && Object.keys(value ?? {}).length === 0;
     if (value && !empty) entry[field] = value;
   }
   return entry;
@@ -248,6 +252,17 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
       { name: "probe", bin: ["./bin/one.js", "two.js"], funding: { type: "individual", url: "https://example.com/c" } },
       { name: "probe", bin: { "one.js": "bin/one.js", "two.js": "two.js" }, funding: { type: "individual", url: "https://example.com/c" } },
     ],
+    // A command name that ends in a . or .. segment is named after the segment
+    // it resolves to, and the type of a license object is recorded even when empty.
+    [
+      {
+        name: "probe", license: { type: {} },
+        bin: { "a/b/..": "x.js", "c\\d\\.": "y.js", "e/f/../../g/h/..": "z.js", "..": "w.js", "i:..": "v.js" },
+      },
+      { name: "probe", bin: { a: "x.js", d: "y.js", g: "z.js" }, license: {} },
+    ],
+    [{ name: "probe", bin: { "a/.": "x.js" } }, { name: "probe", bin: { a: "x.js" } }],
+    [{ name: "probe", license: { type: [] } }, { name: "probe", license: [] }],
     [{ name: "probe", license: "", funding: "", bin: {}, cpu: [], os: ["darwin"] }, { name: "probe", os: ["darwin"] }],
     // Measured on Linux with glibc: on macOS npm install stops with
     // EBADPLATFORM for this package.json.
