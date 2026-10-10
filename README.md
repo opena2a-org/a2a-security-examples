@@ -88,7 +88,7 @@ Never trust data from another agent. [handler.ts](./examples/validated-task-hand
 
 1. Bearer authentication: 401 without a token, 403 for an invalid one.
 2. Rate limit of 30 requests per minute per client IP: 429.
-3. JSON parsing: a non-empty body sent as `application/json` that is not a JSON object or array gets 400 `{"error":"Invalid JSON"}`, not the framework's HTML error page with its stack trace. An empty body, or a body not sent as `application/json`, reaches step 4 as an empty object and fails there.
+3. JSON parsing: a non-empty body sent as `application/json` that is not a JSON object or array gets 400 `{"error":"Invalid JSON"}`, not the framework's HTML error page with its stack trace. A body sent as `application/json` that the parser cannot read is rejected here whatever it contains: 413 `{"error":"Invalid request body"}` when it is over 1 MB, 415 with the same reply for an unsupported encoding or charset, 400 with the same reply for a compressed body that does not inflate, and at most a bare HTTP 400 with no body when the connection closes before the whole body arrives. An empty body the parser can read, or a body not sent as `application/json`, reaches step 4 as an empty object and fails there.
 4. Schema validation: 1 to 10 parts, text up to 10,000 characters, data up to 1,048,576 characters with an allowlisted MIME type. A 400 response lists the failing fields only.
 5. Prompt-injection patterns on every text part: 400. Pattern matching catches known phrasings only; treat it as one layer, not a complete defense.
 6. Processing errors return a generic 500. The detail goes to the audit log, not to the caller.
