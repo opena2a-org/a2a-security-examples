@@ -379,7 +379,9 @@ Server.prototype.listen = function (...args) {
     }
     assert.equal(audited().length, 1, `one audit line for the stalled body:\n${log}`);
     assert.equal(audited()[0].action, "request_rejected");
-    assert.equal(audited()[0].details.reason, "request.aborted");
+    // The audit line records the 408 the client received, not the 400 the
+    // parser's request.aborted error carries.
+    assert.deepEqual(audited()[0].details, { status: 408, reason: "request.aborted" });
   } finally {
     stalled.kill();
     rmSync(dir, { recursive: true, force: true });
