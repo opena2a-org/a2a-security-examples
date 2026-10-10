@@ -157,6 +157,26 @@ test("a body over 1 MB or in an unsupported encoding or charset gets a JSON erro
   }
 });
 
+test("a body the parser cannot read gets Invalid request body even when it is not an object or array, or is empty", async () => {
+  // The body is read before it is parsed, so these never get the Invalid JSON reply.
+  const cases = [
+    { headers: {}, body: " ".repeat(1100 * 1024) + "123", status: 413, reason: "entity.too.large" },
+    { headers: { "Content-Encoding": "br2" }, body: "123", status: 415, reason: "encoding.unsupported" },
+    { headers: { "Content-Type": "application/json; charset=latin1" }, body: "123", status: 415, reason: "charset.unsupported" },
+    { headers: { "Content-Type": "application/json; charset=latin1" }, body: "", status: 415, reason: "charset.unsupported" },
+  ];
+  for (const { headers, body, status, reason } of cases) {
+    const seen = auditLines().length;
+    const res = await postTask({ Authorization: "Bearer demo-token", ...headers }, body);
+    assert.equal(res.status, status, reason);
+    assert.deepEqual(await res.json(), { error: "Invalid request body" });
+    const audited = (await waitForAudit(seen + 1)).slice(seen);
+    assert.equal(audited.length, 1, `one audit line for the rejected body:\n${output}`);
+    assert.equal(audited[0].action, "request_rejected");
+    assert.deepEqual(audited[0].details, { status, reason });
+  }
+});
+
 test("a JSON body that is not an object or array gets the same 400 as malformed JSON", async () => {
   // The parser runs in strict mode, so valid JSON such as 123 is rejected.
   for (const body of ["123", '"text"', "null"]) {

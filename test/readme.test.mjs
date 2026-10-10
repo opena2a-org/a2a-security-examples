@@ -132,6 +132,22 @@ test("step 3 limits the Invalid JSON reply to a non-empty body sent as applicati
   assert.match(exceptions, /step 4/, "README says which step answers those bodies instead");
 });
 
+test("step 3 says a body the parser cannot read gets Invalid request body, not Invalid JSON, whatever it contains", () => {
+  // Reading the body comes before parsing it, so a body such as 123 over the
+  // size limit or in an unsupported charset never reaches the Invalid JSON reply.
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
+  const step = lines.find((l) => l.startsWith("3. JSON parsing:"));
+  assert.ok(step, "README lists JSON parsing as step 3");
+  assert.ok(step.includes('`{"error":"Invalid request body"}`'), "step 3 names the Invalid request body reply");
+  assert.match(step, /the parser cannot read[^.]*whatever it contains/, "step 3 says the reply does not depend on what the body contains");
+  assert.match(step, new RegExp(`\\b413\\b[^,]*over ${limit[1]} MB`), "step 3 gives 413 for a body over the size limit");
+  assert.match(step, /\b415\b[^,]*unsupported encoding or charset/, "step 3 gives 415 for an unsupported encoding or charset");
+  assert.match(step, /\b400\b[^,]*compressed body that does not inflate/, "step 3 gives 400 for a compressed body that does not inflate");
+  assert.match(step, /bare HTTP 400 with no body[^,]*connection closes before the whole body arrives/, "step 3 says a body cut off by a closed connection gets at most a bare 400");
+});
+
 test("README names the command that runs the tests", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.ok(pkg.scripts?.test, "the root package.json defines npm test");
