@@ -173,6 +173,7 @@ test("README states the Node.js version npm test needs, as the root package.json
 // node:test, from the "Added in" lines of
 // https://nodejs.org/docs/latest-v18.x/api/test.html. node --test itself
 // arrived in 18.1.
+const nodeTestMajor = 18;
 const nodeTestAddedIn = { test: 0, before: 8, after: 8 };
 
 // The names an import declaration at the start of a line takes from node:test,
@@ -218,27 +219,60 @@ test("the node:test import reader finds names in every import form", () => {
   assert.deepEqual(namesImportedFromNodeTest('import assert from "node:assert/strict";\nimport { test } from "node:test2";\n'), []);
 });
 
+// Checks the npm test sentence against an engines.node value of >=X.Y. The
+// releases that cannot run the tests come from nodeTestAddedIn, so the floor
+// must be a Node.js 18 release above the lowest one that can run them.
+function checkTestedFloorSentence(engines, sentence) {
+  const floor = engines?.match(/^>=(\d+)\.(\d+)(?:\.\d+)?$/);
+  assert.ok(floor, "the root package.json sets engines.node to >=X.Y");
+  const [major, minor] = [Number(floor[1]), Number(floor[2])];
+  assert.ok(
+    sentence.includes(`Node.js ${major}.${minor} is the lowest release the tests have been run on, not a measured minimum`),
+    `README says Node.js ${major}.${minor} is a tested floor, not a measured minimum`
+  );
+  assert.equal(
+    major,
+    nodeTestMajor,
+    `engines.node names Node.js ${major}, but nodeTestAddedIn lists Node.js ${nodeTestMajor} minor releases; give the Node.js ${major} releases before checking the README against them`
+  );
+  const lowest = lowestMinorThatCanRunTheTests();
+  assert.ok(
+    minor > lowest,
+    `engines.node names Node.js ${major}.${minor}, which is not above ${major}.${lowest}, the lowest release that can run the tests, so no release below the floor is untested`
+  );
+  assert.ok(
+    sentence.includes(`releases before ${major}.${lowest} have no`),
+    `README says why releases before ${major}.${lowest} cannot run the tests`
+  );
+  assert.ok(
+    sentence.includes(`releases ${major}.${lowest} to ${major}.${minor - 1} are untested`),
+    "README says which releases below the floor are untested, leaving out releases that cannot run the tests"
+  );
+}
+
 test("README says the Node.js version for npm test is the lowest release tested, not a measured minimum", () => {
   // npm test cannot run on a release without node --test or without a name the
   // test files import from node:test, and passes on 18.17. No release between
   // the two has been run, so the floor may be higher than the tests need.
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  const floor = pkg.engines?.node?.match(/^>=(\d+)\.(\d+)(?:\.\d+)?$/);
-  assert.ok(floor, "the root package.json sets engines.node to >=X.Y");
   const sentence = lines.find((l) => l.includes("`npm test` from the repository root"));
   assert.ok(sentence, "README names the command that runs the tests");
-  assert.ok(
-    sentence.includes(`Node.js ${floor[1]}.${floor[2]} is the lowest release the tests have been run on, not a measured minimum`),
-    `README says Node.js ${floor[1]}.${floor[2]} is a tested floor, not a measured minimum`
+  checkTestedFloorSentence(pkg.engines?.node, sentence);
+});
+
+test("the tested-floor check does not pair Node.js 18 release numbers with another major or an empty range", () => {
+  // The release numbers in nodeTestAddedIn are Node.js 18 minor releases. With
+  // engines.node at >=20.0.0 they must not turn into "releases before 20.8" and
+  // "releases 20.8 to 20.-1", and a floor at or below 18.8 leaves no release
+  // between the two to call untested.
+  const tail = "have no `after` in `node:test`, which the tests import";
+  assert.throws(
+    () => checkTestedFloorSentence(">=20.0.0", `releases before 20.8 ${tail}. Node.js 20.0 is the lowest release the tests have been run on, not a measured minimum: releases 20.8 to 20.-1 are untested.`),
+    /lists Node\.js 18 minor releases/
   );
-  const lowest = lowestMinorThatCanRunTheTests();
-  assert.ok(
-    sentence.includes(`releases before ${floor[1]}.${lowest} have no`),
-    `README says why releases before ${floor[1]}.${lowest} cannot run the tests`
-  );
-  assert.ok(
-    sentence.includes(`releases ${floor[1]}.${lowest} to ${floor[1]}.${floor[2] - 1} are untested`),
-    "README says which releases below the floor are untested, leaving out releases that cannot run the tests"
+  assert.throws(
+    () => checkTestedFloorSentence(">=18.8.0", `releases before 18.8 ${tail}. Node.js 18.8 is the lowest release the tests have been run on, not a measured minimum: releases 18.8 to 18.7 are untested.`),
+    /is not above 18\.8/
   );
 });
 
