@@ -156,6 +156,22 @@ test("a body over 1 MB or in an unsupported encoding or charset gets a JSON erro
   }
 });
 
+test("a compressed body that does not inflate gets a JSON 400 and a request_rejected audit line", async () => {
+  for (const encoding of ["gzip", "deflate"]) {
+    const seen = auditLines().length;
+    const res = await postTask(
+      { Authorization: "Bearer demo-token", "Content-Encoding": encoding },
+      "notgzipdata-notgzipdata-xxxx"
+    );
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { error: "Invalid request body" });
+    const audited = (await waitForAudit(seen + 1)).slice(seen);
+    assert.equal(audited.length, 1, `one audit line for the ${encoding} body:\n${output}`);
+    assert.equal(audited[0].action, "request_rejected");
+    assert.equal(audited[0].details.status, 400);
+  }
+});
+
 test("a body cut off by a closed connection gets no JSON reply and a request_rejected audit line", async () => {
   const seen = auditLines().length;
   const head = [

@@ -86,7 +86,7 @@ test("the bearer token sentence names every token the handler rejects", () => {
   }
 });
 
-test("the audit sentence names invalid JSON, the size limit, an unsupported encoding or charset, and a body cut off by a closed connection", () => {
+test("the audit sentence names invalid JSON, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
@@ -96,6 +96,7 @@ test("the audit sentence names invalid JSON, the size limit, an unsupported enco
     "not valid JSON",
     `over ${limit[1]} MB`,
     "unsupported encoding or charset",
+    "compressed body that does not inflate",
     "connection closed before the whole body arrives",
     "no JSON reply",
   ];
