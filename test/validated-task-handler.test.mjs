@@ -483,10 +483,17 @@ Server.prototype.listen = function (...args) {
 test("a server the tests start does not keep the test process alive, and stopping it ends tsx and the server", async () => {
   // Processes and pipes that keep this process alive; unref'd ones are not listed.
   const held = () => process.getActiveResourcesInfo().filter((r) => r === "ProcessWrap" || r === "PipeWrap").length;
+  const serverPort = await freePort();
+  // Count on both sides of the start without letting the event loop run in
+  // between: startServer spawns and unrefs the server before its first await,
+  // and a process an earlier test stopped closes its handles only when the
+  // event loop runs.
   const baseline = held();
-  const extra = await startServer(await freePort());
+  const starting = startServer(serverPort);
+  const added = held() - baseline;
+  const extra = await starting;
   try {
-    assert.equal(held(), baseline, "the running server does not keep the test process alive");
+    assert.equal(added, 0, "starting the server adds no process or pipe that keeps the test process alive");
   } finally {
     stopServer(extra);
   }
