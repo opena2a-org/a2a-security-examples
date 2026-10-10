@@ -47,7 +47,7 @@ test("the quick start runs a script the example defines", () => {
   for (const [, script] of clone.body.matchAll(/^npm run (\S+)$/gm)) {
     assert.ok(pkg.scripts?.[script], `npm run ${script} is defined in ${cd[1]}/package.json`);
   }
-  assert.doesNotMatch(clone.body, /^npm start$/m, "npm start needs a build output the example does not produce");
+  assert.doesNotMatch(clone.body, /^npm start$/m, "npm start needs npm run build first; the quick start runs from source");
 });
 
 test("every relative link points to a file in the repository", () => {
