@@ -19,10 +19,11 @@ import { randomUUID } from "crypto";
 import { RateLimiterMemory } from "rate-limiter-flexible";
 
 const app = express();
-const port = parsePort(process.env.PORT || "3000");
+const port = parsePort(process.env.PORT ?? "3000");
 
 // Exit with one line naming the variable instead of the stack trace that
-// app.listen throws for a port it cannot use.
+// app.listen throws for a port it cannot use. An empty PORT is rejected like
+// any other value that is not a port, not treated as unset.
 function parsePort(value: string): number {
   const parsed = /^\d+$/.test(value) ? Number(value) : NaN;
   if (!(parsed >= 1 && parsed <= 65535)) {
@@ -276,6 +277,10 @@ app.use((_req, res) => {
 // Errors raised before a route handler runs, such as a body that is not valid
 // JSON, would otherwise reach Express's default handler, which answers with an
 // HTML page containing the stack trace.
+//
+// A client that closes the connection before sending the whole body is
+// reported here as request.aborted only once the connection has closed, so the
+// rejection is audited but the JSON reply below never reaches the client.
 app.use(
   (
     err: unknown,
@@ -343,9 +348,20 @@ async function processTask(
 
 // --- Start Server ---
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`Secure A2A agent listening on port ${port}`);
   console.log(`Agent card: http://localhost:${port}/.well-known/agent.json`);
+});
+
+// Without a listener, a port that is already taken ends the process with the
+// stack trace of an unhandled 'error' event.
+server.on("error", (err: NodeJS.ErrnoException) => {
+  console.error(
+    err.code === "EADDRINUSE"
+      ? `Port ${port} is already in use; set PORT to a free port`
+      : `Cannot listen on port ${port}: ${err.message}`
+  );
+  process.exit(1);
 });
 
 export { app };
