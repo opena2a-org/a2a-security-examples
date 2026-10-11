@@ -821,6 +821,28 @@ test("a request the agent rejects gets a JSON-RPC error with the request's id th
   });
 });
 
+test("no response carries an X-Powered-By header naming the framework", async () => {
+  const responses = {
+    "GET /.well-known/agent.json": await fetch(`http://127.0.0.1:${port}/.well-known/agent.json`),
+    "POST /tasks with a valid task": await postTask({ Authorization: "Bearer demo-token" }, validTask),
+    "POST /tasks with malformed JSON": await postTask({ Authorization: "Bearer demo-token" }, "{"),
+    "POST /tasks without a token": await postTask({}, validTask),
+    "GET /nope": await fetch(`http://127.0.0.1:${port}/nope`),
+  };
+  const statuses = Object.fromEntries(Object.entries(responses).map(([name, res]) => [name, res.status]));
+  assert.deepEqual(statuses, {
+    "GET /.well-known/agent.json": 200,
+    "POST /tasks with a valid task": 200,
+    "POST /tasks with malformed JSON": 400,
+    "POST /tasks without a token": 401,
+    "GET /nope": 404,
+  });
+  for (const [name, res] of Object.entries(responses)) {
+    await res.arrayBuffer();
+    assert.equal(res.headers.get("x-powered-by"), null, name);
+  }
+});
+
 test("a PORT that is not a port number exits with one line naming PORT", () => {
   // "1e3", "0x50" and " 3000" are numbers to Number(); only digits are a port.
   // An empty PORT is rejected too, not treated as unset.
