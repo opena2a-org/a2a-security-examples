@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkAgent, siteName, testAgents } from "../scripts/check-test-agents.mjs";
+import { checkAgent, maxBodyBytes, siteName, testAgents } from "../scripts/check-test-agents.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readme = readFileSync(join(root, "README.md"), "utf8");
@@ -37,6 +37,9 @@ const homePageTitles = {
   "ai-sdk-reference.dev": "AI SDK Reference",
 };
 
+// The hosts whose /.well-known/agent.json returned no JSON card. Checked 2026-10-11.
+const hostsWithoutCard = ["cloudops-agent.io"];
+
 // A fetch that answers from a map of URL to status, content type and body, and
 // fails for any other URL.
 function stubFetch(responses) {
@@ -65,6 +68,14 @@ test("every name in the test agent table is the name its home page gives", () =>
   for (const { name, host } of agents) {
     assert.equal(name, siteName(homePageTitles[host]), `the README calls ${host} "${name}", and its home page calls it "${siteName(homePageTitles[host])}"`);
   }
+});
+
+test("the README says each test agent exposes an agent card except the agents recorded as serving none", () => {
+  const names = testAgents(readme).filter((agent) => hostsWithoutCard.includes(agent.host)).map((agent) => agent.name);
+  assert.equal(names.length, hostsWithoutCard.length, "the table lists every host recorded as serving no card");
+  const agents = names.length > 0 ? `Each test agent except ${names.join(" and ")}` : "Each test agent";
+  const claim = `${agents} exposes a standard A2A agent card at \`/.well-known/agent.json\``;
+  assert.ok(readme.includes(claim), `README says: ${claim}`);
 });
 
 test("the site name is the title before an em dash, with HTML entities decoded", () => {
@@ -123,4 +134,66 @@ test("the test agent check reports a host it cannot reach and a home page withou
     "https://probe.dev/": { status: 200, type: "text/html", body: "<html></html>" },
   });
   assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["the home page has no title"]);
+});
+
+test("the test agent check reads a home page made of repeated <title with no > in linear time", async () => {
+  // A title pattern with unbounded quantifiers took more than ten seconds on
+  // this 400 KB page and grew with the square of the length.
+  const fetchImpl = stubFetch({
+    "https://probe.dev/.well-known/agent.json": card,
+    "https://probe.dev/": { status: 200, type: "text/html", body: "<title".repeat(66666) },
+  });
+  const start = performance.now();
+  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["the home page has no title"]);
+  const ms = performance.now() - start;
+  assert.ok(ms < 1000, `checking 66,666 repeats of <title took ${Math.round(ms)} ms`);
+});
+
+test("the test agent check reads a title that ends within the first 256 KB of the home page, and none that ends after them", async () => {
+  const title = "<title>Probe AI</title>";
+  const check = (body) =>
+    checkAgent(
+      { name: "Probe AI", host: "probe.dev" },
+      stubFetch({
+        "https://probe.dev/.well-known/agent.json": card,
+        "https://probe.dev/": { status: 200, type: "text/html", body },
+      })
+    );
+  assert.equal(maxBodyBytes, 256 * 1024);
+  assert.deepEqual(await check(" ".repeat(maxBodyBytes - title.length) + title), []);
+  assert.deepEqual(await check(" ".repeat(maxBodyBytes - title.length + 1) + title), ["the home page has no title"]);
+});
+
+test("the test agent check stops reading a response body after its first 256 KB", async () => {
+  // A 4 MB body of spaces served in 64 KB chunks, counting the bytes served.
+  const chunkBytes = 64 * 1024;
+  const totalBytes = 16 * maxBodyBytes;
+  let served = 0;
+  let cancelled = false;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (served === totalBytes) return controller.close();
+      served += chunkBytes;
+      controller.enqueue(new Uint8Array(chunkBytes).fill(32));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const fetchImpl = stubFetch({
+    "https://probe.dev/.well-known/agent.json": card,
+    "https://probe.dev/": { status: 200, type: "text/html", body },
+  });
+  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["the home page has no title"]);
+  assert.ok(cancelled, "the check cancels the rest of the body");
+  // One chunk past the limit shows the body runs on, and the stream holds one more ready.
+  assert.ok(served <= maxBodyBytes + 2 * chunkBytes, `the check took ${served} bytes of a ${totalBytes} byte body`);
+});
+
+test("the test agent check reports a card longer than 256 KB as too long, not as invalid JSON", async () => {
+  const fetchImpl = stubFetch({
+    "https://probe.dev/.well-known/agent.json": { ...card, body: JSON.stringify({ name: "probe Agent", description: "a".repeat(maxBodyBytes) }) },
+    "https://probe.dev/": home("Probe AI — Internal Developer Portal"),
+  });
+  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["/.well-known/agent.json is longer than 256 KB"]);
 });
