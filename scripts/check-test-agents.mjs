@@ -165,9 +165,12 @@ function findTitle(body) {
 const visible = (text) => text.replace(/[\x00-\x1f\x7f-\x9f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 
 // The problem with a home page in which the check found no title it can read.
-// When the page runs past the part the check reads, or holds a title tag the
-// check cannot read, the message names the bounds, since a title may lie past
-// them, and the closing tag, since a title within them may not be closed.
+// For a page that runs past the part the check reads, the message names that
+// part, since a title may lie past it. For a page in which findTitle found a
+// title tag the check cannot read, the message names the bounds on a title's
+// attributes and text, since a title may lie past them, and the closing tag,
+// since a title within them may not be closed; for a page in which findTitle
+// found no title tag, the message names neither of those two.
 function missingTitle({ truncated }, hasTitleTag) {
   const kb = maxBodyBytes / 1024;
   if (!hasTitleTag) {
