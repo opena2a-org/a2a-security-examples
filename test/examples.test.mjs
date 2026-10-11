@@ -83,20 +83,41 @@ const rootEntryFields = [
 // command's file, so for bin { "a/b": "x.js", b: "y.js" } npm records
 // { b: "x.js" }. For a list entry that is not a string, npm install stops with
 // ERR_INVALID_ARG_TYPE and this function throws that error.
+//
+// npm sets a list path's name and a renamed command as a property of a plain
+// object, so a name __proto__ sets none and gives no command. A command named
+// __proto__ in a bin object, or a bin path under a package named __proto__, is
+// kept as it is, and rootEntry leaves it out of the lock file.
 function recordedBin({ name, bin }) {
   if (typeof bin === "string") bin = name ? { [name]: bin } : {};
-  if (Array.isArray(bin)) bin = Object.fromEntries(bin.map((path) => [posix.basename(path), path]));
+  if (Array.isArray(bin)) {
+    const named = {};
+    for (const path of bin) named[posix.basename(path)] = path;
+    bin = named;
+  }
   const resolve = (path) => posix.join("/", path.replace(/[\\:]/g, "/")).slice(1);
   const recorded = { ...bin };
   for (const command of Object.keys(recorded)) {
     // A command an earlier one was renamed to now holds that one's file.
     const path = recorded[command];
-    delete recorded[command];
     const base = posix.basename(resolve(command));
     const file = typeof path === "string" ? resolve(path) : "";
+    if (!(base && file) || base !== command) delete recorded[command];
     if (base && file) recorded[base] = file;
   }
   return recorded;
+}
+
+// A value as npm writes it to the lock file, without a key named __proto__ at
+// any depth.
+function asWritten(value) {
+  if (Array.isArray(value)) return value.map(asWritten);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "__proto__")
+      .map(([key, item]) => [key, asWritten(item)])
+  );
 }
 
 // The root entry npm install writes to the lock file for a package.json,
@@ -108,7 +129,9 @@ function recordedBin({ name, bin }) {
 // as true when that field is truthy or a preinstall, install or postinstall
 // script is a non-empty string, dependencies without the packages
 // optionalDependencies also lists, and bundleDependencies as a list of names,
-// read from bundledDependencies when it is not set. When it leaves out every
+// read from bundledDependencies when it is not set. It writes each field it
+// keeps without a key named __proto__, so a bin whose one command is
+// __proto__ is recorded as an empty object. When it leaves out every
 // field, npm writes no root entry, and this function returns undefined.
 //
 // One measured case is not handled. With directories.bin and no bin, npm
@@ -135,7 +158,7 @@ function rootEntry(pkg) {
     const value = field in rewritten ? rewritten[field] : pkg[field];
     const keptEmpty = field === "devDependencies" || (field === "license" && Boolean(pkg.license?.type));
     const empty = typeof value === "object" && !keptEmpty && Object.keys(value ?? {}).length === 0;
-    if (value && !empty) entry[field] = value;
+    if (value && !empty) entry[field] = asWritten(value);
   }
   return Object.keys(entry).length ? entry : undefined;
 }
@@ -224,6 +247,16 @@ test("the lock file check fails for a lock file whose root entry lacks the fundi
   assert.doesNotThrow(() => assertLockMatches(short, lockWith({ funding, bin })));
   assert.throws(() => assertLockMatches(short, lockWith({ funding: short.funding, bin })), stale("funding"));
   assert.throws(() => assertLockMatches(short, lockWith({ funding, bin: short.bin })), stale("bin"));
+});
+
+test("the lock file check passes for the lock file npm writes for a bin command named __proto__", () => {
+  // npm install --package-lock-only, npm 11.19.0, keeps this command and
+  // writes the lock file without the key __proto__, so the root entry holds an
+  // empty bin. JSON.parse keeps __proto__ as a key, as npm reads package.json.
+  const pkg = JSON.parse('{"name":"example","bin":{"__proto__":"x.js"}}');
+  assert.doesNotThrow(() => assertLockMatches(pkg, lockWith({ bin: {} })));
+  assert.throws(() => assertLockMatches(pkg, lockWith({})), stale("bin"));
+  assert.throws(() => assertLockMatches(pkg, lockWith(JSON.parse('{"bin":{"__proto__":"x.js"}}'))), stale("bin"));
 });
 
 test("the lock file check fails for a lock file whose root entry lacks the libc of package.json or holds another", () => {
@@ -383,6 +416,26 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
       { name: "probe", bundledDependencies: ["two"], devDependencies: { one }, dependencies: { one } },
       { name: "probe", bundleDependencies: ["two"], dependencies: { one }, devDependencies: { one } },
     ],
+    // npm keeps a bin command named __proto__, as JSON.parse does, and drops a
+    // command renamed to __proto__ or a list path named __proto__. It writes
+    // the lock file without a key named __proto__ at any depth, after it leaves
+    // out the empty values, so a bin of that one command is an empty object.
+    ...[
+      ['{"name":"probe","bin":{"__proto__":"x.js"}}', { name: "probe", bin: {} }],
+      ['{"name":"__proto__","bin":"x.js"}', { name: "__proto__", bin: {} }],
+      ['{"name":"probe","bin":{"__proto__":"x.js","a/b":"y.js","b":"z.js"}}', { name: "probe", bin: { b: "y.js" } }],
+      ['{"name":"probe","bin":{"a/__proto__":"y.js","__proto__":"x.js"}}', { name: "probe", bin: {} }],
+      ['{"name":"probe","bin":{"__proto__":"./x.js","a/__proto__":""}}', { name: "probe", bin: {} }],
+      ['{"name":"probe","bin":{"a/__proto__":"x.js"}}', { name: "probe" }],
+      ['{"name":"probe","bin":{"a\\\\__proto__":"x.js","c:__proto__/..":"y.js"}}', { name: "probe", bin: { c: "y.js" } }],
+      ['{"name":"probe","bin":{"__proto__":""}}', { name: "probe" }],
+      ['{"name":"probe","bin":["lib/__proto__"]}', { name: "probe" }],
+      ['{"name":"probe","bin":["__proto__","a.js"]}', { name: "probe", bin: { "a.js": "a.js" } }],
+      ['{"name":"probe","engines":{"__proto__":">=1"}}', { name: "probe", engines: {} }],
+      ['{"name":"probe","funding":[{"__proto__":"a"}]}', { name: "probe", funding: [{}] }],
+      ['{"name":"probe","peerDependenciesMeta":{"x":{"__proto__":true}}}', { name: "probe", peerDependenciesMeta: { x: {} } }],
+      ['{"name":"probe","license":{"type":{"__proto__":"MIT"}}}', { name: "probe", license: {} }],
+    ].map(([pkg, entry]) => [JSON.parse(pkg), entry]),
     // bundleDependencies false is set, so npm does not read bundledDependencies.
     [
       { name: "probe", dependencies: { two }, bundleDependencies: false, bundledDependencies: ["two"] },
