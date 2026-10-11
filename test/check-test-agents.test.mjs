@@ -166,6 +166,9 @@ test("the test agent check names the bounds it read when it finds no title in a 
   assert.deepEqual(await check(`<title${attributes(maxTitleAttributes + 1)}>Probe AI</title>`), [noTitleInBounds]);
   assert.deepEqual(await check("<title>Probe <AI></title>"), [noTitleInBounds]);
   assert.deepEqual(await check("<TITLE>Probe AI" + " ".repeat(maxBodyBytes)), [noTitleInBoundsOrRead]);
+  // The page's title is its first title element, so a title the check can
+  // read after one it cannot read is not the page's title.
+  assert.deepEqual(await check("<title>Probe <AI></title><title>Probe AI</title>"), [noTitleInBounds]);
 });
 
 test("the test agent check says a title must be closed by </title> when a short title within the bounds is not, and not when the part it read holds no title tag", async () => {
@@ -247,9 +250,16 @@ test("the test agent check reports no title for a <title> in a script, style or 
   assert.deepEqual(await checkHome("<a href='<title>'>x</a>"), [noTitle]);
   assert.deepEqual(await checkHome("<! <title> ><p>x</p>"), [noTitle]);
   assert.deepEqual(await checkHome("<?xml <title> ?><p>x</p>"), [noTitle]);
-  // A raw text element ends only at its own end tag, or at the end of the page.
+  // A raw text element ends only at its own end tag, in any letter case, or at the end of the page.
   assert.deepEqual(await checkHome("<script></scripts><title>Probe AI</title>"), [noTitle]);
   assert.deepEqual(await checkHome('<SCRIPT>"<title>"</script ><title>Probe AI</title>'), []);
+  assert.deepEqual(await checkHome('<script>"<title>"</SCRIPT><title>Probe AI</title>'), []);
+  assert.deepEqual(await checkHome('<style>"<title>"</STYLE><title>Probe AI</title>'), []);
+  for (const name of ["xmp", "iframe", "noembed", "noframes", "noscript"]) {
+    assert.deepEqual(await checkHome(`<${name}><title>X</title></${name}><title>Probe AI</title>`), [], `the element ${name}`);
+  }
+  // A plaintext element runs to the end of the page.
+  assert.deepEqual(await checkHome("<plaintext><title>Probe AI</title>"), [noTitle]);
   // A quoted attribute value may hold ">", which does not end its tag.
   assert.deepEqual(await checkHome('<a b=">" c="<title>">x</a>'), [noTitle]);
   assert.deepEqual(await checkHome('<title data-x="a>b">Probe AI</title>'), []);
@@ -266,8 +276,45 @@ test("the test agent check reads no title from a comment, a longer tag name or a
   // An svg element ends at the end tag of its own, not at one in a nested svg, a comment, an attribute value or CDATA.
   assert.deepEqual(await checkHome("<svg><svg></svg><title>Old</title></svg><title>Probe AI</title>"), []);
   assert.deepEqual(await checkHome('<svg><a title="</svg>"/><!-- </svg> --><![CDATA[</svg>]]><title>Old</title></svg><title>Probe AI</title>'), []);
+  // CDATA ends at "]]>", not at the ">" that would end a declaration.
+  assert.deepEqual(await checkHome("<svg><![CDATA[a>b</svg>]]><title>Old</title></svg><title>Probe AI</title>"), []);
   assert.deepEqual(await checkHome("<svg><math></svg><title>Probe AI</title>"), []);
   assert.deepEqual(await checkHome("<svg/><title>Probe AI</title>"), []);
+  // An svg or math end tag with no such element open closes nothing; a check
+  // that closed elements for it would not return.
+  assert.deepEqual(await checkHome("</svg><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("</math><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<svg></math><title>Old</title></svg><title>Probe AI</title>"), []);
+});
+
+// The problem reported for a home page whose title is "X".
+const callsX = 'the home page calls the agent "X", not "Probe AI"';
+
+test("the test agent check ends a tag and its attributes where an HTML parser does", async () => {
+  // An attribute name may begin with "=", so this tag holds no quoted value.
+  assert.deepEqual(await checkHome('<a ="><title>Probe AI</title>'), []);
+  // White space ends an unquoted attribute value.
+  assert.deepEqual(await checkHome("<a b=c d='><title>X</title>'><title>Probe AI</title>"), []);
+  // A "/" ends an attribute name, so the quote after "/=" starts no value.
+  assert.deepEqual(await checkHome("<a b/='><title>X</title>'><title>Probe AI</title>"), [callsX]);
+  // A "</" followed by no letter runs to the next ">", and a "<" followed by no letter starts no tag.
+  assert.deepEqual(await checkHome('</ a="><title>X</title>"><title>Probe AI</title>'), [callsX]);
+  assert.deepEqual(await checkHome("<1<title>Probe AI</title>"), []);
+});
+
+test("the test agent check ends a script where an HTML parser does when its text holds <!-- and <script", async () => {
+  // A "<script" after "<!--" starts a part that the next "</script" ends in place of the script, up to the "-->".
+  assert.deepEqual(await checkHome("<script><!--<script></script><title>X</title>--></script><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<script><!--<SCRIPT/></Script ><title>X</title>--></script><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<script><!--<script>--></script><title>Probe AI</title>"), []);
+  // A script ends at its first "</script" outside such a part.
+  assert.deepEqual(await checkHome("<script><!--</script><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<script><script></script><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<script><!--<scripts></script><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<script><!--><script></script><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<script><!--<script>--><script></script><title>Probe AI</title>"), []);
+  // A script that the page does not end runs to the end of the page.
+  assert.deepEqual(await checkHome("<script><!--<script></script><title>Probe AI</title>"), [noTitle]);
 });
 
 test("the test agent check shows the control characters in a problem in a visible form", async () => {
