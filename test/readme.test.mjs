@@ -454,6 +454,21 @@ test("the node:test import reader reads a slash after a private name such as #de
   assert.deepEqual(namesImportedFromNodeTest('a /* note */ ++ / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
 });
 
+test("the node:test import reader reads a slash after a number, string, template or regular expression as division", () => {
+  // Read as the start of a regular expression, the first slash would close at
+  // the slash in the template, and the backtick after it would open a template
+  // that hides the declaration.
+  const declaration = 'import { after } from "node:test";\n';
+  for (const before of [
+    "const n = 1 / 2, t = `/`;\n",
+    'const n = "a" / 2, t = `/`;\n',
+    "const n = `a` / 2, t = `/`;\n",
+    "const n = /a/ / 2, t = `/`;\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+});
+
 test("the node:test import reader reads a long run of spaces in linear time", () => {
   // A pattern with adjacent \s* quantifiers took more than a second on 2,000
   // spaces after "import a" and grew with the cube of the length.
