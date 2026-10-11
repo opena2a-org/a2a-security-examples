@@ -510,12 +510,12 @@ test("the node:test import reader reads an of after the end of an operand direct
   // end of any operand there as the keyword, so the slash after it starts a
   // regular expression.
   for (const target of ["(x)", "f(x)", "1..x", '"a"', "`a`", "/a/", "x++", "x--"]) {
-    const before = `for (${target} of /\`/g.exec(s)) g();\n`;
+    const before = "for (" + target + " of /`/g.exec(s)) g();\n";
     assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
   }
   assert.deepEqual(namesImportedFromNodeTest("for await (const x of /`/g.exec(s)) f(x);\n" + declaration), ["after"]);
   for (const kind of ["const", "let", "var"]) {
-    const before = `for (${kind} of of /\`/g.exec(s)) f(of);\n`;
+    const before = "for (" + kind + " of of /`/g.exec(s)) f(of);\n";
     assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
   }
 });

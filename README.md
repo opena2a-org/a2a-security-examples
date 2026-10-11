@@ -166,7 +166,7 @@ The following agents are available for security testing. They simulate real-worl
 | LLM Tools Guide | [llm-tools-guide.dev](https://llm-tools-guide.dev) | Developer Education |
 | AI SDK Reference | [ai-sdk-reference.dev](https://ai-sdk-reference.dev) | Developer Reference |
 
-Each test agent exposes a standard A2A agent card at `/.well-known/agent.json` and accepts task submissions. Use them to test your agent's behavior when interacting with unknown peers. To see which agents serve a card right now, run `npm run check:test-agents`: it fetches each card and home page and reports an agent whose card is missing or whose site uses a different name from the table.
+Each test agent except CloudOps Agent exposes a standard A2A agent card at `/.well-known/agent.json` and accepts task submissions; `cloudops-agent.io` returned 404 at that path when checked on 2026-10-11. Use them to test your agent's behavior when interacting with unknown peers. To see which agents serve a card right now, run `npm run check:test-agents`: it fetches each card and home page and reports an agent whose card is missing or whose site uses a different name from the table.
 
 > These test agents are operated by the [OpenA2A](https://opena2a.org) TrapMyAgent project for security research purposes.
 

@@ -7,6 +7,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const timeoutMs = 15000;
+// The check reads no more of a response body than this, so a body that never
+// ends cannot hold it.
+export const maxBodyBytes = 256 * 1024;
 
 // The name and host of each row of the README's test agent table.
 export function testAgents(readme) {
@@ -23,10 +26,23 @@ export function siteName(title) {
   return text.split(" — ")[0].trim();
 }
 
+// The first maxBodyBytes of a response body as text, and whether the body runs
+// past them. The rest of a longer body is cancelled, not read.
+async function bodyPrefix(res) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of res.body ?? []) {
+    chunks.push(chunk.subarray(0, maxBodyBytes - size));
+    size += chunk.byteLength;
+    if (size > maxBodyBytes) break;
+  }
+  return { body: new TextDecoder().decode(Buffer.concat(chunks)), truncated: size > maxBodyBytes };
+}
+
 async function get(fetchImpl, url) {
   try {
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
-    return { status: res.status, type: res.headers.get("content-type") ?? "", body: await res.text() };
+    return { status: res.status, type: res.headers.get("content-type") ?? "", ...(await bodyPrefix(res)) };
   } catch (err) {
     return { error: err?.message ?? String(err) };
   }
@@ -43,6 +59,8 @@ export async function checkAgent({ name, host }, fetchImpl = fetch) {
     problems.push(`/.well-known/agent.json returned ${card.status} ${card.type}`.trim());
   } else if (!/\bjson\b/i.test(card.type)) {
     problems.push(`/.well-known/agent.json returned ${card.type || "no content type"}, not JSON`);
+  } else if (card.truncated) {
+    problems.push(`/.well-known/agent.json is longer than ${maxBodyBytes / 1024} KB`);
   } else {
     let parsed;
     try {
@@ -60,7 +78,10 @@ export async function checkAgent({ name, host }, fetchImpl = fetch) {
   } else if (home.status !== 200) {
     problems.push(`the home page returned ${home.status}`);
   } else {
-    const title = home.body.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1];
+    // The bounds keep the match linear in the length of the page: without
+    // them, a page of repeated "<title" with no ">" took time that grew with
+    // the square of its length.
+    const title = home.body.match(/<title[^>]{0,256}>([^<]{0,1024})<\/title>/i)?.[1];
     if (title === undefined) problems.push("the home page has no title");
     else if (siteName(title) !== name) problems.push(`the home page calls the agent "${siteName(title)}", not "${name}"`);
   }
