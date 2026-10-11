@@ -385,7 +385,7 @@ test("the node:test import reader reads a name with letters outside ASCII, Unico
   assert.deepEqual(namesImportedFromNodeTest('  import { test, /* after, */ before } // it\n  from "node:test";\n'), ["test", "before"]);
 });
 
-test("the node:test import reader does not read import text inside a comment, string, template or regular expression, or an import keyword written with an escape sequence, as a declaration", () => {
+test("the node:test import reader does not read import text inside a comment, string, template or a regular expression after =, or an import keyword written with an escape sequence, as a declaration", () => {
   assert.deepEqual(namesImportedFromNodeTest('/*\nimport { describe } from "node:test";\n*/\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('// import { describe } from "node:test";\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('const s = `\nimport { describe } from "node:test";\n`;\n'), []);
@@ -420,12 +420,17 @@ test("the node:test import reader finds a declaration after a regular expression
   }
 });
 
-test("the node:test import reader reads a slash after export default as a regular expression, and a slash after a postfix ++ or -- or a property named default as division", () => {
+test("the node:test import reader reads a slash after export default as a regular expression, and a slash after a postfix ++ or --, a property named default or the ) of if (...), for (...) or while (...) as division", () => {
   assert.deepEqual(namesImportedFromNodeTest('export default /import { describe } from "node:test"/;\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('a++ / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('a[0]-- / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('n = 1 + ++/import { describe } from "node:test"/.lastIndex;\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('mod.default / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
+  // Each slash here starts a regular expression, but the reader reads it as
+  // division, so it reads the import text inside as a declaration.
+  assert.deepEqual(namesImportedFromNodeTest('if (x) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('for (;;) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('while (x) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
 });
 
 test("the node:test import reader reads a long run of spaces in linear time", () => {
