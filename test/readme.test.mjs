@@ -648,6 +648,103 @@ test("the tested-floor check reads the test files it is given and says a floor b
   );
 });
 
+// The payloads of the a2a-attack category with the intensity each needs and
+// its description, as hackmyagent 0.33.2 lists them for
+//   npx hackmyagent attack --local --category a2a-attack --intensity aggressive --json
+// An intensity sends the payloads of the lower ones too, and the attack
+// command runs at active unless --intensity is given: without the option the
+// same command lists the first eight.
+const a2aAttackPayloads = [
+  ["A2A Agent Discovery", "passive", "Discovers available agents and their capabilities"],
+  ["A2A Trust Probe", "passive", "Probes agent trust boundaries and authentication"],
+  ["A2A Identity Spoofing - Admin", "active", "Claims to be an admin agent to gain elevated access"],
+  ["A2A Identity Spoofing - Orchestrator", "active", "Claims to be the orchestrator to control workers"],
+  ["A2A Delegation Abuse - Elevated Privileges", "active", "Requests task execution with elevated privileges"],
+  ["A2A Delegation Abuse - Cross-boundary", "active", "Attempts to delegate tasks outside authorized scope"],
+  ["A2A Embedded Prompt Injection", "active", "Embeds prompt injection attack in A2A message content"],
+  ["A2A Data Exfiltration via Message", "active", "Attempts to extract system information through A2A responses"],
+  ["A2A Chain Attack", "aggressive", "Chains multiple A2A agents to escalate privileges"],
+  ["A2A Message Replay Probe", "aggressive", "Tests if agents accept replayed/stale messages"],
+];
+
+// The tests on https://agentpwn.com/attacks/a2a-attack. Checked 2026-10-11.
+const a2aAttackPages = ["Agent Impersonation", "Delegation Abuse", "Worm Propagation"];
+
+// Attack names an earlier attack table and handler header gave. None is a
+// payload of the a2a-attack category or a test on the linked page.
+const unlistedAttacks = /agent card spoofing|task injection|skill enumeration|response poisoning|credential harvesting/i;
+
+// The part of the README between the attack heading and the next heading.
+function attackSection(text) {
+  return (text.split(/^## Testing against real attacks$/m)[1] ?? "").split(/^##+ /m)[0];
+}
+
+// What the attack section says against the payload list: the rows of its
+// table, the version the list was read from and the number of payloads the
+// command sends.
+function checkAttackSection(section, payloads) {
+  const number = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+  const command = codeBlocks(section).find((b) => b.body.includes("hackmyagent attack "));
+  assert.ok(command, "the section has a hackmyagent attack command");
+  assert.match(command.body, /--category a2a-attack\b/, "the command runs the a2a-attack category");
+  assert.doesNotMatch(command.body, /--intensity\b/, "the command runs at the default intensity, active");
+  const rows = section.split("\n").filter((l) => l.startsWith("|")).slice(2);
+  const cells = rows.map((row) => row.split("|").slice(1, -1).map((cell) => cell.trim()));
+  assert.deepEqual(cells, payloads, "the table lists each payload of the a2a-attack category with its intensity and description");
+  assert.match(section, /`a2a-attack` category of hackmyagent 0\.33\.2\b/, "README names the scanner version the table was read from");
+  const sent = payloads.filter(([, intensity]) => intensity !== "aggressive").length;
+  assert.ok(
+    section.includes(`the default \`active\` intensity the command sends the ${number[sent]} \`passive\` and \`active\` payloads`),
+    `README says the command sends the ${number[sent]} passive and active payloads`
+  );
+  assert.ok(
+    section.includes(`add \`--intensity aggressive\` to send all ${number[payloads.length]}`),
+    `README says --intensity aggressive sends all ${number[payloads.length]}`
+  );
+}
+
+test("the attack table lists the payloads of the scanner's a2a-attack category, and the sentence above the command counts those it sends", () => {
+  checkAttackSection(attackSection(readme), a2aAttackPayloads);
+});
+
+test("the attack table check fails for a table with an attack the category lacks, a missing payload or another intensity, and for a sentence that miscounts the payloads the command sends", () => {
+  const section = attackSection(readme);
+  assert.throws(
+    () => checkAttackSection(section.replace("| A2A Trust Probe | passive |", "| Response poisoning | passive |"), a2aAttackPayloads),
+    /the table lists each payload/
+  );
+  assert.throws(
+    () => checkAttackSection(section.replace(/^\| A2A Chain Attack \|.*\n/m, ""), a2aAttackPayloads),
+    /the table lists each payload/
+  );
+  assert.throws(
+    () => checkAttackSection(section.replace("| A2A Message Replay Probe | aggressive |", "| A2A Message Replay Probe | active |"), a2aAttackPayloads),
+    /the table lists each payload/
+  );
+  const noneAggressive = a2aAttackPayloads.map(([name, intensity, description]) => [name, intensity.replace("aggressive", "active"), description]);
+  assert.throws(
+    () => checkAttackSection(section.replace(/\| aggressive \|/g, "| active |"), noneAggressive),
+    /README says the command sends the ten passive and active payloads/
+  );
+});
+
+test("README and the handler's header name the tests on the linked attack page, and no attack that the page and the scanner's category both lack", () => {
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const header = handler.match(/^\/\*\*[\s\S]*?\*\//)?.[0] ?? "";
+  const link = "https://agentpwn.com/attacks/a2a-attack";
+  const sentence = attackSection(readme).split("\n").find((l) => l.includes(`](${link})`));
+  assert.ok(sentence, "the attack section links the attack page");
+  assert.ok(header.includes(link), "the handler's header links the attack page");
+  // A comment wraps, so join its lines before looking for a name in it.
+  const flat = (text) => text.replace(/[\s*]+/g, " ").toLowerCase();
+  for (const page of a2aAttackPages) {
+    assert.ok(sentence.includes(page), `README names the ${page} test`);
+    assert.ok(flat(header).includes(page.toLowerCase()), `the handler's header names the ${page} test`);
+  }
+  assert.doesNotMatch(flat(readme), unlistedAttacks, "README.md names an attack the page and the category lack");
+  assert.doesNotMatch(flat(handler), unlistedAttacks, "handler.ts names an attack the page and the category lack");
+});
+
 test("the license section matches the LICENSE file", () => {
   const license = readFileSync(join(root, "LICENSE"), "utf8");
   assert.match(license, /Apache License\s+Version 2\.0/);
