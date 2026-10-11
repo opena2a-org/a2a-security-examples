@@ -8,6 +8,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
+import { contentSha256, publishedSha256, schema, schemaErrors, unknownKeywords } from "./a2a-schema.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const typescript = join(root, "examples/validated-task-handler/node_modules/typescript/lib/typescript.js");
@@ -36,6 +37,66 @@ test("README and example sources link no private repository or missing page", ()
       assert.ok(!text.includes(url), `${file.slice(root.length + 1)} links ${url}`);
     }
   }
+});
+
+test("the A2A v0.3.0 schema the tests check against has the content of the published a2a.json, and uses only keywords the validator applies", () => {
+  assert.equal(contentSha256(schema), publishedSha256);
+  assert.deepEqual(unknownKeywords(), []);
+});
+
+test("the schema check fails on a keyword it does not apply instead of skipping it", () => {
+  const definitions = { Id: { type: "string", pattern: "^[a-z]+$" } };
+  assert.throws(() => schemaErrors("Id", "ABC", definitions), /does not apply pattern/);
+  assert.deepEqual(unknownKeywords({ definitions }), ["pattern"]);
+});
+
+test("the agent card example validates against the A2A v0.3.0 AgentCard and sets no property it does not define", () => {
+  const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
+  assert.deepEqual(schemaErrors("AgentCard", card), []);
+  assert.equal(card.protocolVersion, "0.3.0");
+});
+
+test("the schema check rejects the agent card and task request the examples used before they followed A2A v0.3.0", () => {
+  const card = {
+    name: "SecureAnalysisAgent",
+    description: "Analyzes documents for security compliance",
+    url: "https://your-agent.example.com",
+    version: "1.0.0",
+    capabilities: { streaming: false, pushNotifications: false, stateTransitionHistory: false },
+    authentication: { schemes: ["bearer"], credentials: null },
+    skills: [{ id: "compliance-check", name: "Compliance Check", description: "d", tags: ["security"] }],
+    securityPolicy: { contact: "security@your-org.example.com" },
+  };
+  assert.deepEqual(schemaErrors("AgentCard", card), [
+    "AgentCard.defaultInputModes: is required",
+    "AgentCard.defaultOutputModes: is required",
+    "AgentCard.protocolVersion: is required",
+    "AgentCard.authentication: is not a property the schema defines",
+    "AgentCard.securityPolicy: is not a property the schema defines",
+  ]);
+  const task = { task: { message: { role: "user", parts: [{ type: "text", text: "Hello" }] } } };
+  assert.deepEqual(schemaErrors("SendMessageRequest", task), [
+    "SendMessageRequest.id: is required",
+    "SendMessageRequest.jsonrpc: is required",
+    "SendMessageRequest.method: is required",
+    "SendMessageRequest.params: is required",
+    "SendMessageRequest.task: is not a property the schema defines",
+  ]);
+  const typed = { kind: "message", messageId: "m1", role: "user", parts: [{ type: "text", text: "Hello" }] };
+  assert.deepEqual(schemaErrors("Message", typed), ["Message.parts[0]: matches none of the schemas in anyOf"]);
+});
+
+test("the message/send request in the README and the reply it shows validate against the A2A v0.3.0 schema", () => {
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  const blocks = [...readme.matchAll(/^```(\S*)\n([\s\S]*?)^```$/gm)].map((m) => ({ lang: m[1], body: m[2] }));
+  const i = blocks.findIndex((b) => b.lang === "bash" && b.body.includes('"method":"message/send"'));
+  assert.ok(i >= 0, "a bash block in the README sends message/send");
+  const request = JSON.parse(blocks[i].body.match(/-d '([^']+)'/)[1]);
+  assert.deepEqual(schemaErrors("SendMessageRequest", request), []);
+  assert.equal(blocks[i + 1]?.lang, "text", "the README shows the reply after the request");
+  const reply = JSON.parse(blocks[i + 1].body);
+  assert.deepEqual(schemaErrors("SendMessageSuccessResponse", reply), []);
+  assert.equal(reply.id, request.id, "the reply answers the request's id");
 });
 
 test(".gitignore excludes environment, key and secrets files", () => {
