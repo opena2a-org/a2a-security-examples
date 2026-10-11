@@ -180,8 +180,21 @@ function authorizationLines(req: express.Request): number {
 
 // RFC 6750, section 3.1: a request that repeats a parameter or is otherwise
 // malformed gets 400 and the error code invalid_request in the challenge.
-function rejectMalformed(res: express.Response, error: string): void {
+function rejectMalformed(req: express.Request, res: express.Response, error: string, reason: string): void {
+  auditAuthFailure(req, 400, reason);
   res.status(400).set("WWW-Authenticate", `${bearerChallenge}, error="invalid_request"`).json({ error });
+}
+
+// Each request that fails authentication writes an audit line with the status
+// it gets and the reason, never the header or the token.
+function auditAuthFailure(req: express.Request, status: number, reason: string): void {
+  audit({
+    timestamp: new Date().toISOString(),
+    taskId: randomUUID(),
+    clientIp: req.ip || "unknown",
+    action: "auth_failed",
+    details: { status, reason },
+  });
 }
 
 function authenticate(
@@ -194,7 +207,7 @@ function authenticate(
   // more than one is rejected whichever comes first: a server in front of
   // this one may have read another line.
   if (authorizationLines(req) > 1) {
-    rejectMalformed(res, "More than one Authorization header");
+    rejectMalformed(req, res, "More than one Authorization header", "repeated_header");
     return;
   }
 
@@ -203,6 +216,7 @@ function authenticate(
   // section 3.1).
   const authHeader = req.headers.authorization;
   if (authHeader === undefined || !bearerScheme.test(authHeader)) {
+    auditAuthFailure(req, 401, authHeader ? "other_scheme" : "no_credentials");
     res.status(401).set("WWW-Authenticate", bearerChallenge).json({ error: "Authentication required" });
     return;
   }
@@ -216,7 +230,7 @@ function authenticate(
   // 0xA0, a no-break space in Latin-1.
   const credentials = authHeader.match(/^bearer +([A-Za-z0-9._~+\/-]+=*)$/i);
   if (!credentials) {
-    rejectMalformed(res, "Malformed Authorization header");
+    rejectMalformed(req, res, "Malformed Authorization header", "malformed_header");
     return;
   }
 
@@ -227,6 +241,7 @@ function authenticate(
   if (!isValidToken(token)) {
     // RFC 6750, section 3.1: a token that is invalid or expired gets 401 and
     // the error code invalid_token in the challenge.
+    auditAuthFailure(req, 401, "invalid_token");
     res.status(401).set("WWW-Authenticate", `${bearerChallenge}, error="invalid_token"`).json({ error: "Invalid or expired token" });
     return;
   }
@@ -315,11 +330,14 @@ function parseRequest(body: unknown): ParsedRequest {
 
 // --- Task Handler ---
 
-// Parse the body only after authentication and rate limiting pass, so
-// unauthenticated and rate-limited clients never reach the JSON parser.
+// Parse the body only after rate limiting and authentication pass, so
+// rate-limited and unauthenticated clients never reach the JSON parser.
 const parseJson = express.json({ limit: "1mb" });
 
-app.post("/", authenticate, rateLimit, parseJson, async (req, res) => {
+// Every request counts toward the rate limit before authentication reads it,
+// so a client that guesses tokens gets 429, not a 401 for each guess, once it
+// has used up the requests the limiter allows it in a minute.
+app.post("/", rateLimit, authenticate, parseJson, async (req, res) => {
   const clientIp = req.ip || "unknown";
   const requestId = randomUUID();
 
