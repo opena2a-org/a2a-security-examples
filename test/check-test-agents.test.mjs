@@ -183,17 +183,58 @@ test("the test agent check says a title must be closed by </title> when a short 
   assert.deepEqual(await check("<title>Probe AI</TITLE>"), []);
 });
 
+test("the test agent check reports no title, not the title bounds, for a page that holds <title only outside a title tag", async () => {
+  const check = (body) =>
+    checkAgent(
+      { name: "Probe AI", host: "probe.dev" },
+      stubFetch({
+        "https://probe.dev/.well-known/agent.json": card,
+        "https://probe.dev/": { status: 200, type: "text/html", body },
+      })
+    );
+  // An element whose name only begins with title, and a title tag in a comment.
+  assert.deepEqual(await check("<titlebar>x</titlebar>"), [noTitle]);
+  assert.deepEqual(await check("<title-bar>x</title-bar>"), [noTitle]);
+  assert.deepEqual(await check("<!-- <title> --><p>x</p>"), [noTitle]);
+  assert.deepEqual(await check("<!----><!-- <TITLE lang='en'>Probe <AI></title> --><p>x</p>"), [noTitle]);
+  // A comment the page does not close runs to its end.
+  assert.deepEqual(await check("<p>x</p><!-- <title>Probe <AI></title>"), [noTitle]);
+  assert.deepEqual(await check("<title"), [noTitle]);
+  assert.deepEqual(await check("<titlebar>x</titlebar>" + " ".repeat(maxBodyBytes)), [noTitleInRead]);
+  assert.deepEqual(await check("<!-- <title> -->" + " ".repeat(maxBodyBytes)), [noTitleInRead]);
+  // A title tag ends its name with white space, / or >, and one outside a comment still names the bounds.
+  for (const tag of ["<title>", "<TITLE lang='en'>", "<title\n>", "<title\tlang='en'>", "<title/>"]) {
+    assert.deepEqual(await check(`${tag}Probe <AI></title>`), [noTitleInBounds], `the tag ${JSON.stringify(tag)}`);
+  }
+  assert.deepEqual(await check("<!-- a --><title>Probe <AI></title>"), [noTitleInBounds]);
+  assert.deepEqual(await check("<!--><title>Probe <AI></title>"), [noTitleInBounds]);
+  assert.deepEqual(await check("<!---><title>Probe <AI></title>"), [noTitleInBounds]);
+  assert.deepEqual(await check("<title>Probe <!-- AI</title>"), [noTitleInBounds]);
+  assert.deepEqual(await check("<!-- <title> --><title>Probe AI</title>"), []);
+});
+
 test("the test agent check reads a home page made of repeated <title with no > in linear time", async () => {
   // A title pattern with unbounded quantifiers took more than ten seconds on
-  // this 400 KB page and grew with the square of the length.
-  const fetchImpl = stubFetch({
-    "https://probe.dev/.well-known/agent.json": card,
-    "https://probe.dev/": { status: 200, type: "text/html", body: "<title".repeat(66666) },
-  });
-  const start = performance.now();
-  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), [noTitleInBoundsOrRead]);
-  const ms = performance.now() - start;
-  assert.ok(ms < 1000, `checking 66,666 repeats of <title took ${Math.round(ms)} ms`);
+  // the first of these 400 KB pages and grew with the square of the length.
+  // Nothing ends the name of that page's one tag, so it holds no title tag. The
+  // second page starts a title tag every seven characters, and the third opens
+  // a comment every four and closes none.
+  const pages = [
+    ["<title", noTitleInRead],
+    ["<title ", noTitleInBoundsOrRead],
+    ["<!--", noTitleInRead],
+  ];
+  for (const [unit, problem] of pages) {
+    const repeats = Math.ceil(400000 / unit.length);
+    const fetchImpl = stubFetch({
+      "https://probe.dev/.well-known/agent.json": card,
+      "https://probe.dev/": { status: 200, type: "text/html", body: unit.repeat(repeats) },
+    });
+    const start = performance.now();
+    assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), [problem]);
+    const ms = performance.now() - start;
+    assert.ok(ms < 1000, `checking ${repeats} repeats of ${JSON.stringify(unit)} took ${Math.round(ms)} ms`);
+  }
 });
 
 test("the test agent check reads a title that ends within the first 256 KB of the home page, and none that ends after them", async () => {
