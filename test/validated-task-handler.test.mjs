@@ -257,6 +257,20 @@ async function within(promise, ms, message) {
   }
 }
 
+// Poll check every interval ms until it holds or ms have passed, and resolve
+// with whether it holds. The wait is bounded by time, not by a count of polls:
+// a server stops some seconds after its signal on a busy host, and a wait that
+// gave up after 100 polls, 5 seconds, failed there while every other wait in
+// this file allows 10.
+async function settled(check, ms, interval = 50) {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+  return true;
+}
+
 // Wait for closed, the close event of proc, and fail with message after ms
 // instead of waiting forever. When the wait fails, proc and its stdout and
 // stderr pipes are unref'd: a process still running would otherwise keep the
@@ -864,6 +878,17 @@ async function stopWithSigkill(socketOf = tsxSocket) {
     () => killServer(proc, closed)
   );
 }
+
+test("a wait for a condition is bounded by the time given, not by a count of polls", async () => {
+  // The wait for an interrupted run's servers to stop once gave up after 100
+  // polls, 5 seconds, while a server stopped later than that on a busy host.
+  let polls = 0;
+  assert.equal(await settled(() => ++polls >= 150, 10000, 1), true, "a condition that holds on the 150th poll is reached");
+  assert.equal(polls, 150, "the wait ends with the poll on which the condition holds");
+  const start = Date.now();
+  assert.equal(await settled(() => false, 100, 1), false, "a condition that never holds ends the wait once the time has passed");
+  assert.ok(Date.now() - start >= 100, "the wait lasts the time given");
+});
 
 test("stopping a server ends tsx and the server it started even when tsx cannot pass the signal on", async () => {
   // SIGKILL ends tsx at once, as ChildProcess.kill() ends it on Windows, so tsx
@@ -2067,10 +2092,10 @@ test(
     };
     try {
       // A run that has ended has started all the servers it will start.
-      for (let i = 0; i < 600 && groups.size < 2 && !ended; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      await settled(() => {
         groups = descendantGroups(run.pid);
-      }
+        return groups.size >= 2 || ended;
+      }, 30000);
       const runningBefore = running();
       // When a server has not started or has already stopped, a test in the
       // run fails, and the run reports the server's output only once that test
@@ -2097,9 +2122,8 @@ test(
       );
       process.kill(-run.pid, "SIGINT");
       await within(exited, 10000, `the interrupted run did not exit within 10 seconds:\n${log}`);
-      for (let i = 0; i < 100 && running().length > 0; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
+      // On a busy host a server stops some seconds after the run signals it.
+      await settled(() => running().length === 0, 10000);
       assert.deepEqual(running(), [], `no server the interrupted run started is still running:\n${log}`);
       // The process that has exited is the one that starts the test file. The
       // one that runs the file removes the directory, and can end after it.
