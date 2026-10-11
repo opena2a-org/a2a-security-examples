@@ -202,15 +202,20 @@ test("step 1 names each form of a Bearer header that gets 400, with a header of 
   assert.ok(named.some((header) => /^Bearer[^ ]/.test(header)), "step 1 gives a header whose scheme name starts with Bearer as another scheme");
 });
 
-test("the 401 examples of step 1 are read whole when a header holds a period", () => {
+test("the 401 examples of step 1 are read whole when a header holds a period, and end at the first comma before gets 401", () => {
   // The handler answers 401 to these headers, so step 1 could give them.
   const scheme = bearerSchemePattern();
   const headers = ["Bearerx demo.token", "Bearer.x demo-token"];
-  for (const header of headers) {
+  const later = "Digest demo";
+  for (const header of [...headers, later]) {
     assert.doesNotMatch(received(header), scheme, `handler.ts reads ${header} as another scheme`);
   }
   const sentence = `A request without the header, or whose header names another scheme, such as \`${headers[0]}\` or \`${headers[1]}\`, gets 401.`;
   assert.deepEqual(otherSchemeExamples(sentence), headers, "the checks of step 1 read each 401 example whole");
+  // A later clause that also ends with ", gets 401." gives no example of the
+  // 401 sentence, so a capture that runs past the first one fails here.
+  const followed = `${sentence} A request whose header names a scheme such as \`${later}\`, gets 401.`;
+  assert.deepEqual(otherSchemeExamples(followed), headers, "the checks of step 1 read the 401 examples of the first clause only");
 });
 
 test("step 1 says Bearer in any letter case and one or more spaces, and the handler's pattern takes both", () => {
