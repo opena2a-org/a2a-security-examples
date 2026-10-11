@@ -12,8 +12,8 @@
  * - Audit logging
  * - Proper error handling (no internal detail leaks)
  *
- * Test against known A2A attacks, including task injection and response
- * poisoning:
+ * Test an agent against A2A attack pages that each hide an indirect prompt
+ * injection (agent impersonation, delegation abuse and worm propagation):
  * https://agentpwn.com/attacks/a2a-attack
  */
 

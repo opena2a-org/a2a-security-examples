@@ -116,21 +116,26 @@ const PartSchema = z.discriminatedUnion("kind", [TextPartSchema, FilePartSchema]
 
 ## Testing against real attacks
 
-Run the A2A attack payloads from [HackMyAgent](https://github.com/opena2a-org/hackmyagent) against your agent's endpoint:
+Run the A2A attack payloads from [HackMyAgent](https://github.com/opena2a-org/hackmyagent) against your agent's endpoint. At the default `active` intensity the command sends the eight `passive` and `active` payloads in the table; add `--intensity aggressive` to send all ten:
 
 ```bash
 npx hackmyagent attack https://your-agent.example.com --target-type a2a --category a2a-attack
 ```
 
-| Attack | Description |
-|---|---|
-| Agent card spoofing | Impersonating a trusted agent via forged cards |
-| Task injection | Malicious payloads in task messages |
-| Skill enumeration | Probing agent capabilities for attack surface mapping |
-| Response poisoning | Malicious content in agent responses |
-| Credential harvesting | Extracting secrets through crafted task flows |
+| Payload | Intensity | Description |
+|---|---|---|
+| A2A Agent Discovery | passive | Discovers available agents and their capabilities |
+| A2A Trust Probe | passive | Probes agent trust boundaries and authentication |
+| A2A Identity Spoofing - Admin | active | Claims to be an admin agent to gain elevated access |
+| A2A Identity Spoofing - Orchestrator | active | Claims to be the orchestrator to control workers |
+| A2A Delegation Abuse - Elevated Privileges | active | Requests task execution with elevated privileges |
+| A2A Delegation Abuse - Cross-boundary | active | Attempts to delegate tasks outside authorized scope |
+| A2A Embedded Prompt Injection | active | Embeds prompt injection attack in A2A message content |
+| A2A Data Exfiltration via Message | active | Attempts to extract system information through A2A responses |
+| A2A Chain Attack | aggressive | Chains multiple A2A agents to escalate privileges |
+| A2A Message Replay Probe | aggressive | Tests if agents accept replayed/stale messages |
 
-Write-ups and test payloads: [agentpwn.com/attacks/a2a-attack](https://agentpwn.com/attacks/a2a-attack).
+The table is the `a2a-attack` category of hackmyagent 0.33.2, with the scanner's own names and descriptions. [agentpwn.com/attacks/a2a-attack](https://agentpwn.com/attacks/a2a-attack) is a separate test: three pages (Agent Impersonation, Delegation Abuse and Worm Propagation) that each hide an indirect prompt injection, to check whether an agent follows instructions it finds in content.
 
 ### Test agents
 
