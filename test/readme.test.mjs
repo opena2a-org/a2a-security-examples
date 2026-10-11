@@ -176,10 +176,13 @@ test("README states the Node.js version npm test needs, as the root package.json
 const nodeTestMajor = 18;
 const nodeTestAddedIn = { test: 0, before: 8, after: 8 };
 
-// The names an import declaration at the start of a line takes from node:test,
-// with either quote, a default import, renamed names and a list over several
-// lines. The default export is test(). A namespace import gives "*", as it does
-// not show which names the file uses.
+// The names an import declaration takes from node:test when it starts a line
+// with import and a space, tab or line break, with either quote, a default
+// import, renamed names and a list over several lines. The default export is
+// test(). A namespace import gives "*", as it does not show which names the
+// file uses. The reader does not handle import{ or import* with no space after
+// import, a comment inside the declaration, an indented declaration, import()
+// or require.
 function namesImportedFromNodeTest(text) {
   const names = [];
   const declaration = /^import\s+(?:([\w$]+)\s*,?\s*)?(?:\{([^}]*)\}|(\*)\s*as\s+[\w$]+)?\s*from\s*["']node:test["']/gm;
@@ -194,8 +197,9 @@ function namesImportedFromNodeTest(text) {
   return names;
 }
 
-// The lowest Node.js 18 minor release that has node --test and every name the
-// test files import from node:test.
+// The lowest Node.js 18 minor release that has node --test and every name
+// namesImportedFromNodeTest() finds in the test files. A name a file takes from
+// node:test in a form the reader does not handle is not counted.
 function lowestMinorThatCanRunTheTests() {
   let minor = 1;
   for (const file of readdirSync(join(root, "test")).filter((name) => name.endsWith(".mjs"))) {
@@ -209,7 +213,7 @@ function lowestMinorThatCanRunTheTests() {
   return minor;
 }
 
-test("the node:test import reader finds names in every import form", () => {
+test("the node:test import reader finds names with either quote, a default import, renamed names and a list over several lines, and marks a namespace import", () => {
   assert.deepEqual(namesImportedFromNodeTest('import { test, before, after } from "node:test";\n'), ["test", "before", "after"]);
   assert.deepEqual(namesImportedFromNodeTest("import { describe } from 'node:test';\n"), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('import test, { mock } from "node:test";\n'), ["test", "mock"]);
