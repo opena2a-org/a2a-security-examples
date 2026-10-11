@@ -940,7 +940,7 @@ function regularExpressionEnds(source) {
 
 // Whether moduleTokens() reads a slash right after the token as division, as
 // it does after a token that ends an operand. moduleTokens() says which tokens
-// these are.
+// these are, and which of them a slash on a later line does not divide after.
 function slashDivides(token) {
   return token !== undefined && (token.type === "name" ? !token.beforeExpression : token.type !== "punct" || token.value === ")" || token.value === "]" || token.postfix);
 }
@@ -964,10 +964,16 @@ function slashDivides(token) {
 // name a const, let or var declares right after the opening parenthesis),
 // after ) or ], after a number, string, template or regular expression, and
 // after a ++ or -- that follows one of these on the same line (a line break
-// before a ++ or --, in a comment or not, makes it a prefix operator). So a
+// before a ++ or --, in a comment or not, makes it a prefix operator). After
+// the name right after the keyword let or var, as in let x, only a slash on
+// the same line is read as division: that name is not an operand, so in a
+// valid module a slash after it comes after a line break, in a comment or
+// not, and starts a regular expression. So a
 // slash right after the ) of if (...), for (...), for await (...) or
 // while (...), or right after a ++ or -- that follows that ) on the same
-// line, is read as division, though it starts a regular expression there.
+// line, is read as division, though it starts a regular expression there, and
+// so is a slash on a later line than a name a let or var lists after its
+// first, as in let x, y.
 // Any other slash starts a regular expression if one closes on the same
 // line, and is read as a punctuator if not, though in TypeScript one right
 // after the ! of a non-null assertion, as in a! / 2, or right after the > that
@@ -1039,7 +1045,11 @@ function moduleTokens(text) {
   while (i < source.length) {
     const c = source[i];
     const previous = tokens.at(-1);
-    const regularExpression = c === "/" && !slashDivides(previous) ? regularExpressionEnd(i) : -1;
+    // A slash after the name right after let or var starts a regular
+    // expression only on a later line. The line break is looked for below,
+    // where a token is read next, so that the text between two tokens is
+    // searched once.
+    const regularExpression = c === "/" && (!slashDivides(previous) || previous.firstDeclared) ? regularExpressionEnd(i) : -1;
     identifier.lastIndex = i;
     const name = identifier.exec(source);
     if (/\s/.test(c)) i++;
@@ -1060,7 +1070,7 @@ function moduleTokens(text) {
       if (k >= source.length) unclosed = true;
       tokens.push({ type: "string", value: decodeEscapes(source.slice(i + 1, k)) });
       i = k + 1;
-    } else if (regularExpression >= 0) {
+    } else if (regularExpression >= 0 && (!slashDivides(previous) || lineBreakBefore())) {
       const flags = /[\p{ID_Continue}$]*/uy;
       flags.lastIndex = regularExpression;
       flags.exec(source);
@@ -1077,11 +1087,18 @@ function moduleTokens(text) {
       const declared = ["const", "let", "var"].includes(previous?.raw) && tokens.at(-2)?.type === "punct" && tokens.at(-2).value === "(";
       const keyword = forHead && !declared && (slashDivides(previous) || (previous?.type === "punct" && previous.value === "}"));
       const of = name[0] === "of" && !keyword;
+      // The name right after the keyword let or var is the first variable the
+      // declaration lists, as in let x. A let or var after a . or # is a
+      // property or private name, not the keyword. The name after const is
+      // not marked: a const declaration has an initializer, so no slash comes
+      // right after its name, and in TypeScript the const of as const
+      // declares nothing.
+      const firstDeclared = ["let", "var"].includes(previous?.raw) && !previous.property;
       // An as or satisfies starts a TypeScript type, which starts with the
       // name after it and goes on with a name after a . that follows that one.
       const typeOperator = !property && ["as", "satisfies"].includes(name[0]) && endsOperand(previous) && !lineBreakBefore();
       const typeName = previous?.typeOperator === true || (previous?.type === "punct" && previous.value === "." && tokens.at(-2)?.typeName === true);
-      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), property, beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]), typeOperator, typeName });
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), property, firstDeclared, beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]), typeOperator, typeName });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
       const number = /\.?\d[\w.]*/y;
@@ -1129,9 +1146,10 @@ function moduleTokens(text) {
 // string or template is not a declaration, nor is import text inside a slash
 // pair that moduleTokens() reads as a regular expression. moduleTokens() reads
 // a slash right after the ) of if (...), for (...), for await (...) or
-// while (...), or right after a ++ or -- that follows that ) on the same line,
-// as division, so import text inside a regular expression there is read as a
-// declaration.
+// while (...), right after a ++ or -- that follows that ) on the same line,
+// or on a later line than a name a let or var lists after its first, as in
+// let x, y, as division, so import text inside a regular expression there is
+// read as a declaration.
 // The reader does not handle import(), require or an import with a phase
 // keyword such as import defer.
 function namesImportedFromNodeTest(text) {
@@ -1410,6 +1428,71 @@ test("the node:test import reader reads an of inside the parentheses after a pro
     "obj?.for(x of / 2), t = `/`;\n",
     "obj.for await (x of / 2), t = `/`;\n",
     "class C { #for() {} m() { this.#for(x of / 2), t = `/`; } }\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+});
+
+test("the node:test import reader reads a slash on the line after a let or var that declares one name without an initializer as a regular expression, and a slash after an initializer as division", () => {
+  // A line break ends let x before the slash, which starts a regular
+  // expression. Read as division, the slash would leave the backtick after it
+  // to open a template that hides the declaration.
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  for (const before of [
+    "let x\n/`/g.exec(s);\n",
+    "var x\n/`/g.exec(s);\n",
+    "let of\n/`/g.exec(s);\n",
+    "var of\n/`/g.exec(s);\n",
+    "export let x\n/`/g.exec(s);\n",
+    "let \\u0078\r\n/`/g.exec(s);\n",
+    "let x // note\n/`/g.exec(s);\n",
+    "var x /* note\n */ /`/g.exec(s);\n",
+    "if (a) { let x\n/`/g.exec(s); }\n",
+    "function f() { var x\n/`/g.exec(s); }\n",
+    "let x\r/`/g.exec(s);\n",
+    "let x\u{2028}/`/g.exec(s);\n",
+    "var x\u{2029}/`/g.exec(s);\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+  // Read as the start of a regular expression, the slash after an initializer
+  // would close at the slash in the template, and the backtick after it would
+  // open a template that hides the declaration.
+  for (const before of ["let x = a\n/ 2, t = `/`;\n", "var x = a\n/ 2, t = `/`;\n", "let x = of\n/ 2, t = `/`;\n"]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+  // A slash after a name the declaration lists after its first starts a
+  // regular expression too, but the reader reads it as division, so it reads
+  // the import text inside as a declaration.
+  assert.deepEqual(namesImportedFromNodeTest('let x, y\n/import { describe } from "node:test"/.test(s);\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('var x = 1, y\n/import { describe } from "node:test"/.test(s);\n'), ["describe"]);
+});
+
+test("the node:test import reader reads the of after the name a let or var declares in the parentheses after for or for await as the for...of keyword, and a slash on the same line as the name after let or var, or on the line after a name that follows as const or a property named let or var, as division", () => {
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  // The of after the name a let or var declares there is the keyword, as it is
+  // after any other name, and the slash after it starts a regular expression.
+  for (const before of [
+    "for (let x of /`/g.exec(s)) f(x);\n",
+    "for (var x of /`/g.exec(s)) f(x);\n",
+    "for await (let x of /`/g.exec(s)) f(x);\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+  // Read as the start of a regular expression, each slash below would close at
+  // the slash in the template, and the backtick after it would open a template
+  // that hides the declaration. No module has a slash on the same line as the
+  // name right after let or var. The reader does not check that, and reads one
+  // as division, as it does after any other name.
+  assert.deepEqual(namesImportedFromNodeTest("let x / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("var x /* note */ / 2, t = `/`;\n" + declaration), ["after"]);
+  // The const of a TypeScript as const declares nothing, and a let or var
+  // after a . is a property name, so the name on the next line is an operand
+  // and the slash on the line after it divides.
+  for (const before of [
+    "const a = [1] as const\nb\n/ 2, t = `/`;\n",
+    "y = o.let\nx\n/ 2, t = `/`;\n",
+    "y = o?.var\nx\n/ 2, t = `/`;\n",
   ]) {
     assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
   }
