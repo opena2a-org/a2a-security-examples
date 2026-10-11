@@ -131,12 +131,14 @@ function audit(entry: AuditEntry): void {
 
 // --- Header Line Limit ---
 
-// The most header lines a request may have. Node.js 22 and later answer a
-// request with more with a bare HTTP 431 before any handler runs. Node.js 20
-// instead stops reading header lines once it holds this many and passes the
-// request on, so a later line, such as a second Authorization header, is in
-// neither req.headers nor req.rawHeaders. A request that has this many may
-// have had more, so it gets 431 here whichever release runs the example.
+// The most header lines a request may have. Node.js 22.23.2, 24.18.1, 26.5.1
+// and later releases of those three lines answer a request with more with a
+// bare HTTP 431 before any handler runs. Node.js 18 and 20, and Node.js 22, 24
+// and 26 releases before those, instead stop reading header lines once they
+// hold this many and pass the request on, so a later line, such as a second
+// Authorization header, is in neither req.headers nor req.rawHeaders. A
+// request that has this many may have had more, so it gets 431 here whichever
+// release runs the example.
 const maxHeaderLines = 1000;
 
 function limitHeaderLines(
