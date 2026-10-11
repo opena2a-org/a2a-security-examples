@@ -385,15 +385,39 @@ test("the node:test import reader reads a name with letters outside ASCII, Unico
   assert.deepEqual(namesImportedFromNodeTest('  import { test, /* after, */ before } // it\n  from "node:test";\n'), ["test", "before"]);
 });
 
-test("the node:test import reader does not read import text inside a comment, string, template or regular expression as a declaration", () => {
+test("the node:test import reader does not read import text inside a comment, string, template or regular expression, or an import keyword written with an escape sequence, as a declaration", () => {
   assert.deepEqual(namesImportedFromNodeTest('/*\nimport { describe } from "node:test";\n*/\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('// import { describe } from "node:test";\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('const s = `\nimport { describe } from "node:test";\n`;\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('const s = `${`\nimport { describe } from "node:test";\n`}`;\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('const s = "\\\nimport { describe } from \'node:test\';";\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('const s = "\\\r\nimport { describe } from \'node:test\';";\r\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('const re = /import { describe } from "node:test"/;\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('const m = await import("node:test");\nconsole.log(import.meta.url);\n'), []);
-  assert.deepEqual(namesImportedFromNodeTest('const quote = /["\'`]/;\nimport { after } from "node:test";\n'), ["after"]);
-  assert.deepEqual(namesImportedFromNodeTest('const half = (a + b) / 2, slash = "/"; import { after } from "node:test";\n'), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest('\\u0069mport { describe } from "node:test";\n'), []);
+});
+
+test("the node:test import reader finds a declaration after a regular expression, template, string, division or hashbang line that holds a quote or a backtick", () => {
+  const declaration = 'import { after } from "node:test";\n';
+  for (const before of [
+    'const quote = /["\'`]/;\n',
+    'const quote = /[`\'"]/;\n',
+    "const re = /[/]`/;\n",
+    "const re = /\\/`/;\n",
+    "const t = typeof /`/;\n",
+    "const s = `\\``;\n",
+    "const s = `${x}`;\n",
+    'const s = `${ {a: 1}.a.replace(/`/g, "") }`;\n',
+    'const half = (a + b) / 2, slash = "/"; ',
+    'const half = a[0] / 2, slash = "/"; ',
+    // A slash after the ) of an if is read as division, so the quote after it
+    // starts a string, which ends at the line break.
+    'if (x) /"/.test(s);\n',
+    "#!/usr/bin/env node `\n",
+    "\u{FEFF}#!/usr/bin/env node `\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
 });
 
 test("the node:test import reader reads a slash after export default as a regular expression, and a slash after a postfix ++ or -- or a property named default as division", () => {
