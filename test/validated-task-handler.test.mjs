@@ -1300,7 +1300,7 @@ test("a Bearer header with no token or a separator other than spaces gets 400, a
     // RFC 6750, section 3.1: a malformed request gets 400 and invalid_request.
     // Node.js drops the spaces at the end of a header value, so Bearer and a
     // space is Bearer alone.
-    for (const header of ["Bearer", "Bearer ", "bearer", "Bearer\tdemo-token", "Bearer,demo-token"]) {
+    for (const header of ["Bearer", "Bearer ", "bearer", "Bearer\tdemo-token", "Bearer,demo-token", "Bearer:demo-token"]) {
       const res = await postRaw(serverPort, [`Authorization: ${header}`]);
       assert.equal(res.status, 400, `${JSON.stringify(header)} gets 400`);
       assert.deepEqual(JSON.parse(res.body), { error: "Malformed Authorization header" });

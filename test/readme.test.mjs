@@ -119,10 +119,14 @@ test("step 1 gives 401 for a missing header or another scheme, and 400 for a Bea
   assert.doesNotMatch(step, /401 without a token/, "a header with a token in it can get 401 too");
   const [rejected, invalid = ""] = step.split("; an invalid token ");
   assert.match(rejected, /one or more spaces and one token/, "step 1 says what follows Bearer in a header that passes");
-  const other = rejected.match(/A request without the header, or whose header names another scheme, such as `([^`]+)`, gets 401\./);
+  const other = rejected.match(/A request without the header, or whose header names another scheme, such as ([^.]+), gets 401\./);
   assert.ok(other, "step 1 gives 401 for a missing header and for one that names another scheme");
-  assert.doesNotMatch(received(other[1]), scheme, `handler.ts reads ${other[1]} as another scheme`);
-  assert.match(rejected, /As RFC 6750, section 3\.1, suggests, a request that sends the header more than once, or whose `Bearer` header has no token, more than one token or a character outside that set, gets 400, so /, "step 1 gives 400 for a malformed Bearer header");
+  const named = [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  assert.ok(named.length > 0, "step 1 gives a header that names another scheme");
+  for (const header of named) {
+    assert.doesNotMatch(received(header), scheme, `handler.ts reads ${header} as another scheme`);
+  }
+  assert.match(rejected, /As RFC 6750, section 3\.1, suggests, a request that sends the header more than once gets 400, and so does one whose header names the `Bearer` scheme in any other form: /, "step 1 gives 400 for a malformed Bearer header");
   const examples = [...rejected.matchAll(/`(Bearer [^`]+)`/g)].map((m) => m[1]);
   assert.ok(examples.length >= 2, "step 1 gives Bearer headers that have a token in them and get 400");
   for (const header of examples) {
@@ -135,6 +139,61 @@ test("step 1 gives 401 for a missing header or another scheme, and 400 for a Bea
   assert.match(sent[1], credentials, `handler.ts reads a token from ${sent[1]}`);
   assert.match(invalid, /^gets 401\./, "step 1 gives 401 for an invalid token");
   assert.doesNotMatch(step, /\b403\b/, "step 1 gives no 403");
+});
+
+test("step 1 names each form of a Bearer header that gets 400, with a header of each form that the handler answers 400 to", () => {
+  // test/validated-task-handler.test.mjs sends headers of each form.
+  const scheme = bearerSchemePattern();
+  const credentials = credentialsPattern();
+  const { made, ending } = tokenCharacters(credentials);
+  const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
+  const [rejected] = step.split("; an invalid token ");
+  const forms = rejected.match(/names the `Bearer` scheme in any other form: (.+)$/);
+  assert.ok(forms, "step 1 gives 400 for a header that names the Bearer scheme in any form but Bearer, one or more spaces and one token");
+  const token = (header) => received(header).replace(/^Bearer +/, "");
+  const kinds = {
+    "no token": (header) => header === "Bearer",
+    "a tab, comma, colon or other character a scheme name cannot hold in place of the spaces": (header) => /^Bearer[^ ]/.test(header),
+    "more than one token": (header) => /^Bearer +[^ ]+ +[^ ]/.test(header),
+    "a token that starts with `=` or has a character other than `=` after an `=`": (header) => /^(=|[^ ]*=[^=])/.test(token(header)),
+    "a character outside that set": (header) => [...token(header)].some((c) => !made.includes(c) && !ending.includes(c)),
+  };
+  for (const [kind, isKind] of Object.entries(kinds)) {
+    const start = forms[1].indexOf(`with ${kind} (`);
+    assert.ok(start >= 0, `step 1 gives 400 for a Bearer header with ${kind}, and an example`);
+    const listed = forms[1].slice(start + `with ${kind} (`.length).split(")")[0];
+    const examples = [...listed.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    assert.ok(examples.length > 0, `step 1 gives a Bearer header with ${kind}`);
+    for (const header of examples) {
+      assert.ok(isKind(header), `${header} is a Bearer header with ${kind}`);
+      assert.match(received(header), scheme, `handler.ts reads ${header} as the Bearer scheme`);
+      assert.doesNotMatch(received(header), credentials, `handler.ts answers 400 to ${header}`);
+    }
+  }
+  // Of the characters a header value can hold (RFC 9110, section 5.5: tab,
+  // the visible ASCII characters and the bytes 0x80 to 0xFF), each one a
+  // scheme name can hold (section 5.6.2) makes Bearer the start of another
+  // scheme name, and each other one in place of the spaces gets 400.
+  const tchar = /^[!#$%&'*+.^_`|~0-9A-Za-z-]$/;
+  const decoded = Array.from({ length: 256 }, (_, byte) => String.fromCharCode(byte));
+  const sendable = decoded.filter((c) => c === "\t" || (c > " " && c < "\x7f") || c >= "\x80");
+  for (const c of sendable) {
+    const header = `Bearer${c}demo-token`;
+    if (tchar.test(c)) {
+      assert.doesNotMatch(header, scheme, `handler.ts reads ${JSON.stringify(header)} as another scheme`);
+    } else {
+      assert.match(header, scheme, `handler.ts reads ${JSON.stringify(header)} as the Bearer scheme`);
+      assert.doesNotMatch(header, credentials, `handler.ts answers 400 to ${JSON.stringify(header)}`);
+    }
+  }
+  for (const c of ["\t", ",", ":"]) {
+    assert.ok(!tchar.test(c), `a scheme name cannot hold ${JSON.stringify(c)}`);
+  }
+  // The 401 sentence gives a header whose scheme name only starts with Bearer.
+  const other = rejected.match(/whose header names another scheme, such as ([^.]+), gets 401\./);
+  assert.ok(other, "step 1 gives 401 for a header that names another scheme");
+  const named = [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  assert.ok(named.some((header) => /^Bearer[^ ]/.test(header)), "step 1 gives a header whose scheme name starts with Bearer as another scheme");
 });
 
 test("step 1 says Bearer in any letter case and one or more spaces, and the handler's pattern takes both", () => {
@@ -155,7 +214,7 @@ test("step 1 gives 400 for a request with more than one Authorization header, wh
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   assert.match(handler, /req\.rawHeaders/, "handler.ts counts the Authorization header lines of a request");
   const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
-  assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once, [^;]*gets 400/, "step 1 gives 400 for a header sent more than once");
+  assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once gets 400/, "step 1 gives 400 for a header sent more than once");
 });
 
 test("step 1 names the challenges the handler's 400 and 401 responses carry and the header line count at which it answers 431", () => {
