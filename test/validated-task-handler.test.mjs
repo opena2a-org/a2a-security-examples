@@ -18,8 +18,8 @@ const example = join(root, "examples/validated-task-handler");
 const tsc = join(example, "node_modules/typescript/bin/tsc");
 const tsx = join(example, "node_modules/tsx/dist/cli.mjs");
 
-// The number of requests a server answers from one client in a minute before
-// it answers 429, as handler.ts sets it.
+// The points handler.ts gives its rate limiter: its limit of requests per
+// minute per client IP.
 const rateLimitPoints = Number(readFileSync(join(example, "handler.ts"), "utf8").match(/points: (\d+), \/\/ requests/)[1]);
 
 function freePort() {
