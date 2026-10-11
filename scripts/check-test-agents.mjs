@@ -33,13 +33,32 @@ export function siteName(title) {
   return text.split(" — ")[0].trim();
 }
 
+// The start of a title tag: "<title" and one of the characters that end a tag
+// name, which are white space, "/" and ">", so "<titlebar>" starts none.
+const titleTagStart = /<title[\t\n\f\r />]/i;
+
+// Whether a page holds the start of a title tag outside its comments. A
+// comment the page does not close runs to its end. Each search starts where
+// the last one stopped, which keeps the scan linear in the length of the page.
+function hasTitleTag(body) {
+  let from = 0;
+  for (;;) {
+    const open = body.indexOf("<!--", from);
+    if (titleTagStart.test(open === -1 ? body.slice(from) : body.slice(from, open))) return true;
+    // "<!-->" and "<!--->" are whole comments, so the end may share the dashes of the start.
+    const close = open === -1 ? -1 : body.indexOf("-->", open + 2);
+    if (close === -1) return false;
+    from = close + 3;
+  }
+}
+
 // The problem with a home page in which the check found no title. When the
-// page runs past the part the check reads, or holds a "<title" the pattern
+// page runs past the part the check reads, or holds a title tag the pattern
 // does not match, the message names the bounds, since a title may lie past
 // them, and the closing tag, since a title within them may not be closed.
 function missingTitle({ body, truncated }) {
   const kb = maxBodyBytes / 1024;
-  if (!/<title/i.test(body)) {
+  if (!hasTitleTag(body)) {
     return truncated ? `the home page has no title in its first ${kb} KB, which is all the check reads` : "the home page has no title";
   }
   const bounds = `a title tag with at most ${maxTitleAttributes} characters of attributes and at most ${maxTitleText} characters of text without a <, closed by </title>`;
