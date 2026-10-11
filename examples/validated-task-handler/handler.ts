@@ -134,11 +134,12 @@ function audit(entry: AuditEntry): void {
 // The most header lines a request may have. Node.js 22.23.2, 24.18.1, 26.5.1
 // and later releases of those three lines answer a request with more with a
 // bare HTTP 431 before any handler runs. Node.js 18 and 20, and Node.js 22, 24
-// and 26 releases before those, instead stop reading header lines once they
-// hold this many and pass the request on, so a later line, such as a second
-// Authorization header, is in neither req.headers nor req.rawHeaders. A
-// request that has this many may have had more, so it gets 431 here whichever
-// release runs the example.
+// and 26 releases before those, instead pass the request on. There,
+// req.headers is built from the first 1,000 lines only, and req.rawHeaders
+// holds the first 1,000 or, on releases such as 18.20.8, 20.20.2, 22.0.0 and
+// 24.0.0, up to the first 1,023, so a later line, such as a second
+// Authorization header, may be in neither. A request that has this many may
+// have had more, so it gets 431 here whichever release runs the example.
 const maxHeaderLines = 1000;
 
 function limitHeaderLines(
@@ -521,8 +522,9 @@ const server = app.listen(port, () => {
   console.log(`Secure A2A agent listening on port ${port}`);
   console.log(`Agent card: http://localhost:${port}/.well-known/agent-card.json`);
 });
-// Node.js reads up to 1,000 header lines when this is unset. Setting it keeps
-// the limit Node.js applies and the one the handler checks the same.
+// Node.js builds req.headers from at most 1,000 header lines when this is
+// unset. Setting it keeps the limit Node.js applies and the one the handler
+// checks the same.
 server.maxHeadersCount = maxHeaderLines;
 
 // Without a listener, a port that is already taken ends the process with the
