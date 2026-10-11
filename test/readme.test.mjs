@@ -219,7 +219,8 @@ function regularExpressionEnd(source, start) {
 // read as division after a name other than a keyword in
 // keywordsBeforeExpression (a keyword after a . is a property name and one
 // after a # is a private name, while one after ... is a keyword, except of,
-// which is a keyword only after a token a slash divides after, or after }),
+// which is a keyword only after }, or after a token a slash divides after
+// other than the keyword const, let or var),
 // after ) or ],
 // after a number, string, template or regular expression, and after a ++ or --
 // that follows one of these on the same line (a line break before a ++ or --,
@@ -284,9 +285,12 @@ function moduleTokens(text) {
     } else if (name) {
       const property = previous?.type === "punct" && (previous.value === "." || previous.value === "#");
       // of is a variable name unless it follows the end of an operand or of a
-      // pattern, as in for (x of ...) or for (const { a } of ...).
-      const of = name[0] === "of" && !slashDivides(previous) && !(previous?.type === "punct" && previous.value === "}");
-      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]) });
+      // pattern, as in for (x of ...) or for (const { a } of ...). Right after
+      // the keyword const, let or var it is the variable declared, as in
+      // for (const of of ...).
+      const declared = previous?.type === "name" && !previous.property && ["const", "let", "var"].includes(previous.raw);
+      const of = name[0] === "of" && (declared || (!slashDivides(previous) && !(previous?.type === "punct" && previous.value === "}")));
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), property, beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]) });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
       const number = /\.?\d[\w.]*/y;
@@ -477,6 +481,17 @@ test("the node:test import reader reads a slash after a variable named of as div
   assert.deepEqual(namesImportedFromNodeTest("for (const [x] of /`/g.exec(s)) f(x);\n" + declaration), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest("for (const { x } of /`/g.exec(s)) f(x);\n" + declaration), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest("for (o.of of /`/g.exec(s)) f(o);\n" + declaration), ["after"]);
+  // An of right after const, let or var is the variable the loop declares, and
+  // the of after it is the keyword.
+  for (const before of [
+    "for (const of of /`/g.exec(s)) f(of);\n",
+    "for (let of of /`/g.exec(s)) f(of);\n",
+    "for (var of of /`/g.exec(s)) f(of);\n",
+    "for await (const of of /`/g.exec(s)) f(of);\n",
+    "for (o.let of /`/g.exec(s)) f(o);\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
 });
 
 test("the node:test import reader reads a slash after a number, string, template or regular expression as division", () => {
