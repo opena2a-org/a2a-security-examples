@@ -108,6 +108,14 @@ function received(header) {
   return Buffer.from(header, "utf8").toString("latin1");
 }
 
+// The headers the 401 sentence of step 1 gives as examples of another scheme,
+// or null when step 1 has no such sentence. The capture runs lazily to the
+// comma before "gets 401", as a scheme name and a token can each hold a period.
+function otherSchemeExamples(rejected) {
+  const other = rejected.match(/A request without the header, or whose header names another scheme, such as (.+?), gets 401\./);
+  return other && [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+}
+
 test("step 1 gives 401 for a missing header or another scheme, and 400 for a Bearer header that is not followed by one token", () => {
   // RFC 6750, section 3.1: a request with no bearer credentials gets 401 and a
   // malformed one gets 400. The handler answers 400 to a header such as Bearer
@@ -119,9 +127,8 @@ test("step 1 gives 401 for a missing header or another scheme, and 400 for a Bea
   assert.doesNotMatch(step, /401 without a token/, "a header with a token in it can get 401 too");
   const [rejected, invalid = ""] = step.split("; an invalid token ");
   assert.match(rejected, /one or more spaces and one token/, "step 1 says what follows Bearer in a header that passes");
-  const other = rejected.match(/A request without the header, or whose header names another scheme, such as ([^.]+), gets 401\./);
-  assert.ok(other, "step 1 gives 401 for a missing header and for one that names another scheme");
-  const named = [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  const named = otherSchemeExamples(rejected);
+  assert.ok(named, "step 1 gives 401 for a missing header and for one that names another scheme");
   assert.ok(named.length > 0, "step 1 gives a header that names another scheme");
   for (const header of named) {
     assert.doesNotMatch(received(header), scheme, `handler.ts reads ${header} as another scheme`);
@@ -190,10 +197,20 @@ test("step 1 names each form of a Bearer header that gets 400, with a header of 
     assert.ok(!tchar.test(c), `a scheme name cannot hold ${JSON.stringify(c)}`);
   }
   // The 401 sentence gives a header whose scheme name only starts with Bearer.
-  const other = rejected.match(/whose header names another scheme, such as ([^.]+), gets 401\./);
-  assert.ok(other, "step 1 gives 401 for a header that names another scheme");
-  const named = [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  const named = otherSchemeExamples(rejected);
+  assert.ok(named, "step 1 gives 401 for a header that names another scheme");
   assert.ok(named.some((header) => /^Bearer[^ ]/.test(header)), "step 1 gives a header whose scheme name starts with Bearer as another scheme");
+});
+
+test("the 401 examples of step 1 are read whole when a header holds a period", () => {
+  // The handler answers 401 to these headers, so step 1 could give them.
+  const scheme = bearerSchemePattern();
+  const headers = ["Bearerx demo.token", "Bearer.x demo-token"];
+  for (const header of headers) {
+    assert.doesNotMatch(received(header), scheme, `handler.ts reads ${header} as another scheme`);
+  }
+  const sentence = `A request without the header, or whose header names another scheme, such as \`${headers[0]}\` or \`${headers[1]}\`, gets 401.`;
+  assert.deepEqual(otherSchemeExamples(sentence), headers, "the checks of step 1 read each 401 example whole");
 });
 
 test("step 1 says Bearer in any letter case and one or more spaces, and the handler's pattern takes both", () => {
