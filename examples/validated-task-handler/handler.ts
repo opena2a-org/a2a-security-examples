@@ -137,13 +137,16 @@ function authenticate(
   next: express.NextFunction
 ): void {
   const authHeader = req.headers.authorization;
-  // Scheme names are case-insensitive (RFC 9110, section 11.1).
-  if (!authHeader || !/^bearer /i.test(authHeader)) {
+  // Scheme names are case-insensitive (RFC 9110, section 11.1), and one or
+  // more spaces may separate the scheme from the token (section 11.4); none
+  // of them is part of the token.
+  const credentials = authHeader?.match(/^bearer +(\S+)$/i);
+  if (!credentials) {
     res.status(401).json({ error: "Authentication required" });
     return;
   }
 
-  const token = authHeader.slice(7);
+  const token = credentials[1];
 
   // Validate token (replace with your auth provider)
   // NEVER log the full token
