@@ -1132,10 +1132,10 @@ test("the spaces between the bearer scheme and the token are not part of the tok
     assert.equal(rejected.status, 401, `${spaces.length} spaces before undefined are rejected`);
     assert.deepEqual(await rejected.json(), { error: "Invalid or expired token" });
   }
-  // A bearer token has no spaces in it.
+  // A bearer token has no spaces in it, so the header is malformed.
   const split = await postTask({ Authorization: "Bearer demo token" }, validTask);
-  assert.equal(split.status, 401);
-  assert.deepEqual(await split.json(), { error: "Authentication required" });
+  assert.equal(split.status, 400);
+  assert.deepEqual(await split.json(), { error: "Malformed Authorization header" });
 });
 
 // POST a valid task to a server as raw HTTP with the given header lines, each
@@ -1169,22 +1169,24 @@ function postRaw(serverPort, headerLines) {
   });
 }
 
-test("a request with more than one Authorization header gets 401, whichever header comes first", async () => {
+test("a request with more than one Authorization header gets 400 and invalid_request, whichever header comes first", async () => {
   await withOwnServer(async (serverPort, audited) => {
     // Node.js keeps the first Authorization header line of a request and drops
-    // the rest, so the first line alone would decide the answer.
+    // the rest, so the first line alone would decide the answer. RFC 6750,
+    // section 3.1: a request that repeats a parameter gets 400 and the error
+    // code invalid_request.
     const valid = "Authorization: Bearer demo-token";
-    for (const other of ["Bearer demo token", "Bearer undefined", "Bearer demo-token"]) {
+    for (const other of ["Bearer demo token", "Bearer undefined", "Bearer demo-token", "Basic demo"]) {
       for (const sent of [[valid, `Authorization: ${other}`], [`Authorization: ${other}`, valid]]) {
         const res = await postRaw(serverPort, sent);
-        assert.equal(res.status, 401, `${sent.join(" then ")} gets 401`);
-        assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
-        assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a"'), `the 401 to ${sent.join(" then ")} carries the Bearer challenge`);
+        assert.equal(res.status, 400, `${sent.join(" then ")} gets 400`);
+        assert.deepEqual(JSON.parse(res.body), { error: "More than one Authorization header" });
+        assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), `the 400 to ${sent.join(" then ")} carries the Bearer challenge with invalid_request`);
       }
     }
     // Header names are case-insensitive, so two spellings are two headers.
     const spelled = await postRaw(serverPort, ["authorization: Bearer demo-token", "AUTHORIZATION: Bearer demo-token"]);
-    assert.equal(spelled.status, 401, "authorization then AUTHORIZATION gets 401");
+    assert.equal(spelled.status, 400, "authorization then AUTHORIZATION gets 400");
     // A header whose name only ends in Authorization is not a second one, and
     // neither is a header whose value is authorization: only names are counted.
     for (const other of ["Proxy-Authorization: Bearer demo token", "X-Requested-Header: authorization"]) {
@@ -1192,7 +1194,7 @@ test("a request with more than one Authorization header gets 401, whichever head
       assert.equal(single.status, 200, `one Authorization header and ${other} are accepted`);
       assert.equal(JSON.parse(single.body).result.status.state, "completed");
     }
-    // The accepted requests wrote the only audit lines, so each 401 wrote none.
+    // The accepted requests wrote the only audit lines, so each 400 wrote none.
     await waitForAudit(2, audited);
     assert.deepEqual(audited().map((a) => a.action), ["task_accepted", "task_accepted"]);
   });
@@ -1227,15 +1229,23 @@ test("a request with 1,000 or more header lines gets 431, so an Authorization he
   });
 });
 
-test("a 401 response carries the Bearer challenge with a realm in a WWW-Authenticate header, with invalid_token for an invalid token, and a 200 response carries none", async () => {
+test("a 401 response carries the Bearer challenge with a realm in a WWW-Authenticate header, with invalid_token for an invalid token, a 400 for a malformed header carries it with invalid_request, and a 200 response carries none", async () => {
   // RFC 9110, section 15.5.2: a 401 response carries at least one challenge.
   // RFC 6750, section 3: the Bearer scheme in it is followed by one or more
   // auth-params.
-  for (const headers of [{}, { Authorization: "Bearer demo token" }, { Authorization: "Basic demo" }]) {
+  // RFC 6750, section 3.1: a request with no bearer credentials gets no error
+  // code.
+  for (const headers of [{}, { Authorization: "Basic demo" }]) {
     const res = await postTask(headers, validTask);
     assert.equal(res.status, 401, `${JSON.stringify(headers)} gets 401`);
     assert.equal(res.headers.get("www-authenticate"), 'Bearer realm="a2a"', `the 401 to ${JSON.stringify(headers)} carries the Bearer challenge`);
   }
+  // RFC 6750, section 3.1: a malformed request gets 400 and the error code
+  // invalid_request.
+  const malformed = await postTask({ Authorization: "Bearer demo token" }, validTask);
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.headers.get("www-authenticate"), 'Bearer realm="a2a", error="invalid_request"');
+  assert.deepEqual(await malformed.json(), { error: "Malformed Authorization header" });
   // RFC 6750, section 3.1: an invalid token gets 401 and the error code
   // invalid_token, not a 403 without a challenge.
   const invalid = await postTask({ Authorization: "Bearer undefined" }, validTask);
@@ -1247,7 +1257,7 @@ test("a 401 response carries the Bearer challenge with a realm in a WWW-Authenti
   assert.equal(accepted.headers.get("www-authenticate"), null);
 });
 
-test("a bearer token with a character outside the RFC 6750 token characters gets 401, whichever character it is", async () => {
+test("a bearer token with a character outside the RFC 6750 token characters gets 400, whichever character it is", async () => {
   await withOwnServer(async (serverPort, audited) => {
     // The bytes curl sends for a token typed in a UTF-8 terminal. Node.js
     // decodes header bytes as Latin-1, so the handler gets one character for
@@ -1268,8 +1278,9 @@ test("a bearer token with a character outside the RFC 6750 token characters gets
     };
     for (const [name, token] of Object.entries(outside)) {
       const res = await postRaw(serverPort, [`Authorization: Bearer ${token}`]);
-      assert.equal(res.status, 401, `the token ${name} gets 401`);
-      assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
+      assert.equal(res.status, 400, `the token ${name} gets 400`);
+      assert.deepEqual(JSON.parse(res.body), { error: "Malformed Authorization header" });
+      assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), `the 400 to the token ${name} carries invalid_request`);
     }
     // RFC 6750, section 2.1: letters, digits and - . _ ~ + / and then any
     // number of = make up a token.
@@ -1281,5 +1292,33 @@ test("a bearer token with a character outside the RFC 6750 token characters gets
     }
     await waitForAudit(inside.length, audited);
     assert.deepEqual(audited().map((a) => a.action), inside.map(() => "task_accepted"));
+  });
+});
+
+test("a Bearer header with no token or a separator other than spaces gets 400, and an empty header or another scheme name gets 401 with no error code", async () => {
+  await withOwnServer(async (serverPort, audited) => {
+    // RFC 6750, section 3.1: a malformed request gets 400 and invalid_request.
+    // Node.js drops the spaces at the end of a header value, so Bearer and a
+    // space is Bearer alone.
+    for (const header of ["Bearer", "Bearer ", "bearer", "Bearer\tdemo-token", "Bearer,demo-token"]) {
+      const res = await postRaw(serverPort, [`Authorization: ${header}`]);
+      assert.equal(res.status, 400, `${JSON.stringify(header)} gets 400`);
+      assert.deepEqual(JSON.parse(res.body), { error: "Malformed Authorization header" });
+      assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), `the 400 to ${JSON.stringify(header)} carries invalid_request`);
+    }
+    // A header with no credentials in it, or one whose scheme name only starts
+    // with Bearer, has no bearer token, so its 401 carries no error code.
+    for (const header of ["", "Bearerx demo-token", "Bearer-x demo-token", "Basic demo"]) {
+      const res = await postRaw(serverPort, [`Authorization: ${header}`]);
+      assert.equal(res.status, 401, `${JSON.stringify(header)} gets 401`);
+      assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
+      assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a"'), `the 401 to ${JSON.stringify(header)} carries the Bearer challenge with no error code`);
+    }
+    // The accepted request writes the only audit line, so each 400 and 401
+    // wrote none.
+    const accepted = await postRaw(serverPort, ["Authorization: Bearer demo-token"]);
+    assert.equal(accepted.status, 200);
+    await waitForAudit(1, audited);
+    assert.deepEqual(audited().map((a) => a.action), ["task_accepted"]);
   });
 });

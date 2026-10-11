@@ -160,15 +160,28 @@ app.use(limitHeaderLines);
 
 // --- Authentication Middleware ---
 
-// The challenge each 401 response carries. A 401 response names the scheme the
+// The challenge each 401 response, and each 400 response to a malformed
+// Authorization header, carries. A 401 response names the scheme the
 // server accepts in a challenge (RFC 9110, section 15.5.2), and RFC 6750,
 // section 3, says the Bearer scheme in it is followed by one or more
 // auth-params, here a realm.
 const bearerChallenge = 'Bearer realm="a2a"';
 
+// An Authorization header value that names the Bearer scheme: it starts with
+// the scheme name, in any letter case (RFC 9110, section 11.1), and the next
+// character, if there is one, is not one a longer scheme name could hold
+// (sections 5.6.2 and 11.4), so Bearerx names another scheme.
+const bearerScheme = /^bearer(?![!#$%&'*+.^_`|~0-9a-z-])/i;
+
 // The number of Authorization header lines in a request.
 function authorizationLines(req: express.Request): number {
   return req.rawHeaders.filter((name, i) => i % 2 === 0 && name.toLowerCase() === "authorization").length;
+}
+
+// RFC 6750, section 3.1: a request that repeats a parameter or is otherwise
+// malformed gets 400 and the error code invalid_request in the challenge.
+function rejectMalformed(res: express.Response, error: string): void {
+  res.status(400).set("WWW-Authenticate", `${bearerChallenge}, error="invalid_request"`).json({ error });
 }
 
 function authenticate(
@@ -180,7 +193,20 @@ function authenticate(
   // the rest, so the first line alone would decide the answer. A request with
   // more than one is rejected whichever comes first: a server in front of
   // this one may have read another line.
-  const authHeader = authorizationLines(req) > 1 ? undefined : req.headers.authorization;
+  if (authorizationLines(req) > 1) {
+    rejectMalformed(res, "More than one Authorization header");
+    return;
+  }
+
+  // A request with no Authorization header, or one that names another scheme,
+  // has no bearer token to check, so its 401 carries no error code (RFC 6750,
+  // section 3.1).
+  const authHeader = req.headers.authorization;
+  if (authHeader === undefined || !bearerScheme.test(authHeader)) {
+    res.status(401).set("WWW-Authenticate", bearerChallenge).json({ error: "Authentication required" });
+    return;
+  }
+
   // Scheme names are case-insensitive (RFC 9110, section 11.1), and one or
   // more spaces may separate the scheme from the token (section 11.4); none
   // of them is part of the token. The token is made of the characters RFC
@@ -188,9 +214,9 @@ function authenticate(
   // decodes header bytes as Latin-1, so a pattern that took any character but
   // a space would reject a token outside ASCII only when one of its bytes is
   // 0xA0, a no-break space in Latin-1.
-  const credentials = authHeader?.match(/^bearer +([A-Za-z0-9._~+\/-]+=*)$/i);
+  const credentials = authHeader.match(/^bearer +([A-Za-z0-9._~+\/-]+=*)$/i);
   if (!credentials) {
-    res.status(401).set("WWW-Authenticate", bearerChallenge).json({ error: "Authentication required" });
+    rejectMalformed(res, "Malformed Authorization header");
     return;
   }
 
