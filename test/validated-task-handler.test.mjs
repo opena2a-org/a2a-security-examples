@@ -1137,3 +1137,94 @@ test("the spaces between the bearer scheme and the token are not part of the tok
   assert.equal(split.status, 401);
   assert.deepEqual(await split.json(), { error: "Authentication required" });
 });
+
+// POST a valid task to a server as raw HTTP with the given header lines, each
+// sent as written, and return the status and the body of the reply. fetch
+// cannot send these requests: it joins the values of a header given more than
+// once into one line. The request is written as Latin-1, one byte for each
+// character of a line.
+function postRaw(serverPort, headerLines) {
+  const request = [
+    "POST / HTTP/1.1",
+    "Host: 127.0.0.1",
+    ...headerLines,
+    "Content-Type: application/json",
+    `Content-Length: ${Buffer.byteLength(validTask)}`,
+    "Connection: close",
+    "",
+    validTask,
+  ].join("\r\n");
+  return new Promise((resolve, reject) => {
+    let reply = "";
+    const socket = connect(serverPort, "127.0.0.1", () => socket.write(request, "latin1"));
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => (reply += chunk));
+    socket.on("error", reject);
+    socket.on("close", () => {
+      const status = Number(reply.match(/^HTTP\/1\.1 (\d{3}) /)?.[1]);
+      resolve({ status, body: reply.slice(reply.indexOf("\r\n\r\n") + 4) });
+    });
+  });
+}
+
+test("a request with more than one Authorization header gets 401, whichever header comes first", async () => {
+  await withOwnServer(async (serverPort, audited) => {
+    // Node.js keeps the first Authorization header line of a request and drops
+    // the rest, so the first line alone would decide the answer.
+    const valid = "Authorization: Bearer demo-token";
+    for (const other of ["Bearer demo token", "Bearer undefined", "Bearer demo-token"]) {
+      for (const sent of [[valid, `Authorization: ${other}`], [`Authorization: ${other}`, valid]]) {
+        const res = await postRaw(serverPort, sent);
+        assert.equal(res.status, 401, `${sent.join(" then ")} gets 401`);
+        assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
+      }
+    }
+    // Header names are case-insensitive, so two spellings are two headers.
+    const spelled = await postRaw(serverPort, ["authorization: Bearer demo-token", "AUTHORIZATION: Bearer demo-token"]);
+    assert.equal(spelled.status, 401, "authorization then AUTHORIZATION gets 401");
+    // A header whose name only ends in Authorization is not a second one.
+    const single = await postRaw(serverPort, [valid, "Proxy-Authorization: Bearer demo token"]);
+    assert.equal(single.status, 200, "one Authorization header is accepted");
+    assert.equal(JSON.parse(single.body).result.status.state, "completed");
+    // The accepted request wrote the only audit line, so each 401 wrote none.
+    await waitForAudit(1, audited);
+    assert.deepEqual(audited().map((a) => a.action), ["task_accepted"]);
+  });
+});
+
+test("a bearer token with a character outside the RFC 6750 token characters gets 401, whichever character it is", async () => {
+  await withOwnServer(async (serverPort, audited) => {
+    // The bytes curl sends for a token typed in a UTF-8 terminal. Node.js
+    // decodes header bytes as Latin-1, so the handler gets one character for
+    // each byte: 0xA0, the last byte of à and of †, is a no-break space
+    // there, and the bytes of é and of € are not spaces.
+    const utf8 = (token) => Buffer.from(token, "utf8").toString("latin1");
+    const outside = {
+      "cafà (bytes C3 A0)": utf8("cafà"),
+      "† (bytes E2 80 A0)": utf8("†"),
+      "café (bytes C3 A9)": utf8("café"),
+      "€ (bytes E2 82 AC)": utf8("€"),
+      "demo and the byte A0": "demo\xa0",
+      "demo and the byte E9": "demo\xe9",
+      "demo:token": "demo:token",
+      "demo,token": "demo,token",
+      "=demo": "=demo",
+      "demo=token": "demo=token",
+    };
+    for (const [name, token] of Object.entries(outside)) {
+      const res = await postRaw(serverPort, [`Authorization: Bearer ${token}`]);
+      assert.equal(res.status, 401, `the token ${name} gets 401`);
+      assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
+    }
+    // RFC 6750, section 2.1: letters, digits and - . _ ~ + / and then any
+    // number of = make up a token.
+    const inside = ["demo-token", "DEMO.token_1~", "demo+/token", "demo-token=="];
+    for (const token of inside) {
+      const res = await postRaw(serverPort, [`Authorization: Bearer ${token}`]);
+      assert.equal(res.status, 200, `the token ${token} is accepted`);
+      assert.equal(JSON.parse(res.body).result.status.state, "completed");
+    }
+    await waitForAudit(inside.length, audited);
+    assert.deepEqual(audited().map((a) => a.action), inside.map(() => "task_accepted"));
+  });
+});

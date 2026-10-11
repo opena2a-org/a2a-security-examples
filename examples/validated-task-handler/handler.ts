@@ -131,16 +131,29 @@ function audit(entry: AuditEntry): void {
 
 // --- Authentication Middleware ---
 
+// The number of Authorization header lines in a request.
+function authorizationLines(req: express.Request): number {
+  return req.rawHeaders.filter((name, i) => i % 2 === 0 && name.toLowerCase() === "authorization").length;
+}
+
 function authenticate(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
 ): void {
-  const authHeader = req.headers.authorization;
+  // Node.js keeps the first Authorization header line of a request and drops
+  // the rest, so the first line alone would decide the answer. A request with
+  // more than one is rejected whichever comes first: a server in front of
+  // this one may have read another line.
+  const authHeader = authorizationLines(req) > 1 ? undefined : req.headers.authorization;
   // Scheme names are case-insensitive (RFC 9110, section 11.1), and one or
   // more spaces may separate the scheme from the token (section 11.4); none
-  // of them is part of the token.
-  const credentials = authHeader?.match(/^bearer +(\S+)$/i);
+  // of them is part of the token. The token is made of the characters RFC
+  // 6750, section 2.1, allows in a bearer token and of no others. Node.js
+  // decodes header bytes as Latin-1, so a pattern that took any character but
+  // a space would reject a token outside ASCII only when one of its bytes is
+  // 0xA0, a no-break space in Latin-1.
+  const credentials = authHeader?.match(/^bearer +([A-Za-z0-9._~+\/-]+=*)$/i);
   if (!credentials) {
     res.status(401).json({ error: "Authentication required" });
     return;

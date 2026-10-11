@@ -79,36 +79,105 @@ test("the bearer token sentence names every token the handler rejects", () => {
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   const rejected = [...handler.matchAll(/token !== "([^"]+)"/g)].map((m) => m[1]);
   assert.ok(rejected.length > 0, "isValidToken rejects at least one literal token");
-  const sentence = lines.find((l) => /accepts any non-empty bearer token/.test(l));
+  const sentence = lines.find((l) => /The example accepts any bearer token/.test(l));
   assert.ok(sentence, "README describes which bearer tokens the example accepts");
   for (const token of rejected) {
     assert.ok(sentence.includes(`\`${token}\``), `README says the token ${token} is rejected`);
   }
 });
 
-test("step 1 gives 401 for a header that is not Bearer and one token, not only for a missing token", () => {
-  // The handler answers 401 to a header such as Bearer demo token, which has a
-  // token in it, so "401 without a token" leaves that header out.
+// The pattern handler.ts matches the Authorization header against.
+function credentialsPattern() {
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   const source = handler.match(/authHeader\?\.match\(\/(.+)\/([a-z]*)\)/);
   assert.ok(source, "handler.ts matches the Authorization header against a pattern");
-  const credentials = new RegExp(source[1], source[2]);
+  return new RegExp(source[1], source[2]);
+}
+
+// A header as the handler receives it: Node.js decodes header bytes as
+// Latin-1, so each UTF-8 byte of a character outside ASCII is a character.
+function received(header) {
+  return Buffer.from(header, "utf8").toString("latin1");
+}
+
+test("step 1 gives 401 for a header that is not Bearer and one token, not only for a missing token", () => {
+  // The handler answers 401 to a header such as Bearer demo token, which has a
+  // token in it, so "401 without a token" leaves that header out.
+  const credentials = credentialsPattern();
   const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
   assert.ok(step, "README lists bearer authentication as step 1");
   assert.doesNotMatch(step, /401 without a token/, "a header with a token in it can get 401 too");
   const [unauthenticated, forbidden = ""] = step.split("; 403 ");
-  assert.match(unauthenticated, /401 when the `Authorization` header is missing or is not `Bearer`/, "step 1 gives 401 for a missing header and for one that is not Bearer");
+  assert.match(unauthenticated, /401 when the `Authorization` header is missing, is sent more than once, or is not `Bearer`/, "step 1 gives 401 for a missing header and for one that is not Bearer");
   assert.match(unauthenticated, /one or more spaces and one token/, "step 1 says what follows Bearer in a header that passes");
   const examples = [...unauthenticated.matchAll(/`(Bearer [^`]+)`/g)].map((m) => m[1]);
   assert.ok(examples.length >= 2, "step 1 gives headers that have a token in them and get 401");
   for (const header of examples) {
-    assert.doesNotMatch(header, credentials, `handler.ts answers 401 to ${header}`);
+    assert.doesNotMatch(received(header), credentials, `handler.ts answers 401 to ${header}`);
   }
   // The header the quick start sends is one the handler's pattern accepts.
   const sent = readme.match(/-H "Authorization: ([^"]+)"/);
   assert.ok(sent, "the quick start sends an Authorization header");
   assert.match(sent[1], credentials, `handler.ts reads a token from ${sent[1]}`);
   assert.match(forbidden, /^for an invalid token\./, "step 1 gives 403 for an invalid token");
+});
+
+test("step 1 says Bearer in any letter case and one or more spaces, and the handler's pattern takes both", () => {
+  const credentials = credentialsPattern();
+  const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
+  assert.match(step, /`Bearer` \(in any letter case\) followed by one or more spaces and one token/, "step 1 says the scheme is read in any letter case and followed by one or more spaces");
+  for (const header of ["bearer demo-token", "BEARER demo-token"]) {
+    assert.match(header, credentials, `handler.ts reads a token from ${header}, so the scheme is read in any letter case`);
+  }
+  assert.match("Bearer   demo-token", credentials, "handler.ts reads a token after three spaces, so one or more spaces follow the scheme");
+  assert.doesNotMatch("Bearerdemo-token", credentials, "handler.ts reads no token when no space follows the scheme");
+});
+
+test("step 1 gives 401 for a request with more than one Authorization header, which the handler counts", () => {
+  // req.headers holds the first Authorization line of a request and none of
+  // the later ones, so the handler can only see a second line in rawHeaders.
+  // test/validated-task-handler.test.mjs sends such requests.
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  assert.match(handler, /req\.rawHeaders/, "handler.ts counts the Authorization header lines of a request");
+  const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
+  assert.match(step.split("; 403 ")[0], /`Authorization` header is missing, is sent more than once, or/, "step 1 gives 401 for a header sent more than once");
+});
+
+// The characters the pattern takes in a bearer token, of the 256 a header byte
+// decodes to: those a token is made of, and those that can only end one.
+function tokenCharacters(credentials) {
+  const decoded = Array.from({ length: 256 }, (_, byte) => String.fromCharCode(byte));
+  const made = decoded.filter((c) => credentials.test(`Bearer ${c}`));
+  const ending = decoded.filter((c) => !made.includes(c) && credentials.test(`Bearer a${c}`));
+  return { made, ending };
+}
+
+test("the bearer token sentence and step 1 name the characters the handler takes in a token, and step 1 gives a token outside them", () => {
+  const credentials = credentialsPattern();
+  const { made, ending } = tokenCharacters(credentials);
+  const alphanumeric = made.filter((c) => /[A-Za-z0-9]/.test(c));
+  assert.equal(alphanumeric.length, 62, "handler.ts takes every ASCII letter and digit in a token");
+  const marks = made.filter((c) => !alphanumeric.includes(c));
+  const named = (text) => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1]).sort();
+  const sentences = {
+    "the bearer token sentence": lines.find((l) => /The example accepts any bearer token/.test(l)),
+    "step 1": lines.find((l) => l.startsWith("1. Bearer authentication:")),
+  };
+  for (const [where, sentence] of Object.entries(sentences)) {
+    assert.ok(sentence, `README has ${where}`);
+    const set = sentence.match(/\(one or more ASCII letters, digits, ([^)]+), then any number of ([^)]+)\)/);
+    assert.ok(set, `${where} names the characters of a bearer token`);
+    assert.deepEqual(named(set[1]), [...marks].sort(), `${where} names every character handler.ts takes in a token besides letters and digits, and no other`);
+    assert.deepEqual(named(set[2]), [...ending].sort(), `${where} names every character handler.ts takes only at the end of a token`);
+  }
+  // A token with a character outside the set gets 401 like a header that is
+  // not Bearer and one token, whichever bytes the character is sent as.
+  const examples = [...sentences["step 1"].split("; 403 ")[0].matchAll(/`Bearer ([^` ]+)`/g)].map((m) => m[1]);
+  const outside = examples.filter((token) => [...received(token)].some((c) => !made.includes(c) && !ending.includes(c)));
+  assert.ok(outside.length > 0, "step 1 gives a header whose one token has a character outside the set");
+  for (const token of outside) {
+    assert.doesNotMatch(received(`Bearer ${token}`), credentials, `handler.ts answers 401 to Bearer ${token}`);
+  }
 });
 
 test("the audit sentence names a body that is not a JSON object or array, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {

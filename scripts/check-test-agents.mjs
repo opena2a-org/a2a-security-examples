@@ -52,10 +52,12 @@ function hasTitleTag(body) {
   }
 }
 
-// The problem with a home page in which the check found no title. When the
-// page runs past the part the check reads, or holds a title tag the pattern
-// does not match, the message names the bounds, since a title may lie past
-// them, and the closing tag, since a title within them may not be closed.
+// The problem with a home page in which the check found no title. For a page
+// that runs past the part the check reads, the message names that part, since
+// a title may lie past it. For a page that holds a title tag the pattern does
+// not match, it names the bounds of the pattern, since a title may lie past
+// them, and the closing tag, since a title within them may not be closed; for
+// a page with no title tag in the part read, it names neither of those two.
 function missingTitle({ body, truncated }) {
   const kb = maxBodyBytes / 1024;
   if (!hasTitleTag(body)) {
