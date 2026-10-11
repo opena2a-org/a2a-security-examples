@@ -70,22 +70,30 @@ const rootEntryFields = [
 ];
 
 // The bin npm records for a package.json: each command with the path of its
-// file inside the package. A command is named after the last segment of its
-// name once that name is resolved as a path, so a bin named a/b/.. is a. A bin
-// that is one path is a command named after the package. A bin that is a list
-// first names each path after its last segment, where only a slash ends a
-// segment and trailing slashes are set aside, and that name is then resolved
-// like any other, so the list path a/b/.. is named .. and gives no command.
-// An entry left without a name or a path is dropped. For a list entry that is
-// not a string, npm install stops with ERR_INVALID_ARG_TYPE and this function
-// throws that error.
+// file inside the package. In a command name and in a path, a backslash or a
+// colon becomes a slash and the result is resolved as a path inside the
+// package. A command is named after the last segment of its resolved name, so
+// a bin named a/b/.. is a. A bin that is one path is a command named after the
+// package. A bin that is a list first names each path after its last segment,
+// where only a slash ends a segment and trailing slashes are set aside, and
+// that name is then resolved like any other, so the list path a/b/.. is named
+// .. and gives no command. An entry left without a name or a path is dropped.
+// npm renames the commands one at a time, in the order of the keys of the bin
+// object, and a command renamed to the name of another one replaces that
+// command's file, so for bin { "a/b": "x.js", b: "y.js" } npm records
+// { b: "x.js" }. For a list entry that is not a string, npm install stops with
+// ERR_INVALID_ARG_TYPE and this function throws that error.
 function recordedBin({ name, bin }) {
   if (typeof bin === "string") bin = name ? { [name]: bin } : {};
   if (Array.isArray(bin)) bin = Object.fromEntries(bin.map((path) => [posix.basename(path), path]));
-  const recorded = {};
-  for (const [command, path] of Object.entries(bin ?? {})) {
-    const base = posix.basename(posix.join("/", command.replace(/[\\:]/g, "/")));
-    const file = typeof path === "string" ? posix.join("/", path.replace(/\\/g, "/")).slice(1) : "";
+  const resolve = (path) => posix.join("/", path.replace(/[\\:]/g, "/")).slice(1);
+  const recorded = { ...bin };
+  for (const command of Object.keys(recorded)) {
+    // A command an earlier one was renamed to now holds that one's file.
+    const path = recorded[command];
+    delete recorded[command];
+    const base = posix.basename(resolve(command));
+    const file = typeof path === "string" ? resolve(path) : "";
     if (base && file) recorded[base] = file;
   }
   return recorded;
@@ -103,13 +111,9 @@ function recordedBin({ name, bin }) {
 // read from bundledDependencies when it is not set. When it leaves out every
 // field, npm writes no root entry, and this function returns undefined.
 //
-// Three measured cases are not handled. In each, npm 11.19.0 can record
-// another bin than this function returns, and the lock file check then fails
-// for a lock file npm has just written. With directories.bin and no bin, npm
-// fills bin from that directory, which this function does not read. A colon
-// in a bin path becomes a slash: for bin { a: "c:d.js" }, npm records
-// { a: "c/d.js" }. A command renamed to the name of a later one keeps its own
-// file: for bin { "a/b": "x.js", b: "y.js" }, npm records { b: "x.js" }.
+// One measured case is not handled. With directories.bin and no bin, npm
+// 11.19.0 fills bin from that directory, which this function does not read, so
+// the lock file check fails for a lock file npm has just written.
 function rootEntry(pkg) {
   const installScripts = ["preinstall", "install", "postinstall"].map((name) => pkg.scripts?.[name]);
   const optional = pkg.optionalDependencies && typeof pkg.optionalDependencies === "object" ? pkg.optionalDependencies : {};
@@ -138,10 +142,14 @@ function rootEntry(pkg) {
 
 // Fail unless lock, a parsed package-lock.json, is the lock file of pkg, the
 // parsed package.json beside it in dir. A lock file whose root entry differs
-// from the one npm install writes is rewritten by the next npm install.
+// from the one npm install writes is rewritten by the next npm install. For a
+// package.json without a name, npm names the lock file after its directory, so
+// any lock file name passes.
 function assertLockMatches(pkg, lock, dir = "") {
   assert.ok(lock.lockfileVersion >= 1, `${dir}package-lock.json has lockfileVersion >= 1`);
-  assert.equal(lock.name, pkg.name, `${dir}package-lock.json names the package in ${dir}package.json`);
+  if (pkg.name) {
+    assert.equal(lock.name, pkg.name, `${dir}package-lock.json names the package in ${dir}package.json`);
+  }
   const locked = lock.packages?.[""] ?? {};
   const written = rootEntry(pkg) ?? {};
   for (const field of rootEntryFields) {
@@ -189,6 +197,21 @@ test("the lock file check fails for a lock file without a lockfileVersion or wit
   );
 });
 
+test("the lock file check passes for the lock file npm writes for a package.json without a name", () => {
+  // npm install --package-lock-only, npm 11.19.0, in a directory named probe
+  // names the lock file probe, and writes no root entry for this package.json.
+  const pkg = { bin: "cli.js", funding: [] };
+  const lock = { name: "probe", lockfileVersion: 3, requires: true, packages: {} };
+  assert.doesNotThrow(() => assertLockMatches(pkg, lock));
+  assert.doesNotThrow(() => assertLockMatches({}, lock));
+  assert.throws(() => assertLockMatches(pkg, { ...lock, packages: { "": { funding: [] } } }), stale("funding"));
+  // An empty name is left out of the root entry, and the lock file is named
+  // after the directory too.
+  const unnamed = { name: "", version: "1.0.0" };
+  assert.doesNotThrow(() => assertLockMatches(unnamed, { ...lock, packages: { "": { version: "1.0.0" } } }));
+  assert.throws(() => assertLockMatches(unnamed, lock), stale("version"));
+});
+
 test("the lock file check fails for a lock file whose root entry lacks the funding or the bin of package.json", () => {
   const funding = { url: "https://example.com" };
   const bin = { example: "cli.js" };
@@ -227,7 +250,7 @@ test("the lock file check passes for a package.json value npm leaves out of the 
   // The next npm install removes an empty value from the root entry.
   assert.throws(() => assertLockMatches(empty, lockWith({ os: [] })), stale("os"));
   assert.throws(() => assertLockMatches(empty, lockWith({ engines: {} })), stale("engines"));
-  // Empty devDependencies are the one empty value npm records.
+  // npm records empty devDependencies, unlike the empty values above.
   const noDevDependencies = { name: "example", devDependencies: {} };
   assert.doesNotThrow(() => assertLockMatches(noDevDependencies, lockWith({ devDependencies: {} })));
   assert.throws(() => assertLockMatches(noDevDependencies, lockWith({})), stale("devDependencies"));
@@ -288,6 +311,24 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
     ],
     [{ name: "probe", bin: { "a/.": "x.js" } }, { name: "probe", bin: { a: "x.js" } }],
     [{ name: "probe", license: { type: [] } }, { name: "probe", license: [] }],
+    // A license that is an empty object or array, without a type, is left out.
+    [{ name: "probe", license: {} }, { name: "probe" }],
+    [{ name: "probe", license: [] }, { name: "probe" }],
+    // A colon or a backslash in a bin path becomes a slash.
+    [{ name: "probe", bin: { a: "c:d.js" } }, { name: "probe", bin: { a: "c/d.js" } }],
+    [{ name: "probe", bin: ["a", "a:."] }, { name: "probe", bin: { a: "a" } }],
+    // A command renamed to the name of another command replaces that command's
+    // file, whether npm renames it before or after the other one. npm takes
+    // command names that are integers first.
+    [{ name: "probe", bin: { "a/b": "x.js", b: "y.js" } }, { name: "probe", bin: { b: "x.js" } }],
+    [{ name: "probe", bin: { b: "y.js", "a/b": "x.js" } }, { name: "probe", bin: { b: "x.js" } }],
+    [{ name: "probe", bin: { "x/1": "x.js", 1: "y.js" } }, { name: "probe", bin: { 1: "x.js" } }],
+    [{ name: "probe", bin: ["a", "a:", "a/"] }, { name: "probe", bin: { a: "a/" } }],
+    [{ name: "probe", bin: ["a\\", "a", "a/\\"] }, { name: "probe", bin: { a: "a/" } }],
+    // Only a slash ends the last segment of a bin list path: aa/\ is named \,
+    // which resolves to no name, and bin/cli/ is named cli.
+    [{ name: "probe", bin: ["aa/\\"] }, { name: "probe" }],
+    [{ name: "probe", bin: ["bin/cli/"] }, { name: "probe", bin: { cli: "bin/cli/" } }],
     [{ name: "probe", license: "", funding: "", bin: {}, cpu: [], os: ["darwin"] }, { name: "probe", os: ["darwin"] }],
     // Measured on Linux with glibc: on macOS npm install stops with
     // EBADPLATFORM for this package.json.
@@ -365,6 +406,9 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
   for (const [pkg, entry] of measured) {
     assert.deepEqual(rootEntry(pkg), entry, `the root entry for ${JSON.stringify(pkg)}`);
   }
+  // npm install stops with ERR_INVALID_ARG_TYPE for a bin list entry that is
+  // not a string.
+  assert.throws(() => rootEntry({ name: "probe", bin: [7] }), { code: "ERR_INVALID_ARG_TYPE" });
 });
 
 test("npm test at the repository root installs every example and runs every test file", () => {
