@@ -110,10 +110,14 @@ function received(header) {
 
 // The headers the 401 sentence of step 1 gives as examples of another scheme,
 // or null when step 1 has no such sentence. The capture runs lazily to the
-// comma before "gets 401", as a scheme name and a token can each hold a period.
+// comma before "gets 401", as a scheme name and a token can each hold a period,
+// and must be a list of backticked headers joined by ", " or " or ", so a claim
+// the handler does not make cannot stand between "such as" and "gets 401".
 function otherSchemeExamples(rejected) {
   const other = rejected.match(/A request without the header, or whose header names another scheme, such as (.+?), gets 401\./);
-  return other && [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  if (!other) return null;
+  assert.match(other[1], /^`[^`]+`(?:(?:, | or )`[^`]+`)*$/, `step 1 gives only backticked headers joined by ", " or " or " between "such as" and ", gets 401.", not: ${other[1]}`);
+  return [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
 }
 
 test("step 1 gives 401 for a missing header or another scheme, and 400 for a Bearer header that is not followed by one token", () => {
@@ -216,6 +220,21 @@ test("the 401 examples of step 1 are read whole when a header holds a period, an
   // 401 sentence, so a capture that runs past the first one fails here.
   const followed = `${sentence} A request whose header names a scheme such as \`${later}\`, gets 401.`;
   assert.deepEqual(otherSchemeExamples(followed), headers, "the checks of step 1 read the 401 examples of the first clause only");
+});
+
+test("the 401 examples of step 1 are only backticked headers joined by \", \" or \" or \"", () => {
+  const sentence = (list) => `A request without the header, or whose header names another scheme, such as ${list}, gets 401.`;
+  assert.deepEqual(otherSchemeExamples(sentence("`Basic demo`")), ["Basic demo"]);
+  assert.deepEqual(otherSchemeExamples(sentence("`Basic demo`, `Bearerx demo.token` or `Token x`")), ["Basic demo", "Bearerx demo.token", "Token x"]);
+  const claims = [
+    "`Basic demo` or `Bearerx demo-token`. A request with any token at all",
+    "`Basic demo` or `Bearerx demo-token` and also a request with any token at all",
+    "`Basic demo` and any other header",
+    "any header",
+  ];
+  for (const list of claims) {
+    assert.throws(() => otherSchemeExamples(sentence(list)), /step 1 gives only backticked headers/, `the checks of step 1 reject: ${list}`);
+  }
 });
 
 test("step 1 says Bearer in any letter case and one or more spaces, and the handler's pattern takes both", () => {
