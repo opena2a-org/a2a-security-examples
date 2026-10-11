@@ -1316,8 +1316,11 @@ test("a Bearer header with no token or a separator other than spaces gets 400, a
     // with Bearer, has no bearer token, so its 401 carries no error code. A
     // scheme name is a token (RFC 9110, sections 11.1 and 5.6.2), so Bearer
     // followed by a letter, a digit or any punctuation character a token may
-    // hold starts another scheme name.
-    const longer = [..."x09!#$%&'*+-.^_`|~"].map((c) => `Bearer${c}x demo-token`);
+    // hold starts another scheme name. Every letter in both cases and every
+    // digit is sent, so a check that leaves out one of them fails.
+    const letters = "abcdefghijklmnopqrstuvwxyz";
+    const tokenChars = letters + letters.toUpperCase() + "0123456789!#$%&'*+-.^_`|~";
+    const longer = [...tokenChars].map((c) => `Bearer${c}x demo-token`);
     for (const header of ["", ...longer, "Basic demo"]) {
       const res = await postRaw(serverPort, [`Authorization: ${header}`]);
       assert.equal(res.status, 401, `${JSON.stringify(header)} gets 401`);
