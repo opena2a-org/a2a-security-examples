@@ -86,6 +86,31 @@ test("the bearer token sentence names every token the handler rejects", () => {
   }
 });
 
+test("step 1 gives 401 for a header that is not Bearer and one token, not only for a missing token", () => {
+  // The handler answers 401 to a header such as Bearer demo token, which has a
+  // token in it, so "401 without a token" leaves that header out.
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const source = handler.match(/authHeader\?\.match\(\/(.+)\/([a-z]*)\)/);
+  assert.ok(source, "handler.ts matches the Authorization header against a pattern");
+  const credentials = new RegExp(source[1], source[2]);
+  const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
+  assert.ok(step, "README lists bearer authentication as step 1");
+  assert.doesNotMatch(step, /401 without a token/, "a header with a token in it can get 401 too");
+  const [unauthenticated, forbidden = ""] = step.split("; 403 ");
+  assert.match(unauthenticated, /401 when the `Authorization` header is missing or is not `Bearer`/, "step 1 gives 401 for a missing header and for one that is not Bearer");
+  assert.match(unauthenticated, /one or more spaces and one token/, "step 1 says what follows Bearer in a header that passes");
+  const examples = [...unauthenticated.matchAll(/`(Bearer [^`]+)`/g)].map((m) => m[1]);
+  assert.ok(examples.length >= 2, "step 1 gives headers that have a token in them and get 401");
+  for (const header of examples) {
+    assert.doesNotMatch(header, credentials, `handler.ts answers 401 to ${header}`);
+  }
+  // The header the quick start sends is one the handler's pattern accepts.
+  const sent = readme.match(/-H "Authorization: ([^"]+)"/);
+  assert.ok(sent, "the quick start sends an Authorization header");
+  assert.match(sent[1], credentials, `handler.ts reads a token from ${sent[1]}`);
+  assert.match(forbidden, /^for an invalid token\./, "step 1 gives 403 for an invalid token");
+});
+
 test("the audit sentence names a body that is not a JSON object or array, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
