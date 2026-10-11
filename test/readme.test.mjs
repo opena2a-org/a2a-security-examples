@@ -218,7 +218,9 @@ function regularExpressionEnd(source, start) {
 // whitespace, comments and the text of a template give no token. A slash is
 // read as division after a name other than a keyword in
 // keywordsBeforeExpression (a keyword after a . is a property name and one
-// after a # is a private name, while one after ... is a keyword), after ) or ],
+// after a # is a private name, while one after ... is a keyword, except of,
+// which is a keyword only after a token a slash divides after, or after }),
+// after ) or ],
 // after a number, string, template or regular expression, and after a ++ or --
 // that follows one of these on the same line (a line break before a ++ or --,
 // in a comment or not, makes it a prefix operator). So a slash right after the )
@@ -281,7 +283,10 @@ function moduleTokens(text) {
       i = flags.lastIndex;
     } else if (name) {
       const property = previous?.type === "punct" && (previous.value === "." || previous.value === "#");
-      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), beforeExpression: !property && keywordsBeforeExpression.has(name[0]) });
+      // of is a variable name unless it follows the end of an operand or of a
+      // pattern, as in for (x of ...) or for (const { a } of ...).
+      const of = name[0] === "of" && !slashDivides(previous) && !(previous?.type === "punct" && previous.value === "}");
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]) });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
       const number = /\.?\d[\w.]*/y;
@@ -454,10 +459,30 @@ test("the node:test import reader reads a slash after a private name such as #de
   assert.deepEqual(namesImportedFromNodeTest('a /* note */ ++ / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
 });
 
+test("the node:test import reader reads a ++ or -- after a carriage return, U+2028 or U+2029 as a prefix operator, and one on the same line as its operand as postfix when a line break comes earlier in the file", () => {
+  for (const lineBreak of ["\r", "\u{2028}", "\u{2029}"]) {
+    assert.deepEqual(namesImportedFromNodeTest("x" + lineBreak + '++/import { describe } from "node:test"/.lastIndex;\n'), [], JSON.stringify(lineBreak));
+    assert.deepEqual(namesImportedFromNodeTest("a[0]" + lineBreak + '--/import { describe } from "node:test"/.lastIndex;\n'), [], JSON.stringify(lineBreak));
+  }
+  assert.deepEqual(namesImportedFromNodeTest('z = 0;\nx++ / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('z = 0;\r\na[0]-- / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
+});
+
+test("the node:test import reader reads a slash after a variable named of as division, and a slash after the of of a for...of loop as a regular expression", () => {
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  assert.deepEqual(namesImportedFromNodeTest("x = of / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("a = [...of / 2, `/`];\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("y = typeof of / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("for (const x of /`/g.exec(s)) f(x);\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("for (const [x] of /`/g.exec(s)) f(x);\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("for (const { x } of /`/g.exec(s)) f(x);\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("for (o.of of /`/g.exec(s)) f(o);\n" + declaration), ["after"]);
+});
+
 test("the node:test import reader reads a slash after a number, string, template or regular expression as division", () => {
-  // Read as the start of a regular expression, the first slash would close at
-  // the slash in the template, and the backtick after it would open a template
-  // that hides the declaration.
+  // Read as the start of a regular expression, the slash after the operand
+  // would close at the slash in the template, and the backtick after it would
+  // open a template that hides the declaration.
   const declaration = 'import { after } from "node:test";\n';
   for (const before of [
     "const n = 1 / 2, t = `/`;\n",
