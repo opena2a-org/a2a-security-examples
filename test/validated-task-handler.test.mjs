@@ -1184,6 +1184,12 @@ test("a request with more than one Authorization header gets 400 and invalid_req
         assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), `the 400 to ${sent.join(" then ")} carries the Bearer challenge with invalid_request`);
       }
     }
+    // The lines are counted before the scheme is read, so two lines that name
+    // another scheme get 400, not the 401 one of them gets alone.
+    const basic = await postRaw(serverPort, ["Authorization: Basic demo", "Authorization: Basic demo"]);
+    assert.equal(basic.status, 400, "two Authorization: Basic demo lines get 400");
+    assert.deepEqual(JSON.parse(basic.body), { error: "More than one Authorization header" });
+    assert.ok(basic.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), "the 400 to two Authorization: Basic demo lines carries the Bearer challenge with invalid_request");
     // Header names are case-insensitive, so two spellings are two headers.
     const spelled = await postRaw(serverPort, ["authorization: Bearer demo-token", "AUTHORIZATION: Bearer demo-token"]);
     assert.equal(spelled.status, 400, "authorization then AUTHORIZATION gets 400");
