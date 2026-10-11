@@ -22,6 +22,8 @@
 import express from "express";
 import { z } from "zod";
 import { randomUUID } from "crypto";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
 import { RateLimiterMemory } from "rate-limiter-flexible";
 
 const app = express();
@@ -479,44 +481,22 @@ async function handleMessage(
 
 // --- Agent Card Endpoint ---
 
-// An AgentCard as A2A specification v0.3.0 defines it. Clients send JSON-RPC
-// requests to url. The card is public: securitySchemes says how to
-// authenticate and never holds a credential.
-function agentCard() {
-  return {
-    protocolVersion: "0.3.0",
-    name: "SecureAnalysisAgent",
-    description: "Analyzes documents for security compliance",
-    url: process.env.AGENT_URL || `http://localhost:${port}`,
-    preferredTransport: "JSONRPC",
-    version: "1.0.0",
-    capabilities: {
-      streaming: false,
-      pushNotifications: false,
-      stateTransitionHistory: false,
-    },
-    securitySchemes: {
-      bearer: { type: "http", scheme: "bearer" },
-    },
-    security: [{ bearer: [] }],
-    defaultInputModes: [...MEDIA_TYPES],
-    defaultOutputModes: ["text/plain"],
-    skills: [
-      {
-        id: "compliance-check",
-        name: "Compliance Check",
-        description: "Check a document against security compliance rules",
-        tags: ["security", "compliance"],
-        examples: ["Check this document for PCI-DSS compliance"],
-      },
-    ],
-  };
-}
+// An AgentCard as A2A specification v0.3.0 defines it, read from
+// examples/secure-agent-card/agent-card.json, so the card the README shows and
+// the card clients fetch are one file. Only url, which clients send JSON-RPC
+// requests to, is replaced, with the address this server answers on. The card
+// is public: securitySchemes says how to authenticate and never holds a
+// credential. The example's directory is this file's directory when tsx runs
+// handler.ts, and its parent when node runs the compiled dist/handler.js.
+const exampleDir = __filename.endsWith(".ts") ? __dirname : dirname(__dirname);
+const agentCard = JSON.parse(
+  readFileSync(join(exampleDir, "..", "secure-agent-card", "agent-card.json"), "utf8")
+);
 
 // Specification v0.3.0 names /.well-known/agent-card.json. Earlier versions
 // named /.well-known/agent.json, which still serves the same card.
 app.get(["/.well-known/agent-card.json", "/.well-known/agent.json"], (_req, res) => {
-  res.json(agentCard());
+  res.json({ ...agentCard, url: process.env.AGENT_URL || `http://localhost:${port}` });
 });
 
 // --- Error Handling ---

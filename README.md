@@ -54,18 +54,18 @@ To run the repository's tests, run `npm test` from the repository root with Node
 | Example | What it shows | Language |
 |---|---|---|
 | [validated-task-handler](./examples/validated-task-handler/handler.ts) | A2A `message/send` endpoint with authentication, rate limiting, schema validation, injection filtering, and audit logging | TypeScript |
-| [secure-agent-card](./examples/secure-agent-card/agent-card.json) | Agent card that advertises only what the agent supports | JSON |
+| [secure-agent-card](./examples/secure-agent-card/agent-card.json) | Agent card that validated-task-handler serves, advertising only what it supports | JSON |
 
 ## Secure agent card
 
-An agent card describes your agent's capabilities to other agents. Advertise only what you support. The handler serves its card at `/.well-known/agent-card.json`, the path A2A v0.3.0 names, and at `/.well-known/agent.json`, the path earlier versions named. Excerpt from [agent-card.json](./examples/secure-agent-card/agent-card.json):
+An agent card describes your agent's capabilities to other agents. Advertise only what you support. [handler.ts](./examples/validated-task-handler/handler.ts) serves [agent-card.json](./examples/secure-agent-card/agent-card.json) at `/.well-known/agent-card.json`, the path A2A v0.3.0 names, and at `/.well-known/agent.json`, the path earlier versions named, with `url` set to `AGENT_URL` or, when that is unset, `http://localhost:<port>`. Its one skill is what the handler does: count the text parts of a message and the characters of their combined text. Excerpt:
 
 ```json
 {
   "protocolVersion": "0.3.0",
   "name": "SecureAnalysisAgent",
   "url": "https://your-agent.example.com",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "capabilities": {
     "streaming": false,
     "pushNotifications": false,

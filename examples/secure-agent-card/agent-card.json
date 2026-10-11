@@ -1,10 +1,10 @@
 {
   "protocolVersion": "0.3.0",
   "name": "SecureAnalysisAgent",
-  "description": "Analyzes documents for security compliance. Supports PCI-DSS, SOC 2, HIPAA, and ISO 27001 frameworks.",
+  "description": "Validates each message it is sent and replies with the number of text parts it received and the length of their combined text.",
   "url": "https://your-agent.example.com",
   "preferredTransport": "JSONRPC",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "documentationUrl": "https://your-agent.example.com/docs",
   "provider": {
     "organization": "Your Organization",
@@ -19,32 +19,17 @@
     "bearer": { "type": "http", "scheme": "bearer" }
   },
   "security": [{ "bearer": [] }],
-  "defaultInputModes": ["text/plain"],
+  "defaultInputModes": ["text/plain", "application/json", "application/pdf", "image/png", "image/jpeg"],
   "defaultOutputModes": ["text/plain"],
   "skills": [
     {
-      "id": "compliance-check",
-      "name": "Compliance Check",
-      "description": "Check a document against security compliance rules for a specified framework",
-      "tags": ["security", "compliance", "audit"],
+      "id": "count-text-parts",
+      "name": "Count Text Parts",
+      "description": "Reply with the number of text parts in the message and the length in characters of their combined text. File parts are accepted and not read.",
+      "tags": ["example"],
       "examples": [
-        "Check this document for PCI-DSS compliance",
-        "Verify SOC 2 Type II requirements against our policy",
-        "Run a HIPAA compliance check on the patient data handling procedure"
-      ],
-      "inputModes": ["text/plain"],
-      "outputModes": ["text/plain"]
-    },
-    {
-      "id": "vulnerability-summary",
-      "name": "Vulnerability Summary",
-      "description": "Generate a summary of security vulnerabilities found in a compliance check",
-      "tags": ["security", "reporting"],
-      "examples": [
-        "Summarize the vulnerabilities found in the last compliance check"
-      ],
-      "inputModes": ["text/plain"],
-      "outputModes": ["text/plain"]
+        "Count the text parts in this message"
+      ]
     }
   ]
 }

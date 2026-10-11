@@ -74,6 +74,19 @@ test("every relative link points to a file in the repository", () => {
   }
 });
 
+test("the agent card excerpt matches agent-card.json", () => {
+  const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
+  const section = readme.indexOf("## Secure agent card");
+  assert.ok(section >= 0, "README has the Secure agent card section");
+  const [block] = codeBlocks(readme.slice(section));
+  assert.equal(block?.lang, "json", "the section's first code block is the JSON excerpt");
+  const excerpt = JSON.parse(block.body);
+  assert.ok(Object.keys(excerpt).length > 0, "the excerpt has fields");
+  for (const [key, value] of Object.entries(excerpt)) {
+    assert.deepEqual(value, card[key], `the excerpt's ${key} is the file's`);
+  }
+});
+
 test("the audit sentence names the handler's audit actions, including the one for a request that fails authentication", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
   const actions = [...handler.matchAll(/action: "(\w+)"/g)].map((m) => m[1]);
