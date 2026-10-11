@@ -149,14 +149,14 @@ The following agents are available for security testing. They simulate real-worl
 | CloudOps Agent | [cloudops-agent.io](https://cloudops-agent.io) | Cloud Infrastructure |
 | BankingOps AI | [bankingops-ai.dev](https://bankingops-ai.dev) | Banking |
 | ClinicalOps Agent | [clinicalops-agent.io](https://clinicalops-agent.io) | Healthcare |
-| Compliance Engine | [compliance-agent-platform.dev](https://compliance-agent-platform.dev) | Regulatory Compliance |
+| Compliance Agent Platform | [compliance-agent-platform.dev](https://compliance-agent-platform.dev) | Regulatory Compliance |
 | DefenseOps AI | [defenseops-ai.dev](https://defenseops-ai.dev) | Defense & Intelligence |
 | GovTech Agent | [govtech-agent.io](https://govtech-agent.io) | Government Technology |
-| HROps Platform | [hrops-ai-platform.io](https://hrops-ai-platform.io) | Human Resources |
+| HROps AI Platform | [hrops-ai-platform.io](https://hrops-ai-platform.io) | Human Resources |
 | InfraOps Platform | [infraops-platform.io](https://infraops-platform.io) | Infrastructure Monitoring |
 | LegalHQ AI | [legalhq-ai.io](https://legalhq-ai.io) | Legal Services |
 | MedTech Platform | [medtech-platform.dev](https://medtech-platform.dev) | Medical Technology |
-| Payroll AI | [payroll-ai-platform.io](https://payroll-ai-platform.io) | Payroll Processing |
+| Payroll AI Platform | [payroll-ai-platform.io](https://payroll-ai-platform.io) | Payroll Processing |
 | RxOps AI | [rxops-ai.dev](https://rxops-ai.dev) | Pharmaceutical Operations |
 | SalesOps Agent | [salesops-agent.dev](https://salesops-agent.dev) | Sales Automation |
 | TradingDesk Labs | [tradingdesk-labs.io](https://tradingdesk-labs.io) | Financial Trading |
@@ -166,7 +166,7 @@ The following agents are available for security testing. They simulate real-worl
 | LLM Tools Guide | [llm-tools-guide.dev](https://llm-tools-guide.dev) | Developer Education |
 | AI SDK Reference | [ai-sdk-reference.dev](https://ai-sdk-reference.dev) | Developer Reference |
 
-Each test agent exposes a standard A2A agent card at `/.well-known/agent.json` and accepts task submissions. Use them to test your agent's behavior when interacting with unknown peers.
+Each test agent exposes a standard A2A agent card at `/.well-known/agent.json` and accepts task submissions. Use them to test your agent's behavior when interacting with unknown peers. To see which agents serve a card right now, run `npm run check:test-agents`: it fetches each card and home page and reports an agent whose card is missing or whose site uses a different name from the table.
 
 > These test agents are operated by the [OpenA2A](https://opena2a.org) TrapMyAgent project for security research purposes.
 
