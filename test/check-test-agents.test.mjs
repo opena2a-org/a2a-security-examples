@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkAgent, maxBodyBytes, siteName, testAgents } from "../scripts/check-test-agents.mjs";
+import { checkAgent, maxBodyBytes, maxTitleAttributes, maxTitleText, siteName, testAgents } from "../scripts/check-test-agents.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readme = readFileSync(join(root, "README.md"), "utf8");
@@ -52,6 +52,15 @@ function stubFetch(responses) {
 
 const card = { status: 200, type: "application/json; charset=utf-8", body: '{"name":"probe Agent"}' };
 const home = (title) => ({ status: 200, type: "text/html; charset=utf-8", body: `<html><head><title>${title}</title></head></html>` });
+
+// The problems reported for a home page with no title, when the check read all
+// of it, when it read only the first 256 KB, and when a title tag lies outside
+// the bounds of the title the check reads.
+const noTitle = "the home page has no title";
+const noTitleInRead = "the home page has no title in its first 256 KB, which is all the check reads";
+const noTitleInBounds =
+  "the home page has no title the check can read, which needs a title tag with at most 256 characters of attributes and at most 1024 characters of text without a <";
+const noTitleInBoundsOrRead = `${noTitleInBounds}, ending in its first 256 KB`;
 
 test("the test agent check reads every row of the README's test agent table", () => {
   const section = readme.split(/^### Test agents$/m)[1]?.split(/^#{1,3} /m)[0] ?? "";
@@ -133,7 +142,30 @@ test("the test agent check reports a host it cannot reach and a home page withou
     "https://probe.dev/.well-known/agent.json": card,
     "https://probe.dev/": { status: 200, type: "text/html", body: "<html></html>" },
   });
-  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["the home page has no title"]);
+  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), [noTitle]);
+});
+
+test("the test agent check names the bounds it read when it finds no title in a page that may hold one past them", async () => {
+  const check = (body, name = "Probe AI") =>
+    checkAgent(
+      { name, host: "probe.dev" },
+      stubFetch({
+        "https://probe.dev/.well-known/agent.json": card,
+        "https://probe.dev/": { status: 200, type: "text/html", body },
+      })
+    );
+  assert.equal(maxTitleAttributes, 256);
+  assert.equal(maxTitleText, 1024);
+  const longest = "a".repeat(maxTitleText);
+  const attributes = (length) => ` data-x="${"b".repeat(length - 10)}"`;
+  assert.equal(attributes(maxTitleAttributes).length, maxTitleAttributes);
+  assert.deepEqual(await check(`<title>${longest}</title>`, longest), []);
+  assert.deepEqual(await check(`<title${attributes(maxTitleAttributes)}>Probe AI</title>`), []);
+  assert.deepEqual(await check(" ".repeat(300 * 1024) + "<title>Probe AI</title>"), [noTitleInRead]);
+  assert.deepEqual(await check(`<title>${longest}a</title>`, longest), [noTitleInBounds]);
+  assert.deepEqual(await check(`<title${attributes(maxTitleAttributes + 1)}>Probe AI</title>`), [noTitleInBounds]);
+  assert.deepEqual(await check("<title>Probe <AI></title>"), [noTitleInBounds]);
+  assert.deepEqual(await check("<TITLE>Probe AI" + " ".repeat(maxBodyBytes)), [noTitleInBoundsOrRead]);
 });
 
 test("the test agent check reads a home page made of repeated <title with no > in linear time", async () => {
@@ -144,7 +176,7 @@ test("the test agent check reads a home page made of repeated <title with no > i
     "https://probe.dev/": { status: 200, type: "text/html", body: "<title".repeat(66666) },
   });
   const start = performance.now();
-  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["the home page has no title"]);
+  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), [noTitleInBoundsOrRead]);
   const ms = performance.now() - start;
   assert.ok(ms < 1000, `checking 66,666 repeats of <title took ${Math.round(ms)} ms`);
 });
@@ -161,7 +193,7 @@ test("the test agent check reads a title that ends within the first 256 KB of th
     );
   assert.equal(maxBodyBytes, 256 * 1024);
   assert.deepEqual(await check(" ".repeat(maxBodyBytes - title.length) + title), []);
-  assert.deepEqual(await check(" ".repeat(maxBodyBytes - title.length + 1) + title), ["the home page has no title"]);
+  assert.deepEqual(await check(" ".repeat(maxBodyBytes - title.length + 1) + title), [noTitleInBoundsOrRead]);
 });
 
 test("the test agent check stops reading a response body after its first 256 KB", async () => {
@@ -184,7 +216,7 @@ test("the test agent check stops reading a response body after its first 256 KB"
     "https://probe.dev/.well-known/agent.json": card,
     "https://probe.dev/": { status: 200, type: "text/html", body },
   });
-  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["the home page has no title"]);
+  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), [noTitleInRead]);
   assert.ok(cancelled, "the check cancels the rest of the body");
   // One chunk past the limit shows the body runs on, and the stream holds one more ready.
   assert.ok(served <= maxBodyBytes + 2 * chunkBytes, `the check took ${served} bytes of a ${totalBytes} byte body`);
