@@ -714,6 +714,7 @@ test("the 401 examples of step 2 are only backticked headers joined by \", \" or
     "`Basic demo` or `Bearerx demo-token`. A request with any token at all",
     "`Basic demo` or `Bearerx demo-token` and also a request with any token at all",
     "`Basic demo` and any other header",
+    "`Basic demo` and any token or `Bearerx demo-token`",
     "any header",
   ];
   for (const list of claims) {
