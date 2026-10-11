@@ -76,6 +76,20 @@ function sendMessage(parts, message = {}) {
 
 const validTask = JSON.stringify(sendMessage([{ kind: "text", text: "Hello" }]));
 
+// The body limit in bytes, and the most parts and the longest file bytes the
+// schema allows, as handler.ts sets them.
+const handlerSource = readFileSync(join(example, "handler.ts"), "utf8");
+const bodyLimit = Number(handlerSource.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/)[1]) * 1024 * 1024;
+const maxParts = Number(handlerSource.match(/parts: z\.array\(PartSchema\)\.min\(1\)\.max\((\d+)\)/)[1]);
+const maxBytesLength = Number(handlerSource.match(/bytes: z\.string\(\)\.max\((\d+)\)/)[1]);
+
+// A message/send request of count file parts, each holding length base64
+// characters.
+function fileTask(count, length) {
+  const part = { kind: "file", file: { bytes: "A".repeat(length), mimeType: "text/plain" } };
+  return JSON.stringify(sendMessage(Array.from({ length: count }, () => part)));
+}
+
 // The JSON-RPC error response the server sends when it cannot read the body,
 // before it knows the request's id.
 function bodyError(code, message) {
@@ -418,9 +432,9 @@ test("malformed JSON gets a JSON 400 and an audit line, not a stack trace", asyn
   assert.doesNotMatch(output, /at parse \(/, "the stack trace is not written to the server log");
 });
 
-test("a body over 1 MB or in an unsupported encoding or charset gets a JSON error and a request_rejected audit line", async () => {
+test("a body over the size limit or in an unsupported encoding or charset gets a JSON error and a request_rejected audit line", async () => {
   const cases = [
-    { headers: {}, body: JSON.stringify({ text: "a".repeat(1100 * 1024) }), status: 413, reason: "entity.too.large" },
+    { headers: {}, body: JSON.stringify({ text: "a".repeat(bodyLimit) }), status: 413, reason: "entity.too.large" },
     { headers: { "Content-Encoding": "br2" }, body: "{}", status: 415, reason: "encoding.unsupported" },
     { headers: { "Content-Type": "application/json; charset=latin1" }, body: "{}", status: 415, reason: "charset.unsupported" },
   ];
@@ -439,7 +453,7 @@ test("a body over 1 MB or in an unsupported encoding or charset gets a JSON erro
 test("a body the parser cannot read gets Invalid request body even when it is not an object or array, or is empty", async () => {
   // The body is read before it is parsed, so these never get the Invalid JSON reply.
   const cases = [
-    { headers: {}, body: " ".repeat(1100 * 1024) + "123", status: 413, reason: "entity.too.large" },
+    { headers: {}, body: " ".repeat(bodyLimit) + "123", status: 413, reason: "entity.too.large" },
     { headers: { "Content-Encoding": "br2" }, body: "123", status: 415, reason: "encoding.unsupported" },
     { headers: { "Content-Type": "application/json; charset=latin1" }, body: "123", status: 415, reason: "charset.unsupported" },
     { headers: { "Content-Type": "application/json; charset=latin1" }, body: "", status: 415, reason: "charset.unsupported" },
@@ -896,6 +910,30 @@ test("a request the agent rejects gets a JSON-RPC error with the request's id th
       const lines = (await waitForAudit(seen + 1, audited)).slice(seen);
       assert.deepEqual(lines.map((l) => l.action), [action], name);
     }
+  });
+});
+
+test("a file part with bytes of the longest length the schema allows is accepted, and one character more fails schema validation, not the size limit", async () => {
+  await withOwnServer(async (serverPort, audited) => {
+    const seen = audited().length;
+    const accepted = await postTask({ Authorization: "Bearer demo-token" }, fileTask(1, maxBytesLength), serverPort);
+    assert.equal(accepted.status, 200);
+    assert.equal((await accepted.json()).result.status.state, "completed");
+    const rejected = await postTask({ Authorization: "Bearer demo-token" }, fileTask(1, maxBytesLength + 1), serverPort);
+    assert.equal(rejected.status, 400);
+    const { error } = await rejected.json();
+    assert.deepEqual([error.code, error.message], [-32602, "Invalid params"]);
+    assert.deepEqual(error.data.map((d) => d.field), ["params.message.parts.0.file.bytes"]);
+    const lines = (await waitForAudit(seen + 2, audited)).slice(seen);
+    assert.deepEqual(lines.map((l) => l.action), ["task_accepted", "validation_failed"]);
+  });
+});
+
+test("the size limit admits a message whose every part is a file part with bytes of the longest length the schema allows", async () => {
+  await withOwnServer(async (serverPort) => {
+    const res = await postTask({ Authorization: "Bearer demo-token" }, fileTask(maxParts, maxBytesLength), serverPort);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).result.status.state, "completed");
   });
 });
 
