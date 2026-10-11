@@ -10,6 +10,13 @@ const timeoutMs = 15000;
 // The check reads no more of a response body than this, so a body that never
 // ends cannot hold it.
 export const maxBodyBytes = 256 * 1024;
+// The most characters of attributes in a title tag and of text in a title that
+// the check reads. The bounds keep the title match linear in the length of the
+// page: without them, a page of repeated "<title" with no ">" took time that
+// grew with the square of its length.
+export const maxTitleAttributes = 256;
+export const maxTitleText = 1024;
+const titlePattern = new RegExp(`<title[^>]{0,${maxTitleAttributes}}>([^<]{0,${maxTitleText}})</title>`, "i");
 
 // The name and host of each row of the README's test agent table.
 export function testAgents(readme) {
@@ -24,6 +31,18 @@ export function siteName(title) {
   const entities = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
   const text = title.replace(/&(amp|lt|gt|quot|#39);/g, (_, entity) => entities[entity]);
   return text.split(" — ")[0].trim();
+}
+
+// The problem with a home page in which the check found no title. When the
+// page runs past the part the check reads, or holds a "<title" the pattern
+// does not match, the message names the bounds, since a title may lie past them.
+function missingTitle({ body, truncated }) {
+  const kb = maxBodyBytes / 1024;
+  if (!/<title/i.test(body)) {
+    return truncated ? `the home page has no title in its first ${kb} KB, which is all the check reads` : "the home page has no title";
+  }
+  const bounds = `a title tag with at most ${maxTitleAttributes} characters of attributes and at most ${maxTitleText} characters of text without a <`;
+  return `the home page has no title the check can read, which needs ${bounds}${truncated ? `, ending in its first ${kb} KB` : ""}`;
 }
 
 // The first maxBodyBytes of a response body as text, and whether the body runs
@@ -78,11 +97,8 @@ export async function checkAgent({ name, host }, fetchImpl = fetch) {
   } else if (home.status !== 200) {
     problems.push(`the home page returned ${home.status}`);
   } else {
-    // The bounds keep the match linear in the length of the page: without
-    // them, a page of repeated "<title" with no ">" took time that grew with
-    // the square of its length.
-    const title = home.body.match(/<title[^>]{0,256}>([^<]{0,1024})<\/title>/i)?.[1];
-    if (title === undefined) problems.push("the home page has no title");
+    const title = home.body.match(titlePattern)?.[1];
+    if (title === undefined) problems.push(missingTitle(home));
     else if (siteName(title) !== name) problems.push(`the home page calls the agent "${siteName(title)}", not "${name}"`);
   }
   return problems;
