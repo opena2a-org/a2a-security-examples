@@ -1369,6 +1369,19 @@ test("the node:test import reader reads an of after the end of an operand direct
   }
 });
 
+test("the node:test import reader reads the of of a for...of loop as the keyword when the left side of the loop holds a template substitution inside brackets, and when a line break comes before the of", () => {
+  // Read as a variable, the of would make the slash after it divide, and the
+  // backtick after that slash would open a template that hides the
+  // declaration.
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  for (const before of [
+    "for (o[`${k}`] of /`/g.exec(s)) f(o);\n",
+    "for (x\nof /`/g.exec(s)) f(x);\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+});
+
 test("the node:test import reader reads an of outside the parentheses after for as a variable, as after a line break that ends a statement or after the ) of if (...)", () => {
   // Read as the keyword, the of would make the slash after it start a regular
   // expression that closes at the slash in the template, and the backtick after
