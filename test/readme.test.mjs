@@ -239,8 +239,10 @@ function moduleTokens(text) {
   // and not yet closed.
   const substitutions = [];
   // For each (, [ or { open at this point, whether it is the ( after for or
-  // for await.
+  // for await. A for after a . or # is a property or private name, not the
+  // keyword.
   const brackets = [];
+  const keywordFor = (token) => token?.raw === "for" && !token.property;
   const templateText = (start) => {
     for (let k = start; k < source.length; k++) {
       if (source[k] === "\\") k++;
@@ -297,7 +299,7 @@ function moduleTokens(text) {
       const declared = ["const", "let", "var"].includes(previous?.raw) && tokens.at(-2)?.type === "punct" && tokens.at(-2).value === "(";
       const keyword = forHead && !declared && (slashDivides(previous) || (previous?.type === "punct" && previous.value === "}"));
       const of = name[0] === "of" && !keyword;
-      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]) });
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), property, beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]) });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
       const number = /\.?\d[\w.]*/y;
@@ -315,7 +317,7 @@ function moduleTokens(text) {
     } else {
       if (substitutions.length > 0 && c === "{") substitutions[substitutions.length - 1]++;
       if (substitutions.length > 0 && c === "}") substitutions[substitutions.length - 1]--;
-      if ("([{".includes(c)) brackets.push(c === "(" && (previous?.raw === "for" || (previous?.raw === "await" && tokens.at(-2)?.raw === "for")));
+      if ("([{".includes(c)) brackets.push(c === "(" && (keywordFor(previous) || (previous?.raw === "await" && keywordFor(tokens.at(-2)))));
       if (")]}".includes(c)) brackets.pop();
       tokens.push({ type: "punct", value: c });
       i++;
@@ -534,6 +536,23 @@ test("the node:test import reader reads an of outside the parentheses after for 
   assert.deepEqual(namesImportedFromNodeTest("if (x) of / 2, t = `/`;\n" + declaration), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest("for (x of y) of / 2, t = `/`;\n" + declaration), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest("for (x of [() => { y\nof / 2, t = `/`; }]) ;\n" + declaration), ["after"]);
+});
+
+test("the node:test import reader reads an of inside the parentheses after a property or private name called for as a variable", () => {
+  // A for after a . or # is not the keyword, so the ( after it does not open
+  // the head of a for...of loop. Read as the keyword, the of would make the
+  // slash after it start a regular expression that closes at the slash in the
+  // template, and the backtick after it would open a template that hides the
+  // declaration.
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  for (const before of [
+    "obj.for(x of / 2), t = `/`;\n",
+    "obj?.for(x of / 2), t = `/`;\n",
+    "obj.for await (x of / 2), t = `/`;\n",
+    "class C { #for() {} m() { this.#for(x of / 2), t = `/`; } }\n",
+  ]) {
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
 });
 
 test("the node:test import reader reads a slash after a number, string, template or regular expression as division", () => {
