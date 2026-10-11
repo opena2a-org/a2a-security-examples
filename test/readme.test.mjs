@@ -219,15 +219,16 @@ function regularExpressionEnd(source, start) {
 // read as division after a name other than a keyword in
 // keywordsBeforeExpression (a keyword after a . is a property name and one
 // after a # is a private name, while one after ... is a keyword, except of,
-// which is a keyword only after }, or after a token a slash divides after
-// other than the keyword const, let or var),
-// after ) or ],
-// after a number, string, template or regular expression, and after a ++ or --
-// that follows one of these on the same line (a line break before a ++ or --,
-// in a comment or not, makes it a prefix operator). So a slash right after the )
-// of if (...), for (...) or while (...) is read as division, though it starts a
-// regular expression there. Any other slash starts a regular expression if one
-// closes on the same line, and is read as a punctuator if not.
+// which is a keyword only directly inside the parentheses after for or
+// for await, after a token a slash divides after or after }, and not as the
+// name a const, let or var declares right after the opening parenthesis),
+// after ) or ], after a number, string, template or regular expression, and
+// after a ++ or -- that follows one of these on the same line (a line break
+// before a ++ or --, in a comment or not, makes it a prefix operator). So a
+// slash right after the ) of if (...), for (...) or while (...) is read as
+// division, though it starts a regular expression there. Any other slash
+// starts a regular expression if one closes on the same line, and is read as
+// a punctuator if not.
 function moduleTokens(text) {
   const source = text.replace(/^\u{FEFF}/u, "");
   const tokens = [];
@@ -237,6 +238,9 @@ function moduleTokens(text) {
   // For each template substitution open at this point, the { opened inside it
   // and not yet closed.
   const substitutions = [];
+  // For each (, [ or { open at this point, whether it is the ( after for or
+  // for await.
+  const brackets = [];
   const templateText = (start) => {
     for (let k = start; k < source.length; k++) {
       if (source[k] === "\\") k++;
@@ -284,13 +288,16 @@ function moduleTokens(text) {
       i = flags.lastIndex;
     } else if (name) {
       const property = previous?.type === "punct" && (previous.value === "." || previous.value === "#");
-      // of is a variable name unless it follows the end of an operand or of a
-      // pattern, as in for (x of ...) or for (const { a } of ...). Right after
-      // the keyword const, let or var it is the variable declared, as in
+      // of is a variable name unless it comes directly inside the parentheses
+      // after for or for await and follows the end of an operand or of a
+      // pattern, as in for (x of ...) or for (const { a } of ...), other than
+      // as the name a const, let or var right after the ( declares, as in
       // for (const of of ...).
-      const declared = previous?.type === "name" && !previous.property && ["const", "let", "var"].includes(previous.raw);
-      const of = name[0] === "of" && (declared || (!slashDivides(previous) && !(previous?.type === "punct" && previous.value === "}")));
-      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), property, beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]) });
+      const forHead = brackets.at(-1) === true;
+      const declared = ["const", "let", "var"].includes(previous?.raw) && tokens.at(-2)?.type === "punct" && tokens.at(-2).value === "(";
+      const keyword = forHead && !declared && (slashDivides(previous) || (previous?.type === "punct" && previous.value === "}"));
+      const of = name[0] === "of" && !keyword;
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]) });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
       const number = /\.?\d[\w.]*/y;
@@ -308,6 +315,8 @@ function moduleTokens(text) {
     } else {
       if (substitutions.length > 0 && c === "{") substitutions[substitutions.length - 1]++;
       if (substitutions.length > 0 && c === "}") substitutions[substitutions.length - 1]--;
+      if ("([{".includes(c)) brackets.push(c === "(" && (previous?.raw === "for" || (previous?.raw === "await" && tokens.at(-2)?.raw === "for")));
+      if (")]}".includes(c)) brackets.pop();
       tokens.push({ type: "punct", value: c });
       i++;
     }
@@ -492,6 +501,38 @@ test("the node:test import reader reads a slash after a variable named of as div
   ]) {
     assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
   }
+});
+
+test("the node:test import reader reads an of after the end of an operand directly inside the parentheses after for or for await as the for...of keyword, and an of that a const, let or var declares there as a variable", () => {
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  // Of these, only (x), f(x) and 1..x parse as the left-hand side of a
+  // for...of loop. The reader does not check that, and reads an of after the
+  // end of any operand there as the keyword, so the slash after it starts a
+  // regular expression.
+  for (const target of ["(x)", "f(x)", "1..x", '"a"', "`a`", "/a/", "x++", "x--"]) {
+    const before = `for (${target} of /\`/g.exec(s)) g();\n`;
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+  assert.deepEqual(namesImportedFromNodeTest("for await (const x of /`/g.exec(s)) f(x);\n" + declaration), ["after"]);
+  for (const kind of ["const", "let", "var"]) {
+    const before = `for (${kind} of of /\`/g.exec(s)) f(of);\n`;
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+});
+
+test("the node:test import reader reads an of outside the parentheses after for as a variable, as after a line break that ends a statement or after the ) of if (...)", () => {
+  // Read as the keyword, the of would make the slash after it start a regular
+  // expression that closes at the slash in the template, and the backtick after
+  // it would open a template that hides the declaration.
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  for (const operand of ["y", "f(y)", "a[0]", "1", '"a"', "`a`", "/a/", "y++", "y--"]) {
+    const before = `x = ${operand}\nof / 2, t = \`/\`;\n`;
+    assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
+  }
+  assert.deepEqual(namesImportedFromNodeTest("if (x) {}\nof / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("if (x) of / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("for (x of y) of / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("for (x of [() => { y\nof / 2, t = `/`; }]) ;\n" + declaration), ["after"]);
 });
 
 test("the node:test import reader reads a slash after a number, string, template or regular expression as division", () => {
