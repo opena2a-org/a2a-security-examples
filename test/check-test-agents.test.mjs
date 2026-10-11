@@ -307,6 +307,8 @@ test("the test agent check ends a script where an HTML parser does when its text
   assert.deepEqual(await checkHome("<script><!--<script></script><title>X</title>--></script><title>Probe AI</title>"), []);
   assert.deepEqual(await checkHome("<script><!--<SCRIPT/></Script ><title>X</title>--></script><title>Probe AI</title>"), []);
   assert.deepEqual(await checkHome("<script><!--<script>--></script><title>Probe AI</title>"), []);
+  // The "</script" that ends such a part leaves the "<!--" part open, and there the next "</script" ends the script.
+  assert.deepEqual(await checkHome("<script><!--<script></script></script><title>Probe AI</title>"), []);
   // A script ends at its first "</script" outside such a part.
   assert.deepEqual(await checkHome("<script><!--</script><title>Probe AI</title>"), []);
   assert.deepEqual(await checkHome("<script><script></script><title>Probe AI</title>"), []);
