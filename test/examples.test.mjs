@@ -85,9 +85,16 @@ const rootEntryFields = [
 // ERR_INVALID_ARG_TYPE and this function throws that error.
 //
 // npm sets a list path's name and a renamed command as a property of a plain
-// object, so a name __proto__ sets none and gives no command. A command named
-// __proto__ in a bin object, or a bin path under a package named __proto__, is
-// kept as it is, and rootEntry leaves it out of the lock file.
+// object, and setting __proto__ that way sets nothing unless the object has a
+// key named __proto__. The object npm builds from a bin list never has one,
+// so a list path named __proto__ gives no command. A command renamed to
+// __proto__ gives none when the bin has no key named __proto__. When the bin
+// object holds that key as npm renames the command, the key takes the renamed
+// command's file, so for bin { "a/__proto__": "y.js", "__proto__": "x.js" }
+// npm keeps __proto__ with y.js. A command named __proto__ in a bin object,
+// or a bin path under a package named __proto__, is a key npm keeps or drops
+// as it does a command of any other name, and rootEntry leaves it out of the
+// lock file.
 function recordedBin({ name, bin }) {
   if (typeof bin === "string") bin = name ? { [name]: bin } : {};
   if (Array.isArray(bin)) {
@@ -259,6 +266,29 @@ test("the lock file check passes for the lock file npm writes for a bin command 
   assert.throws(() => assertLockMatches(pkg, lockWith(JSON.parse('{"bin":{"__proto__":"x.js"}}'))), stale("bin"));
 });
 
+test("the bin the lock file check expects for a command renamed to __proto__ is the one npm 11.19.0 keeps", () => {
+  // The commands npm pkg fix, npm 11.19.0, writes back to package.json for
+  // each bin, where it writes no bin when it keeps no command. The root entry
+  // of the lock file holds no key __proto__, so it does not show which file
+  // npm keeps for that command.
+  const kept = [
+    // The bin holds a key __proto__ as npm renames the command.
+    ['{"a/__proto__":"y.js","__proto__":"x.js"}', [["__proto__", "y.js"]]],
+    ['{"__proto__":"x.js","a/__proto__":"y.js"}', [["__proto__", "y.js"]]],
+    ['{"a/__proto__":"y.js","b/__proto__":"z.js","__proto__":"x.js"}', [["__proto__", "z.js"]]],
+    ['{"a/__proto__":"y.js","__proto__":7}', [["__proto__", "y.js"]]],
+    // The bin has no key __proto__, or npm has dropped it before the rename.
+    ['{"a/__proto__":"x.js"}', []],
+    ['["lib/__proto__","a:__proto__"]', []],
+    ['{"__proto__":7,"a/__proto__":"y.js"}', []],
+    ['{"__proto__":"","a/__proto__":"y.js"}', []],
+  ];
+  for (const [bin, commands] of kept) {
+    const recorded = recordedBin({ name: "probe", bin: JSON.parse(bin) });
+    assert.deepEqual(Object.entries(recorded), commands, `the commands for bin ${bin}`);
+  }
+});
+
 test("the lock file check fails for a lock file whose root entry lacks the libc of package.json or holds another", () => {
   const pkg = { name: "example", libc: ["glibc"] };
   assert.doesNotThrow(() => assertLockMatches(pkg, lockWith({ libc: ["glibc"] })));
@@ -417,14 +447,20 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
       { name: "probe", bundleDependencies: ["two"], dependencies: { one }, devDependencies: { one } },
     ],
     // npm keeps a bin command named __proto__, as JSON.parse does, and drops a
-    // command renamed to __proto__ or a list path named __proto__. It writes
-    // the lock file without a key named __proto__ at any depth, after it leaves
-    // out the empty values, so a bin of that one command is an empty object.
+    // list path named __proto__. It drops a command renamed to __proto__ when
+    // the bin has no key named __proto__, or when it has dropped that key
+    // before it renames the command. When the bin holds the key as npm renames
+    // the command, the key takes the renamed command's file. It writes the
+    // lock file without a key named __proto__ at any depth, after it leaves
+    // out the empty values, so a bin whose one command is __proto__ is an
+    // empty object.
     ...[
       ['{"name":"probe","bin":{"__proto__":"x.js"}}', { name: "probe", bin: {} }],
       ['{"name":"__proto__","bin":"x.js"}', { name: "__proto__", bin: {} }],
       ['{"name":"probe","bin":{"__proto__":"x.js","a/b":"y.js","b":"z.js"}}', { name: "probe", bin: { b: "y.js" } }],
       ['{"name":"probe","bin":{"a/__proto__":"y.js","__proto__":"x.js"}}', { name: "probe", bin: {} }],
+      ['{"name":"probe","bin":{"a/__proto__":"y.js","__proto__":7}}', { name: "probe", bin: {} }],
+      ['{"name":"probe","bin":{"__proto__":7,"a/__proto__":"y.js"}}', { name: "probe" }],
       ['{"name":"probe","bin":{"__proto__":"./x.js","a/__proto__":""}}', { name: "probe", bin: {} }],
       ['{"name":"probe","bin":{"a/__proto__":"x.js"}}', { name: "probe" }],
       ['{"name":"probe","bin":{"a\\\\__proto__":"x.js","c:__proto__/..":"y.js"}}', { name: "probe", bin: { c: "y.js" } }],
