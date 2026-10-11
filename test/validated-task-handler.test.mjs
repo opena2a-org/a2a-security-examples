@@ -1139,10 +1139,11 @@ test("the spaces between the bearer scheme and the token are not part of the tok
 });
 
 // POST a valid task to a server as raw HTTP with the given header lines, each
-// sent as written, and return the status and the body of the reply. fetch
-// cannot send these requests: it joins the values of a header given more than
-// once into one line. The request is written as Latin-1, one byte for each
-// character of a line.
+// sent as written, and return the status, the header lines and the body of the
+// reply. fetch cannot send these requests: it joins the values of a header
+// given more than once into one line. The request is written as Latin-1, one
+// byte for each character of a line. Besides the given lines it sends Host,
+// Content-Type, Content-Length and Connection.
 function postRaw(serverPort, headerLines) {
   const request = [
     "POST / HTTP/1.1",
@@ -1162,7 +1163,8 @@ function postRaw(serverPort, headerLines) {
     socket.on("error", reject);
     socket.on("close", () => {
       const status = Number(reply.match(/^HTTP\/1\.1 (\d{3}) /)?.[1]);
-      resolve({ status, body: reply.slice(reply.indexOf("\r\n\r\n") + 4) });
+      const end = reply.indexOf("\r\n\r\n");
+      resolve({ status, headers: reply.slice(0, end).split("\r\n").slice(1), body: reply.slice(end + 4) });
     });
   });
 }
@@ -1177,19 +1179,65 @@ test("a request with more than one Authorization header gets 401, whichever head
         const res = await postRaw(serverPort, sent);
         assert.equal(res.status, 401, `${sent.join(" then ")} gets 401`);
         assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
+        assert.ok(res.headers.includes("WWW-Authenticate: Bearer"), `the 401 to ${sent.join(" then ")} carries the Bearer challenge`);
       }
     }
     // Header names are case-insensitive, so two spellings are two headers.
     const spelled = await postRaw(serverPort, ["authorization: Bearer demo-token", "AUTHORIZATION: Bearer demo-token"]);
     assert.equal(spelled.status, 401, "authorization then AUTHORIZATION gets 401");
-    // A header whose name only ends in Authorization is not a second one.
-    const single = await postRaw(serverPort, [valid, "Proxy-Authorization: Bearer demo token"]);
-    assert.equal(single.status, 200, "one Authorization header is accepted");
-    assert.equal(JSON.parse(single.body).result.status.state, "completed");
-    // The accepted request wrote the only audit line, so each 401 wrote none.
+    // A header whose name only ends in Authorization is not a second one, and
+    // neither is a header whose value is authorization: only names are counted.
+    for (const other of ["Proxy-Authorization: Bearer demo token", "X-Requested-Header: authorization"]) {
+      const single = await postRaw(serverPort, [valid, other]);
+      assert.equal(single.status, 200, `one Authorization header and ${other} are accepted`);
+      assert.equal(JSON.parse(single.body).result.status.state, "completed");
+    }
+    // The accepted requests wrote the only audit lines, so each 401 wrote none.
+    await waitForAudit(2, audited);
+    assert.deepEqual(audited().map((a) => a.action), ["task_accepted", "task_accepted"]);
+  });
+});
+
+test("a request with 1,000 or more header lines gets 431, so an Authorization header past the lines Node.js reads is not ignored", async () => {
+  await withOwnServer(async (serverPort, audited) => {
+    // Node.js 20 stops reading the header lines of a request once it holds
+    // about 1,000 and passes the request on without the rest, so the handler
+    // would read only the first Authorization line of these requests. Later
+    // releases answer them with a bare 431 before the handler runs.
+    const valid = "Authorization: Bearer demo-token";
+    const invalid = "Authorization: Bearer undefined";
+    const filler = (count) => Array(count).fill("a:");
+    for (const sent of [[valid, ...filler(1100), invalid], [invalid, ...filler(1100), valid]]) {
+      const res = await postRaw(serverPort, sent);
+      assert.equal(res.status, 431, `${sent[0]}, 1,100 other lines and ${sent.at(-1)} get 431`);
+    }
+    // postRaw sends four header lines besides the given ones, so these
+    // requests have 1,000 and 999 header lines.
+    const atLimit = await postRaw(serverPort, [valid, ...filler(995)]);
+    assert.equal(atLimit.status, 431, "a request with 1,000 header lines gets 431");
+    assert.deepEqual(JSON.parse(atLimit.body), { error: "Too many header lines" });
+    const belowLimit = await postRaw(serverPort, [valid, ...filler(994)]);
+    assert.equal(belowLimit.status, 200, "a request with 999 header lines is accepted");
+    assert.equal(JSON.parse(belowLimit.body).result.status.state, "completed");
+    // The accepted request wrote the only audit line, so each 431 wrote none.
     await waitForAudit(1, audited);
     assert.deepEqual(audited().map((a) => a.action), ["task_accepted"]);
   });
+});
+
+test("a 401 response carries the Bearer challenge in a WWW-Authenticate header, and a 403 or 200 response does not", async () => {
+  // RFC 9110, section 15.5.2: a 401 response carries at least one challenge.
+  for (const headers of [{}, { Authorization: "Bearer demo token" }, { Authorization: "Basic demo" }]) {
+    const res = await postTask(headers, validTask);
+    assert.equal(res.status, 401, `${JSON.stringify(headers)} gets 401`);
+    assert.equal(res.headers.get("www-authenticate"), "Bearer", `the 401 to ${JSON.stringify(headers)} carries the Bearer challenge`);
+  }
+  const forbidden = await postTask({ Authorization: "Bearer undefined" }, validTask);
+  assert.equal(forbidden.status, 403);
+  assert.equal(forbidden.headers.get("www-authenticate"), null);
+  const accepted = await postTask({ Authorization: "Bearer demo-token" }, validTask);
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.headers.get("www-authenticate"), null);
 });
 
 test("a bearer token with a character outside the RFC 6750 token characters gets 401, whichever character it is", async () => {

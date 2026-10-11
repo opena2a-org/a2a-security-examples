@@ -129,6 +129,31 @@ function audit(entry: AuditEntry): void {
   console.log(JSON.stringify(entry));
 }
 
+// --- Header Line Limit ---
+
+// The most header lines a request may have. Node.js 22 and later answer a
+// request with more with a bare HTTP 431 before any handler runs. Node.js 20
+// instead stops reading header lines once it holds this many and passes the
+// request on, so a later line, such as a second Authorization header, is in
+// neither req.headers nor req.rawHeaders. A request that has this many may
+// have had more, so it gets 431 here whichever release runs the example.
+const maxHeaderLines = 1000;
+
+function limitHeaderLines(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+): void {
+  // rawHeaders holds the name and then the value of each header line.
+  if (req.rawHeaders.length >= maxHeaderLines * 2) {
+    res.status(431).json({ error: "Too many header lines" });
+    return;
+  }
+  next();
+}
+
+app.use(limitHeaderLines);
+
 // --- Authentication Middleware ---
 
 // The number of Authorization header lines in a request.
@@ -155,7 +180,9 @@ function authenticate(
   // 0xA0, a no-break space in Latin-1.
   const credentials = authHeader?.match(/^bearer +([A-Za-z0-9._~+\/-]+=*)$/i);
   if (!credentials) {
-    res.status(401).json({ error: "Authentication required" });
+    // A 401 response names the scheme the server accepts in a challenge (RFC
+    // 9110, section 15.5.2); RFC 6750, section 3, defines the Bearer one.
+    res.status(401).set("WWW-Authenticate", "Bearer").json({ error: "Authentication required" });
     return;
   }
 
@@ -492,6 +519,9 @@ const server = app.listen(port, () => {
   console.log(`Secure A2A agent listening on port ${port}`);
   console.log(`Agent card: http://localhost:${port}/.well-known/agent-card.json`);
 });
+// Node.js reads up to 1,000 header lines when this is unset. Setting it keeps
+// the limit Node.js applies and the one the handler checks the same.
+server.maxHeadersCount = maxHeaderLines;
 
 // Without a listener, a port that is already taken ends the process with the
 // stack trace of an unhandled 'error' event. The listener also receives errors

@@ -143,6 +143,21 @@ test("step 1 gives 401 for a request with more than one Authorization header, wh
   assert.match(step.split("; 403 ")[0], /`Authorization` header is missing, is sent more than once, or/, "step 1 gives 401 for a header sent more than once");
 });
 
+test("step 1 names the challenge the handler's 401 responses carry and the header line count at which it answers 431", () => {
+  // test/validated-task-handler.test.mjs sends requests that get both answers.
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
+  const challenge = handler.match(/status\(401\)\.set\("WWW-Authenticate", "([^"]+)"\)/);
+  assert.ok(challenge, "handler.ts sets a WWW-Authenticate challenge on its 401 response");
+  assert.ok(step.includes(`Each 401 carries the challenge \`WWW-Authenticate: ${challenge[1]}\``), "step 1 names the challenge");
+  const limit = handler.match(/const maxHeaderLines = (\d+);/);
+  assert.ok(limit, "handler.ts sets the most header lines a request may have");
+  const count = Number(limit[1]).toLocaleString("en-US");
+  assert.ok(step.includes(`a request with ${count} or more header lines gets 431`), `step 1 gives 431 for ${count} or more header lines`);
+  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  assert.match(sentence, /rejected with HTTP 401, 403 or 431 and requests for the agent card write no audit line/, "README says a 431 writes no audit line");
+});
+
 // The characters the pattern takes in a bearer token, of the 256 a header byte
 // decodes to: those a token is made of, and those that can only end one.
 function tokenCharacters(credentials) {
