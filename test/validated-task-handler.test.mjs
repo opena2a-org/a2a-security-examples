@@ -1103,3 +1103,20 @@ test("malformed JSON without a bearer token gets 401 and no audit line", async (
   const audited = (await waitForAudit(seen + 1)).slice(seen);
   assert.deepEqual(audited.map((a) => a.action), ["task_accepted"]);
 });
+
+test("the bearer scheme name is matched without regard to case", async () => {
+  // RFC 9110, section 11.1: authentication scheme names are case-insensitive.
+  for (const scheme of ["bearer", "BEARER", "bEaReR"]) {
+    const res = await postTask({ Authorization: `${scheme} demo-token` }, validTask);
+    assert.equal(res.status, 200, `${scheme} demo-token is accepted`);
+    assert.equal((await res.json()).result.status.state, "completed");
+    // The token after a lowercase scheme is still checked.
+    const rejected = await postTask({ Authorization: `${scheme} undefined` }, validTask);
+    assert.equal(rejected.status, 403, `${scheme} undefined is rejected`);
+    assert.deepEqual(await rejected.json(), { error: "Invalid or expired token" });
+  }
+  // A scheme name with no space before the token is still not a bearer token.
+  const unseparated = await postTask({ Authorization: "bearerdemo-token" }, validTask);
+  assert.equal(unseparated.status, 401);
+  assert.deepEqual(await unseparated.json(), { error: "Authentication required" });
+});

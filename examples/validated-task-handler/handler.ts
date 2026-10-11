@@ -137,7 +137,8 @@ function authenticate(
   next: express.NextFunction
 ): void {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
+  // Scheme names are case-insensitive (RFC 9110, section 11.1).
+  if (!authHeader || !/^bearer /i.test(authHeader)) {
     res.status(401).json({ error: "Authentication required" });
     return;
   }
