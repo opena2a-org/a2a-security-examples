@@ -55,11 +55,11 @@ const home = (title) => ({ status: 200, type: "text/html; charset=utf-8", body: 
 
 // The problems reported for a home page with no title, when the check read all
 // of it, when it read only the first 256 KB, and when a title tag lies outside
-// the bounds of the title the check reads.
+// the bounds of the title the check reads or is not closed by </title>.
 const noTitle = "the home page has no title";
 const noTitleInRead = "the home page has no title in its first 256 KB, which is all the check reads";
 const noTitleInBounds =
-  "the home page has no title the check can read, which needs a title tag with at most 256 characters of attributes and at most 1024 characters of text without a <";
+  "the home page has no title the check can read, which needs a title tag with at most 256 characters of attributes and at most 1024 characters of text without a <, closed by </title>";
 const noTitleInBoundsOrRead = `${noTitleInBounds}, ending in its first 256 KB`;
 
 test("the test agent check reads every row of the README's test agent table", () => {
@@ -166,6 +166,21 @@ test("the test agent check names the bounds it read when it finds no title in a 
   assert.deepEqual(await check(`<title${attributes(maxTitleAttributes + 1)}>Probe AI</title>`), [noTitleInBounds]);
   assert.deepEqual(await check("<title>Probe <AI></title>"), [noTitleInBounds]);
   assert.deepEqual(await check("<TITLE>Probe AI" + " ".repeat(maxBodyBytes)), [noTitleInBoundsOrRead]);
+});
+
+test("the test agent check says a title must be closed by </title> when a short title within the bounds is not", async () => {
+  const check = (body) =>
+    checkAgent(
+      { name: "Probe AI", host: "probe.dev" },
+      stubFetch({
+        "https://probe.dev/.well-known/agent.json": card,
+        "https://probe.dev/": { status: 200, type: "text/html", body },
+      })
+    );
+  assert.ok(noTitleInBounds.endsWith(", closed by </title>"));
+  assert.deepEqual(await check("<title>Probe AI"), [noTitleInBounds]);
+  assert.deepEqual(await check("<title>Probe AI</title >"), [noTitleInBounds]);
+  assert.deepEqual(await check("<title>Probe AI</TITLE>"), []);
 });
 
 test("the test agent check reads a home page made of repeated <title with no > in linear time", async () => {

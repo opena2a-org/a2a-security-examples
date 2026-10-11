@@ -35,13 +35,14 @@ export function siteName(title) {
 
 // The problem with a home page in which the check found no title. When the
 // page runs past the part the check reads, or holds a "<title" the pattern
-// does not match, the message names the bounds, since a title may lie past them.
+// does not match, the message names the bounds, since a title may lie past
+// them, and the closing tag, since a title within them may not be closed.
 function missingTitle({ body, truncated }) {
   const kb = maxBodyBytes / 1024;
   if (!/<title/i.test(body)) {
     return truncated ? `the home page has no title in its first ${kb} KB, which is all the check reads` : "the home page has no title";
   }
-  const bounds = `a title tag with at most ${maxTitleAttributes} characters of attributes and at most ${maxTitleText} characters of text without a <`;
+  const bounds = `a title tag with at most ${maxTitleAttributes} characters of attributes and at most ${maxTitleText} characters of text without a <, closed by </title>`;
   return `the home page has no title the check can read, which needs ${bounds}${truncated ? `, ending in its first ${kb} KB` : ""}`;
 }
 
