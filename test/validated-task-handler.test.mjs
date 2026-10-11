@@ -1120,3 +1120,20 @@ test("the bearer scheme name is matched without regard to case", async () => {
   assert.equal(unseparated.status, 401);
   assert.deepEqual(await unseparated.json(), { error: "Authentication required" });
 });
+
+test("the spaces between the bearer scheme and the token are not part of the token", async () => {
+  // RFC 9110, section 11.4: one or more spaces separate the scheme from the token.
+  for (const spaces of ["  ", "   "]) {
+    const res = await postTask({ Authorization: `Bearer${spaces}demo-token` }, validTask);
+    assert.equal(res.status, 200, `${spaces.length} spaces before demo-token are accepted`);
+    assert.equal((await res.json()).result.status.state, "completed");
+    // The token is undefined, not " undefined", so it is rejected.
+    const rejected = await postTask({ Authorization: `Bearer${spaces}undefined` }, validTask);
+    assert.equal(rejected.status, 403, `${spaces.length} spaces before undefined are rejected`);
+    assert.deepEqual(await rejected.json(), { error: "Invalid or expired token" });
+  }
+  // A bearer token has no spaces in it.
+  const split = await postTask({ Authorization: "Bearer demo token" }, validTask);
+  assert.equal(split.status, 401);
+  assert.deepEqual(await split.json(), { error: "Authentication required" });
+});
