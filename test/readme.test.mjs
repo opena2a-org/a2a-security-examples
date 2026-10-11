@@ -77,9 +77,10 @@ test("the audit sentence names the handler's audit actions, including the one fo
   assert.match(sentence, /`auth_failed` for a request that fails authentication, with the status it gets and a reason but never the header or the token/, "README says what the auth_failed line records and that it leaves out the token");
 });
 
-test("step 1 is the rate limit, which every request counts toward before the handler authenticates it", () => {
+test("step 1 is the rate limit, which every request that reaches it counts toward before the handler authenticates it", () => {
   // test/validated-task-handler.test.mjs sends requests that fail
-  // authentication until the next request gets 429.
+  // authentication until the next request gets 429, and requests answered 431
+  // that the limiter does not count.
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
   assert.match(handler, /app\.post\("\/", rateLimit, authenticate, /, "handler.ts runs the rate limiter before authentication");
   const points = handler.match(/points: (\d+), \/\/ requests/);
@@ -87,7 +88,30 @@ test("step 1 is the rate limit, which every request counts toward before the han
   assert.ok(points && duration, "handler.ts allows a number of requests per minute");
   const step = lines.find((l) => l.startsWith("1. "));
   assert.ok(step, "README lists a step 1");
-  assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: 429. Every request counts, including one that then fails authentication`), "README lists the rate limit as step 1 and says a request that fails authentication counts");
+  assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: 429. Every request that reaches the limiter counts, including one that then fails authentication; a request answered 431 for too many header lines (see step 2) is not counted.`), "README lists the rate limit as step 1 and says a request that fails authentication counts and one answered 431 does not");
+  assert.doesNotMatch(step, /Every request counts/, "step 1 does not say that every request counts, as one answered 431 never reaches the limiter");
+  assert.ok(step.includes("The limiter counts a client's requests for 60 seconds from its first one and starts again with its first request after those 60 seconds have ended"), "step 1 says the 60 seconds start with a client's first request and the count starts again after they have ended");
+});
+
+test("step 1 says that clients behind a reverse proxy share one count unless the deployment sets trust proxy", () => {
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  assert.match(handler, /const clientIp = req\.ip \|\| "unknown";\n  try \{\n    await rateLimiter\.consume\(clientIp\);/, "handler.ts keys the limiter on req.ip");
+  const step = lines.find((l) => l.startsWith("1. "));
+  assert.ok(step.includes("It keys on the client IP Express gives as `req.ip`, which behind a reverse proxy is the proxy's address, so every client behind the proxy shares one count"), "step 1 says clients behind a reverse proxy share one count");
+  assert.ok(step.includes("A deployment behind a proxy sets Express's `trust proxy` to the proxies it runs, so that `req.ip` is the client's address."), "step 1 says a deployment behind a proxy sets trust proxy");
+});
+
+test("step 2 puts the 431 for too many header lines before step 1, as the handler checks the header lines before the route that runs the limiter", () => {
+  // test/validated-task-handler.test.mjs sends more requests answered 431 than
+  // the limiter allows and then a request that is accepted.
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const headerLines = handler.indexOf("app.use(limitHeaderLines);");
+  const route = handler.indexOf('app.post("/", rateLimit, ');
+  assert.ok(headerLines >= 0 && route >= 0, "handler.ts registers limitHeaderLines and a POST / route that runs the limiter");
+  assert.ok(headerLines < route, "handler.ts registers limitHeaderLines before the POST / route that runs the limiter");
+  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
+  const limit = Number(handler.match(/const maxHeaderLines = (\d+);/)[1]).toLocaleString("en-US");
+  assert.ok(step.includes(`Before step 1, a request with ${limit} or more header lines gets 431`), "step 2 says a request with too many header lines gets 431 before step 1");
 });
 
 test("the bearer token sentence names every token the handler rejects", () => {

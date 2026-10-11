@@ -41,6 +41,11 @@ function parsePort(value: string): number {
 
 // --- Rate Limiting ---
 
+// The limiter counts each client's requests for 60 seconds from its first one,
+// and starts again with its first request after those 60 seconds have ended.
+// It keys on req.ip. Behind a reverse proxy, req.ip is the proxy's address
+// unless the deployment sets Express's "trust proxy" to the proxies it runs,
+// and without that every client behind the proxy shares one count.
 const rateLimiter = new RateLimiterMemory({
   points: 30, // requests
   duration: 60, // per minute
@@ -334,9 +339,11 @@ function parseRequest(body: unknown): ParsedRequest {
 // rate-limited and unauthenticated clients never reach the JSON parser.
 const parseJson = express.json({ limit: "1mb" });
 
-// Every request counts toward the rate limit before authentication reads it,
-// so a client that guesses tokens gets 429, not a 401 for each guess, once it
-// has used up the requests the limiter allows it in a minute.
+// Every request that reaches the limiter counts toward the rate limit before
+// authentication reads it, so a client that guesses tokens gets 429, not a 401
+// for each guess, once it has used up the requests the limiter allows it in
+// the 60 seconds that started with its first request. A request that
+// limitHeaderLines answers 431 never reaches the limiter and is not counted.
 app.post("/", rateLimit, authenticate, parseJson, async (req, res) => {
   const clientIp = req.ip || "unknown";
   const requestId = randomUUID();

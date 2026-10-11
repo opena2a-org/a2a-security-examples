@@ -1250,6 +1250,28 @@ test("a request with 1,000 or more header lines gets 431, so an Authorization he
   });
 });
 
+test("a request answered 431 for too many header lines does not count toward the rate limit, as the header lines are checked before the limiter runs", async () => {
+  await withOwnServer(async (serverPort, audited) => {
+    // postRaw sends four header lines besides the given ones, so each of these
+    // requests has 1,000 header lines. More of them than the limiter allows
+    // all get 431, not 429 once the limit would be used up.
+    const valid = "Authorization: Bearer demo-token";
+    const sent = rateLimitPoints + 10;
+    for (let i = 1; i <= sent; i++) {
+      const res = await postRaw(serverPort, [valid, ...Array(995).fill("a:")]);
+      assert.equal(res.status, 431, `request ${i} of ${sent} with 1,000 header lines gets 431`);
+      assert.deepEqual(JSON.parse(res.body), { error: "Too many header lines" });
+    }
+    // None of them used up a point of the limiter, so a valid request is
+    // accepted after them.
+    const after = await postRaw(serverPort, [valid]);
+    assert.equal(after.status, 200, `a valid request after ${sent} requests answered 431 is accepted, not answered 429`);
+    assert.equal(JSON.parse(after.body).result.status.state, "completed");
+    await waitForAudit(1, audited);
+    assert.deepEqual(audited().map((a) => a.action), ["task_accepted"]);
+  });
+});
+
 test("a 401 response carries the Bearer challenge with a realm in a WWW-Authenticate header, with invalid_token for an invalid token, a 400 for a malformed header carries it with invalid_request, and a 200 response carries none", async () => {
   // RFC 9110, section 15.5.2: a 401 response carries at least one challenge.
   // RFC 6750, section 3: the Bearer scheme in it is followed by one or more
@@ -1370,7 +1392,7 @@ test("a Bearer header with no token or a separator other than spaces gets 400, a
   }
 });
 
-test("requests that fail authentication count toward the rate limit, so a client that guesses tokens gets 429 for every request after its limit, whatever token it sends", async () => {
+test("requests that fail authentication count toward the rate limit, so a client that guesses tokens gets 429 for every request after its limit in the 60 seconds that started with its first request, whatever token it sends", async () => {
   await withOwnServer(async (serverPort, audited) => {
     // One request of each kind that fails authentication, then invalid tokens
     // up to the limit.
