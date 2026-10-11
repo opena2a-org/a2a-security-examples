@@ -934,6 +934,7 @@ test("the 401 examples of step 2 are only backticked headers joined by \", \" or
     "`Basic demo` and any other header",
     "`Basic demo` and any token or `Bearerx demo-token`",
     "any header",
+    "any header or `Basic demo`",
   ];
   for (const list of claims) {
     assert.throws(() => otherSchemeExamples(sentence(list)), /step 2 gives only backticked headers/, `the checks of step 2 reject: ${list}`);
