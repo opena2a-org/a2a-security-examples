@@ -1307,8 +1307,12 @@ test("a Bearer header with no token or a separator other than spaces gets 400, a
       assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), `the 400 to ${JSON.stringify(header)} carries invalid_request`);
     }
     // A header with no credentials in it, or one whose scheme name only starts
-    // with Bearer, has no bearer token, so its 401 carries no error code.
-    for (const header of ["", "Bearerx demo-token", "Bearer-x demo-token", "Basic demo"]) {
+    // with Bearer, has no bearer token, so its 401 carries no error code. A
+    // scheme name is a token (RFC 9110, sections 11.1 and 5.6.2), so Bearer
+    // followed by a letter, a digit or any punctuation character a token may
+    // hold starts another scheme name.
+    const longer = [..."x09!#$%&'*+-.^_`|~"].map((c) => `Bearer${c}x demo-token`);
+    for (const header of ["", ...longer, "Basic demo"]) {
       const res = await postRaw(serverPort, [`Authorization: ${header}`]);
       assert.equal(res.status, 401, `${JSON.stringify(header)} gets 401`);
       assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
