@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -17,6 +17,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const example = join(root, "examples/validated-task-handler");
 const tsc = join(example, "node_modules/typescript/bin/tsc");
 const tsx = join(example, "node_modules/tsx/dist/cli.mjs");
+const cardFile = join(root, "examples/secure-agent-card/agent-card.json");
 
 // The points handler.ts gives its rate limiter: its limit of requests per
 // minute per client IP.
@@ -108,10 +109,11 @@ function stopServer(proc, signal = "SIGTERM") {
 // close only once tsx and the server it started have both exited.
 const started = new Set();
 
-// Start tsx and the example. On POSIX tsx leads a process group of its own, so
-// stopServer reaches the server tsx starts without tsx passing a signal on.
-function spawnExample(env, cwd = example) {
-  const proc = spawn(process.execPath, [tsx, "handler.ts"], {
+// Start tsx and the example, or Node with args instead. On POSIX the process
+// leads a process group of its own, so stopServer reaches the server tsx starts
+// without tsx passing a signal on.
+function spawnExample(env, cwd = example, args = [tsx, "handler.ts"]) {
+  const proc = spawn(process.execPath, args, {
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -326,6 +328,78 @@ test("the agent card at the A2A v0.3.0 path and at the earlier agent.json path v
   assert.equal(cards[0].preferredTransport, "JSONRPC");
   assert.deepEqual(cards[0].security, [{ bearer: [] }]);
   assert.deepEqual(cards[0].securitySchemes, { bearer: { type: "http", scheme: "bearer" } });
+});
+
+test("the agent card the server serves at both paths is the example card file with the server's url", async () => {
+  const file = JSON.parse(readFileSync(cardFile, "utf8"));
+  for (const path of ["/.well-known/agent-card.json", "/.well-known/agent.json"]) {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`);
+    assert.equal(res.status, 200, `GET ${path}`);
+    assert.deepEqual(await res.json(), { ...file, url: `http://localhost:${port}` }, `GET ${path}`);
+  }
+});
+
+test("the agent card and each skill on it list exactly the media types a message the handler accepts can carry", async () => {
+  await withOwnServer(async (serverPort) => {
+    const card = await (await fetch(`http://127.0.0.1:${serverPort}/.well-known/agent-card.json`)).json();
+    // The media types handler.ts allows in a file part, the ones the card
+    // lists, and two that neither should hold.
+    const allowed = readFileSync(join(example, "handler.ts"), "utf8").match(/^const MEDIA_TYPES = (\[[^\]]+\]) as const;$/m);
+    assert.ok(allowed, "handler.ts declares MEDIA_TYPES on one line");
+    const candidates = new Set([...JSON.parse(allowed[1]), ...card.defaultInputModes, "text/html", "application/octet-stream"]);
+    // A text part carries text/plain, and a file part the media type it names.
+    const probes = [["text/plain", { kind: "text", text: "Hello" }]];
+    for (const mimeType of candidates) probes.push([mimeType, { kind: "file", file: { bytes: "aGk=", mimeType } }]);
+    const accepted = new Set();
+    for (const [mediaType, part] of probes) {
+      const res = await postTask({ Authorization: "Bearer demo-token" }, JSON.stringify(sendMessage([part])), serverPort);
+      await res.arrayBuffer();
+      assert.ok(res.status === 200 || res.status === 400, `a message with one ${mediaType} ${part.kind} part gets 200 or 400, not ${res.status}`);
+      if (res.status === 200) accepted.add(mediaType);
+    }
+    assert.deepEqual([...card.defaultInputModes].sort(), [...accepted].sort(), "the card lists the media types the handler accepts");
+    assert.ok(card.skills.length > 0, "the card lists a skill");
+    for (const skill of card.skills) {
+      assert.deepEqual([...(skill.inputModes ?? card.defaultInputModes)].sort(), [...accepted].sort(), `skill ${skill.id} lists the media types the handler accepts`);
+    }
+  });
+});
+
+test("the compiled handler serves the agent card file from beside the example's directory", async () => {
+  // Lay the build out as npm run build does, one directory below the example's
+  // directory, with the card beside that directory, in a temporary directory
+  // so the test leaves the repository untouched.
+  const dir = mkdtempSync(join(tmpdir(), "a2a-build-"));
+  try {
+    const outDir = join(dir, "validated-task-handler", "dist");
+    const build = spawnSync(process.execPath, [tsc, "-p", example, "--outDir", outDir], { encoding: "utf8" });
+    assert.equal(build.status, 0, build.stdout + build.stderr);
+    mkdirSync(join(dir, "secure-agent-card"));
+    copyFileSync(cardFile, join(dir, "secure-agent-card", "agent-card.json"));
+    const compiledPort = await freePort();
+    const env = { ...process.env, PORT: String(compiledPort), NODE_PATH: join(example, "node_modules") };
+    delete env.AGENT_URL;
+    const proc = spawnExample(env, example, [join(outDir, "handler.js")]);
+    const closed = new Promise((resolve) => proc.once("close", resolve));
+    let log = "";
+    proc.stdout.on("data", (chunk) => (log += chunk));
+    proc.stderr.on("data", (chunk) => (log += chunk));
+    try {
+      for (let i = 0; i < 600 && proc.exitCode === null && !log.includes("listening on port"); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.match(log, /listening on port/, `the compiled handler did not start:\n${log}`);
+      const res = await fetch(`http://127.0.0.1:${compiledPort}/.well-known/agent-card.json`);
+      assert.equal(res.status, 200);
+      const file = JSON.parse(readFileSync(cardFile, "utf8"));
+      assert.deepEqual(await res.json(), { ...file, url: `http://localhost:${compiledPort}` });
+    } finally {
+      stopServer(proc);
+      await closedWithin(proc, closed, 10000, "the compiled handler still holds its output pipes 10 seconds after stopServer");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("malformed JSON gets a JSON 400 and an audit line, not a stack trace", async () => {
