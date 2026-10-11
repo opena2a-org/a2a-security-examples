@@ -177,7 +177,7 @@ const nodeTestMajor = 18;
 const nodeTestAddedIn = { test: 0, before: 8, after: 8 };
 
 const identifier = /(?:[\p{ID_Start}$_]|\\u[\da-fA-F]{4}|\\u\{[\da-fA-F]+\})(?:[\p{ID_Continue}$\u{200C}\u{200D}]|\\u[\da-fA-F]{4}|\\u\{[\da-fA-F]+\})*/uy;
-const keywordsBeforeExpression = new Set(["await", "case", "delete", "do", "else", "extends", "in", "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield"]);
+const keywordsBeforeExpression = new Set(["await", "case", "default", "delete", "do", "else", "extends", "in", "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield"]);
 
 // The text of a name or string with its escape sequences replaced by the
 // characters they stand for.
@@ -211,16 +211,23 @@ function regularExpressionEnd(source, start) {
 }
 
 // The tokens of a module, read in one pass: names and strings with their escape
-// sequences decoded, punctuators one character each (or ${ where a template
-// substitution starts), and one token with no value for each number, regular
-// expression and template text. A byte order mark, a hashbang line, whitespace
-// and comments give no token. A slash after a name other than a keyword that
-// comes before an expression, after ) or ], or after a number, string,
-// template or regular expression is read as division; any other slash starts a
-// regular expression.
+// sequences decoded, one token with no value for each number and regular
+// expression, one template token where a template ends, and punctuators one
+// character each except ++, -- and the ${ that starts a template substitution.
+// A byte order mark, a hashbang line, whitespace, comments and the text of a
+// template give no token. A slash is read as division after a name other than
+// a keyword in keywordsBeforeExpression (a keyword after a . is a property
+// name), after ) or ], after a number, string, template or regular expression,
+// and after a ++ or -- that follows one of these. So a slash right after the )
+// of if (...), for (...) or while (...) is read as division, though it starts a
+// regular expression there. Any other slash starts a regular expression if one
+// closes on the same line, and is read as a punctuator if not.
 function moduleTokens(text) {
   const source = text.replace(/^\u{FEFF}/u, "");
   const tokens = [];
+  const slashDivides = (token) =>
+    token !== undefined &&
+    (token.type === "name" ? !token.beforeExpression : token.type !== "punct" || token.value === ")" || token.value === "]" || token.postfix);
   // For each template substitution open at this point, the { opened inside it
   // and not yet closed.
   const substitutions = [];
@@ -242,11 +249,7 @@ function moduleTokens(text) {
   while (i < source.length) {
     const c = source[i];
     const previous = tokens.at(-1);
-    const slashStartsRegularExpression =
-      !previous ||
-      (previous.type === "punct" && previous.value !== ")" && previous.value !== "]") ||
-      (previous.type === "name" && keywordsBeforeExpression.has(previous.raw));
-    const regularExpression = c === "/" && slashStartsRegularExpression ? regularExpressionEnd(source, i) : -1;
+    const regularExpression = c === "/" && !slashDivides(previous) ? regularExpressionEnd(source, i) : -1;
     identifier.lastIndex = i;
     const name = identifier.exec(source);
     if (/\s/.test(c)) i++;
@@ -272,7 +275,8 @@ function moduleTokens(text) {
       tokens.push({ type: "regex" });
       i = flags.lastIndex;
     } else if (name) {
-      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]) });
+      const property = previous?.type === "punct" && previous.value === ".";
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), beforeExpression: !property && keywordsBeforeExpression.has(name[0]) });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
       const number = /\.?\d[\w.]*/y;
@@ -280,6 +284,9 @@ function moduleTokens(text) {
       number.exec(source);
       tokens.push({ type: "number" });
       i = number.lastIndex;
+    } else if (source.startsWith("++", i) || source.startsWith("--", i)) {
+      tokens.push({ type: "punct", value: c + c, postfix: slashDivides(previous) });
+      i += 2;
     } else {
       if (substitutions.length > 0 && c === "{") substitutions[substitutions.length - 1]++;
       if (substitutions.length > 0 && c === "}") substitutions[substitutions.length - 1]--;
@@ -295,9 +302,12 @@ function moduleTokens(text) {
 // with Unicode escapes, and line breaks or comments anywhere in the
 // declaration. The default export is test(). A namespace import gives "*", as
 // it does not show which names the file uses. Import text inside a comment,
-// string, template or regular expression is not a declaration. The reader does
-// not handle import(), require or an import with a phase keyword such as
-// import defer.
+// string or template is not a declaration, nor is import text inside a slash
+// pair that moduleTokens() reads as a regular expression. moduleTokens() reads
+// a slash right after the ) of if (...), for (...) or while (...) as division,
+// so import text inside a regular expression there is read as a declaration.
+// The reader does not handle import(), require or an import with a phase
+// keyword such as import defer.
 function namesImportedFromNodeTest(text) {
   const tokens = moduleTokens(text);
   // Keywords are matched on the text as written, as a keyword written with an
@@ -384,6 +394,14 @@ test("the node:test import reader does not read import text inside a comment, st
   assert.deepEqual(namesImportedFromNodeTest('const m = await import("node:test");\nconsole.log(import.meta.url);\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('const quote = /["\'`]/;\nimport { after } from "node:test";\n'), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest('const half = (a + b) / 2, slash = "/"; import { after } from "node:test";\n'), ["after"]);
+});
+
+test("the node:test import reader reads a slash after export default as a regular expression, and a slash after a postfix ++ or -- or a property named default as division", () => {
+  assert.deepEqual(namesImportedFromNodeTest('export default /import { describe } from "node:test"/;\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('a++ / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('a[0]-- / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('n = 1 + ++/import { describe } from "node:test"/.lastIndex;\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('mod.default / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
 });
 
 test("the node:test import reader reads a long run of spaces in linear time", () => {
