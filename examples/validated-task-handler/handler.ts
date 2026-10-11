@@ -372,7 +372,12 @@ function parseAgentMessage(body: unknown): ParsedRequest {
 
 // Parse the body only after rate limiting and authentication pass, so
 // rate-limited and unauthenticated clients never reach the JSON parser.
-const parseJson = express.json({ limit: "1mb" });
+//
+// The limit holds the most file bytes the schema allows: 10 file parts of
+// 1,048,576 base64 characters take 10 MB, and the last 1 MB is room for the
+// rest of the request. A smaller limit answers file bytes the schema accepts
+// with 413 before the schema runs.
+const parseJson = express.json({ limit: "11mb" });
 
 // Every request that reaches the limiter counts toward the rate limit before
 // authentication reads it, so a client that guesses tokens gets 429, not a 401
