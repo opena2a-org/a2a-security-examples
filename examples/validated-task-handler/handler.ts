@@ -131,15 +131,16 @@ function audit(entry: AuditEntry): void {
 
 // --- Header Line Limit ---
 
-// The most header lines a request may have. Node.js 22.23.2, 24.18.1, 26.5.1
-// and later releases of those three lines answer a request with more with a
-// bare HTTP 431 before any handler runs. Node.js 18 and 20, and Node.js 22, 24
-// and 26 releases before those, instead pass the request on. There,
-// req.headers is built from the first 1,000 lines only, and req.rawHeaders
-// holds the first 1,000 or, on releases such as 18.20.8, 20.20.2, 22.0.0 and
-// 24.0.0, up to the first 1,023, so a later line, such as a second
-// Authorization header, may be in neither. A request that has this many may
-// have had more, so it gets 431 here whichever release runs the example.
+// The number of header lines at which a request gets 431. Node.js 22.23.2,
+// 24.18.1, 26.5.1 and later releases of those three lines answer a request
+// with more than that with a bare HTTP 431 before any handler runs. Node.js 18
+// and 20, and Node.js 22, 24 and 26 releases before those, instead pass the
+// request on. There, req.headers is built from the first 1,000 lines only, and
+// req.rawHeaders holds the first 1,000 or, on releases such as 18.20.8,
+// 20.20.2, 22.0.0 and 24.0.0, up to the first 1,023, so a later line, such as
+// a second Authorization header, may be in neither. A request that has this
+// many may have had more, so it gets 431 here whichever release runs the
+// example.
 const maxHeaderLines = 1000;
 
 function limitHeaderLines(
@@ -158,6 +159,12 @@ function limitHeaderLines(
 app.use(limitHeaderLines);
 
 // --- Authentication Middleware ---
+
+// The challenge each 401 response carries. A 401 response names the scheme the
+// server accepts in a challenge (RFC 9110, section 15.5.2), and RFC 6750,
+// section 3, says the Bearer scheme in it is followed by one or more
+// auth-params, here a realm.
+const bearerChallenge = 'Bearer realm="a2a"';
 
 // The number of Authorization header lines in a request.
 function authorizationLines(req: express.Request): number {
@@ -183,9 +190,7 @@ function authenticate(
   // 0xA0, a no-break space in Latin-1.
   const credentials = authHeader?.match(/^bearer +([A-Za-z0-9._~+\/-]+=*)$/i);
   if (!credentials) {
-    // A 401 response names the scheme the server accepts in a challenge (RFC
-    // 9110, section 15.5.2); RFC 6750, section 3, defines the Bearer one.
-    res.status(401).set("WWW-Authenticate", "Bearer").json({ error: "Authentication required" });
+    res.status(401).set("WWW-Authenticate", bearerChallenge).json({ error: "Authentication required" });
     return;
   }
 
@@ -194,7 +199,9 @@ function authenticate(
   // Validate token (replace with your auth provider)
   // NEVER log the full token
   if (!isValidToken(token)) {
-    res.status(403).json({ error: "Invalid or expired token" });
+    // RFC 6750, section 3.1: a token that is invalid or expired gets 401 and
+    // the error code invalid_token in the challenge.
+    res.status(401).set("WWW-Authenticate", `${bearerChallenge}, error="invalid_token"`).json({ error: "Invalid or expired token" });
     return;
   }
 
@@ -524,7 +531,8 @@ const server = app.listen(port, () => {
 });
 // Node.js builds req.headers from at most 1,000 header lines when this is
 // unset. Setting it keeps the limit Node.js applies and the one the handler
-// checks the same.
+// checks the same. While maxHeaderLines is 1,000 the line changes nothing; it
+// takes effect once maxHeaderLines is changed.
 server.maxHeadersCount = maxHeaderLines;
 
 // Without a listener, a port that is already taken ends the process with the

@@ -1112,7 +1112,7 @@ test("the bearer scheme name is matched without regard to case", async () => {
     assert.equal((await res.json()).result.status.state, "completed");
     // The token after a lowercase scheme is still checked.
     const rejected = await postTask({ Authorization: `${scheme} undefined` }, validTask);
-    assert.equal(rejected.status, 403, `${scheme} undefined is rejected`);
+    assert.equal(rejected.status, 401, `${scheme} undefined is rejected`);
     assert.deepEqual(await rejected.json(), { error: "Invalid or expired token" });
   }
   // A scheme name with no space before the token is still not a bearer token.
@@ -1129,7 +1129,7 @@ test("the spaces between the bearer scheme and the token are not part of the tok
     assert.equal((await res.json()).result.status.state, "completed");
     // The token is undefined, not " undefined", so it is rejected.
     const rejected = await postTask({ Authorization: `Bearer${spaces}undefined` }, validTask);
-    assert.equal(rejected.status, 403, `${spaces.length} spaces before undefined are rejected`);
+    assert.equal(rejected.status, 401, `${spaces.length} spaces before undefined are rejected`);
     assert.deepEqual(await rejected.json(), { error: "Invalid or expired token" });
   }
   // A bearer token has no spaces in it.
@@ -1179,7 +1179,7 @@ test("a request with more than one Authorization header gets 401, whichever head
         const res = await postRaw(serverPort, sent);
         assert.equal(res.status, 401, `${sent.join(" then ")} gets 401`);
         assert.deepEqual(JSON.parse(res.body), { error: "Authentication required" });
-        assert.ok(res.headers.includes("WWW-Authenticate: Bearer"), `the 401 to ${sent.join(" then ")} carries the Bearer challenge`);
+        assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a"'), `the 401 to ${sent.join(" then ")} carries the Bearer challenge`);
       }
     }
     // Header names are case-insensitive, so two spellings are two headers.
@@ -1227,16 +1227,21 @@ test("a request with 1,000 or more header lines gets 431, so an Authorization he
   });
 });
 
-test("a 401 response carries the Bearer challenge in a WWW-Authenticate header, and a 403 or 200 response does not", async () => {
+test("a 401 response carries the Bearer challenge with a realm in a WWW-Authenticate header, with invalid_token for an invalid token, and a 200 response carries none", async () => {
   // RFC 9110, section 15.5.2: a 401 response carries at least one challenge.
+  // RFC 6750, section 3: the Bearer scheme in it is followed by one or more
+  // auth-params.
   for (const headers of [{}, { Authorization: "Bearer demo token" }, { Authorization: "Basic demo" }]) {
     const res = await postTask(headers, validTask);
     assert.equal(res.status, 401, `${JSON.stringify(headers)} gets 401`);
-    assert.equal(res.headers.get("www-authenticate"), "Bearer", `the 401 to ${JSON.stringify(headers)} carries the Bearer challenge`);
+    assert.equal(res.headers.get("www-authenticate"), 'Bearer realm="a2a"', `the 401 to ${JSON.stringify(headers)} carries the Bearer challenge`);
   }
-  const forbidden = await postTask({ Authorization: "Bearer undefined" }, validTask);
-  assert.equal(forbidden.status, 403);
-  assert.equal(forbidden.headers.get("www-authenticate"), null);
+  // RFC 6750, section 3.1: an invalid token gets 401 and the error code
+  // invalid_token, not a 403 without a challenge.
+  const invalid = await postTask({ Authorization: "Bearer undefined" }, validTask);
+  assert.equal(invalid.status, 401);
+  assert.equal(invalid.headers.get("www-authenticate"), 'Bearer realm="a2a", error="invalid_token"');
+  assert.deepEqual(await invalid.json(), { error: "Invalid or expired token" });
   const accepted = await postTask({ Authorization: "Bearer demo-token" }, validTask);
   assert.equal(accepted.status, 200);
   assert.equal(accepted.headers.get("www-authenticate"), null);
