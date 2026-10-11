@@ -11,12 +11,10 @@ const timeoutMs = 15000;
 // ends cannot hold it.
 export const maxBodyBytes = 256 * 1024;
 // The most characters of attributes in a title tag and of text in a title that
-// the check reads. The bounds keep the title match linear in the length of the
-// page: without them, a page of repeated "<title" with no ">" took time that
-// grew with the square of its length.
+// the check reads.
 export const maxTitleAttributes = 256;
 export const maxTitleText = 1024;
-const titlePattern = new RegExp(`<title[^>]{0,${maxTitleAttributes}}>([^<]{0,${maxTitleText}})</title>`, "i");
+const titleText = new RegExp(`([^<]{0,${maxTitleText}})</title>`, "iy");
 
 // The name and host of each row of the README's test agent table.
 export function testAgents(readme) {
@@ -33,34 +31,146 @@ export function siteName(title) {
   return text.split(" — ")[0].trim();
 }
 
-// The start of a title tag: "<title" and one of the characters that end a tag
-// name, which are white space, "/" and ">", so "<titlebar>" starts none.
-const titleTagStart = /<title[\t\n\f\r />]/i;
+// White space in HTML, and the characters that end a tag name, an attribute
+// name and an unquoted attribute value.
+const space = "\t\n\f\r ";
+const tagNameEnd = /[\t\n\f\r />]/g;
+const attributeNameEnd = `${space}/>=`;
+const unquotedValueEnd = `${space}>`;
+const isLetter = (c) => c !== undefined && /[A-Za-z]/.test(c);
+// The elements whose text runs to their end tag, so a "<title>" or "<!--" in
+// it starts nothing, and the end tag that ends each.
+const rawTextEnd = new Map(
+  ["script", "style", "textarea", "xmp", "iframe", "noembed", "noframes", "noscript"].map((name) => [name, new RegExp(`</${name}[\\t\\n\\f\\r />]`, "gi")])
+);
+// The elements whose title elements are not the page's title.
+const foreignElements = new Set(["svg", "math"]);
 
-// Whether a page holds the start of a title tag outside its comments. A
-// comment the page does not close runs to its end. Each search starts where
-// the last one stopped, which keeps the scan linear in the length of the page.
-function hasTitleTag(body) {
-  let from = 0;
-  for (;;) {
-    const open = body.indexOf("<!--", from);
-    if (titleTagStart.test(open === -1 ? body.slice(from) : body.slice(from, open))) return true;
-    // "<!-->" and "<!--->" are whole comments, so the end may share the dashes of the start.
-    const close = open === -1 ? -1 : body.indexOf("-->", open + 2);
-    if (close === -1) return false;
-    from = close + 3;
+// The index just past a comment whose "<!--" ends at i, or -1 if the page ends
+// first. A comment ends at "-->" or "--!>", and "<!-->" and "<!--->" are whole
+// comments.
+function commentEnd(body, i) {
+  if (body[i] === ">") return i + 1;
+  if (body.startsWith("->", i)) return i + 2;
+  for (let dashes = body.indexOf("--", i); dashes !== -1; dashes = body.indexOf("--", dashes + 1)) {
+    if (body[dashes + 2] === ">") return dashes + 3;
+    if (body.startsWith("!>", dashes + 2)) return dashes + 4;
   }
+  return -1;
 }
 
-// The problem with a home page in which the check found no title. For a page
-// that runs past the part the check reads, the message names that part, since
-// a title may lie past it. For a page that holds a title tag the pattern does
-// not match, it names the bounds of the pattern, since a title may lie past
-// them, and the closing tag, since a title within them may not be closed; for
-// a page with no title tag in the part read, it names neither of those two.
-function missingTitle({ body, truncated }) {
+// The ">" that ends a tag whose name ends at i, and whether a "/" before it
+// closes the tag, or undefined if the page ends first. A quoted attribute value
+// may hold ">".
+function tagEnd(body, i) {
+  while (i < body.length) {
+    const c = body[i];
+    if (c === ">") return { end: i, selfClosing: false };
+    if (c === "/" && body[i + 1] === ">") return { end: i + 1, selfClosing: true };
+    if (space.includes(c) || c === "/") {
+      i++;
+      continue;
+    }
+    // An attribute name, which may begin with "=", then an optional value.
+    i++;
+    while (i < body.length && !attributeNameEnd.includes(body[i])) i++;
+    let j = i;
+    while (j < body.length && space.includes(body[j])) j++;
+    if (body[j] !== "=") {
+      i = j;
+      continue;
+    }
+    j++;
+    while (j < body.length && space.includes(body[j])) j++;
+    if (body[j] === '"' || body[j] === "'") {
+      const close = body.indexOf(body[j], j + 1);
+      if (close === -1) return undefined;
+      i = close + 1;
+    } else {
+      while (j < body.length && !unquotedValueEnd.includes(body[j])) j++;
+      i = j;
+    }
+  }
+  return undefined;
+}
+
+// The first title element of a page: undefined when the page holds no title
+// tag, and otherwise its text, which is undefined when the title lies past the
+// bounds the check reads or is not closed by </title>. The page is split into
+// tags the way an HTML parser splits it: a title tag is "<title" followed by
+// white space, "/" or ">", so "<titlebar>" is none, and it counts only outside
+// comments, which end at "-->" or "--!>", doctypes and other "<!" and "<?"
+// declarations, quoted attribute values, the text of script, style, textarea
+// and the other raw text elements, and svg and math elements. The check builds
+// no tree as a parser does, so it reads a title in a template element and none
+// that an svg element holds in a foreignObject. Each search starts where the
+// last one stopped, which keeps the scan linear in the length of the page.
+function findTitle(body) {
+  // The svg and math elements open at the scan position, innermost last.
+  const foreign = [];
+  const open = { svg: 0, math: 0 };
+  let i = 0;
+  while (i !== -1) {
+    const lt = body.indexOf("<", i);
+    if (lt === -1) return undefined;
+    const next = body[lt + 1];
+    if (body.startsWith("<!--", lt)) {
+      i = commentEnd(body, lt + 4);
+    } else if (foreign.length > 0 && body.startsWith("<![CDATA[", lt)) {
+      const close = body.indexOf("]]>", lt + 9);
+      i = close === -1 ? -1 : close + 3;
+    } else if (next === "!" || next === "?" || (next === "/" && !isLetter(body[lt + 2]))) {
+      // A declaration, or an end tag whose name starts with no letter, runs to the next ">".
+      const close = body.indexOf(">", lt + 2);
+      i = close === -1 ? -1 : close + 1;
+    } else if (isLetter(next) || next === "/") {
+      const endTag = next === "/";
+      const nameStart = lt + (endTag ? 2 : 1);
+      tagNameEnd.lastIndex = nameStart;
+      const nameEnd = tagNameEnd.exec(body)?.index;
+      if (nameEnd === undefined) return undefined;
+      const name = body.slice(nameStart, nameEnd).toLowerCase();
+      const htmlStartTag = !endTag && foreign.length === 0;
+      const tag = tagEnd(body, nameEnd);
+      // A title tag the page does not close is one the check cannot read.
+      if (tag === undefined) return htmlStartTag && name === "title" ? {} : undefined;
+      i = tag.end + 1;
+      if (foreignElements.has(name)) {
+        if (!endTag && !tag.selfClosing) {
+          foreign.push(name);
+          open[name]++;
+        } else if (endTag && open[name] > 0) {
+          // An end tag closes the elements opened after the one it ends.
+          for (let closed; closed !== name; open[closed]--) closed = foreign.pop();
+        }
+      } else if (htmlStartTag && name === "title") {
+        titleText.lastIndex = i;
+        return { text: tag.end - nameEnd <= maxTitleAttributes ? titleText.exec(body)?.[1] : undefined };
+      } else if (htmlStartTag && name === "plaintext") {
+        return undefined;
+      } else if (htmlStartTag && rawTextEnd.has(name)) {
+        const end = rawTextEnd.get(name);
+        end.lastIndex = i;
+        i = end.exec(body)?.index ?? -1;
+      }
+    } else {
+      i = lt + 1;
+    }
+  }
+  return undefined;
+}
+
+// A problem with each control character shown as \x1B, so text a site sends
+// cannot move the cursor or change the colors of the terminal it is printed to.
+const visible = (text) => text.replace(/[\x00-\x1f\x7f-\x9f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+
+// The problem with a home page in which the check found no title it can read.
+// When the page runs past the part the check reads, or holds a title tag the
+// check cannot read, the message names the bounds, since a title may lie past
+// them, and the closing tag, since a title within them may not be closed.
+function missingTitle({ truncated }, hasTitleTag) {
   const kb = maxBodyBytes / 1024;
-  if (!hasTitleTag(body)) {
+  if (!hasTitleTag) {
     return truncated ? `the home page has no title in its first ${kb} KB, which is all the check reads` : "the home page has no title";
   }
   const bounds = `a title tag with at most ${maxTitleAttributes} characters of attributes and at most ${maxTitleText} characters of text without a <, closed by </title>`;
@@ -119,11 +229,11 @@ export async function checkAgent({ name, host }, fetchImpl = fetch) {
   } else if (home.status !== 200) {
     problems.push(`the home page returned ${home.status}`);
   } else {
-    const title = home.body.match(titlePattern)?.[1];
-    if (title === undefined) problems.push(missingTitle(home));
-    else if (siteName(title) !== name) problems.push(`the home page calls the agent "${siteName(title)}", not "${name}"`);
+    const title = findTitle(home.body);
+    if (title?.text === undefined) problems.push(missingTitle(home, title !== undefined));
+    else if (siteName(title.text) !== name) problems.push(`the home page calls the agent "${siteName(title.text)}", not "${name}"`);
   }
-  return problems;
+  return problems.map(visible);
 }
 
 async function main() {
