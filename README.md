@@ -25,7 +25,7 @@ Secure A2A agent listening on port 3000
 Agent card: http://localhost:3000/.well-known/agent-card.json
 ```
 
-In a second terminal, send a message with the A2A JSON-RPC method `message/send`. The example accepts any non-empty bearer token except the literal `undefined`; replace `isValidToken` in `handler.ts` with real token verification before you deploy it.
+In a second terminal, send a message with the A2A JSON-RPC method `message/send`. The example accepts any bearer token made of the characters RFC 6750 allows in one (one or more ASCII letters, digits, `-`, `.`, `_`, `~`, `+` or `/`, then any number of `=`) except the literal `undefined`; replace `isValidToken` in `handler.ts` with real token verification before you deploy it.
 
 ```bash
 curl -s -X POST http://localhost:3000/ \
@@ -87,7 +87,7 @@ An agent card describes your agent's capabilities to other agents. Advertise onl
 
 Never trust data from another agent. [handler.ts](./examples/validated-task-handler/handler.ts) checks each request in this order and stops at the first failure:
 
-1. Bearer authentication: 401 when the `Authorization` header is missing or is not `Bearer` (in any letter case) followed by one or more spaces and one token, so `Bearer demo token` and `Bearer demo-token extra` get 401; 403 for an invalid token.
+1. Bearer authentication: 401 when the `Authorization` header is missing, is sent more than once, or is not `Bearer` (in any letter case) followed by one or more spaces and one token (one or more ASCII letters, digits, `-`, `.`, `_`, `~`, `+` or `/`, then any number of `=`), so `Bearer demo token`, `Bearer demo-token extra` and `Bearer café` get 401; 403 for an invalid token.
 2. Rate limit of 30 requests per minute per client IP: 429.
 3. JSON parsing: a non-empty body sent as `application/json` that is not a JSON object or array gets 400 with the JSON-RPC error `{"code":-32700,"message":"Invalid JSON"}` and an `id` of `null`, not the framework's HTML error page with its stack trace. A body sent as `application/json` that the parser cannot read is rejected here whatever it contains, with the JSON-RPC error `{"code":-32600,"message":"Invalid request body"}`: 413 when it is over 1 MB, 415 for an unsupported encoding or charset, 400 for a compressed body that does not inflate, at most a bare HTTP 400 with no body when the client closes the connection before the whole body arrives, and a bare HTTP 408 with no body when the upload stalls until Node's request timeout. An empty body the parser can read, or a body not sent as `application/json`, reaches step 4 as an empty object and fails there.
 4. Schema validation, each failure a 400: a JSON-RPC 2.0 request (`-32600` otherwise) for `message/send` (`-32601` for any other method) with a message of 1 to 10 parts, text parts up to 10,000 characters and file parts with up to 1,048,576 characters of base64 `bytes` and an allowlisted `mimeType` (`-32602` otherwise). The `-32600` and `-32602` errors list the failing fields only. A file given as a URI is rejected, not fetched, and so is a data part. The example keeps no task once it has answered, so a message with a `taskId` gets 400 `-32001`, task not found.

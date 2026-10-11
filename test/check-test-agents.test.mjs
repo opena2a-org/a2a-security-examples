@@ -168,7 +168,7 @@ test("the test agent check names the bounds it read when it finds no title in a 
   assert.deepEqual(await check("<TITLE>Probe AI" + " ".repeat(maxBodyBytes)), [noTitleInBoundsOrRead]);
 });
 
-test("the test agent check says a title must be closed by </title> when a short title within the bounds is not", async () => {
+test("the test agent check says a title must be closed by </title> when a short title within the bounds is not, and not when the part it read holds no title tag", async () => {
   const check = (body) =>
     checkAgent(
       { name: "Probe AI", host: "probe.dev" },
@@ -181,6 +181,11 @@ test("the test agent check says a title must be closed by </title> when a short 
   assert.deepEqual(await check("<title>Probe AI"), [noTitleInBounds]);
   assert.deepEqual(await check("<title>Probe AI</title >"), [noTitleInBounds]);
   assert.deepEqual(await check("<title>Probe AI</TITLE>"), []);
+  // A page that runs past the part the check reads and holds no "<title" in
+  // that part has no title tag a closing tag could be missing from, so it is
+  // told how much the check reads and nothing about the closing tag.
+  assert.ok(!noTitleInRead.includes("</title>"));
+  assert.deepEqual(await check(" ".repeat(maxBodyBytes + 1)), [noTitleInRead]);
 });
 
 test("the test agent check reports no title, not the title bounds, for a page that holds <title only outside a title tag", async () => {
