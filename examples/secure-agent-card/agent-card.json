@@ -1,7 +1,9 @@
 {
+  "protocolVersion": "0.3.0",
   "name": "SecureAnalysisAgent",
   "description": "Analyzes documents for security compliance. Supports PCI-DSS, SOC 2, HIPAA, and ISO 27001 frameworks.",
   "url": "https://your-agent.example.com",
+  "preferredTransport": "JSONRPC",
   "version": "1.0.0",
   "documentationUrl": "https://your-agent.example.com/docs",
   "provider": {
@@ -13,10 +15,12 @@
     "pushNotifications": false,
     "stateTransitionHistory": false
   },
-  "authentication": {
-    "schemes": ["bearer"],
-    "credentials": null
+  "securitySchemes": {
+    "bearer": { "type": "http", "scheme": "bearer" }
   },
+  "security": [{ "bearer": [] }],
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
   "skills": [
     {
       "id": "compliance-check",
@@ -28,8 +32,8 @@
         "Verify SOC 2 Type II requirements against our policy",
         "Run a HIPAA compliance check on the patient data handling procedure"
       ],
-      "inputModes": ["text"],
-      "outputModes": ["text"]
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"]
     },
     {
       "id": "vulnerability-summary",
@@ -39,15 +43,8 @@
       "examples": [
         "Summarize the vulnerabilities found in the last compliance check"
       ],
-      "inputModes": ["text"],
-      "outputModes": ["text"]
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"]
     }
-  ],
-  "securityPolicy": {
-    "contact": "security@your-org.example.com",
-    "disclosureUrl": "https://your-org.example.com/.well-known/security.txt",
-    "dataRetention": "Task data is not persisted beyond the request lifecycle",
-    "encryptionAtRest": true,
-    "encryptionInTransit": true
-  }
+  ]
 }

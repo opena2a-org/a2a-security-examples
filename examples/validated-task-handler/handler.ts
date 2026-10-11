@@ -1,6 +1,10 @@
 /**
  * Validated A2A Task Handler
  *
+ * An agent written to A2A specification v0.3.0: it answers the JSON-RPC 2.0
+ * method message/send at POST / and serves its agent card at
+ * /.well-known/agent-card.json.
+ *
  * Demonstrates secure task handling with:
  * - Zod schema validation on all inputs
  * - Prompt injection detection
@@ -42,32 +46,50 @@ const rateLimiter = new RateLimiterMemory({
 
 // --- Input Schemas ---
 
+// The JSON-RPC 2.0 request and the message/send params of A2A specification
+// v0.3.0, narrowed to what this agent accepts: text parts, and file parts that
+// carry base64 bytes with an allowlisted MIME type. A file part that gives a
+// URI instead of bytes is rejected, not fetched, and so is a data part.
+
+const MEDIA_TYPES = ["text/plain", "application/json", "application/pdf", "image/png", "image/jpeg"] as const;
+
+const RequestIdSchema = z.union([z.string().max(128), z.number().int()]);
+
+const JsonRpcRequestSchema = z.object({
+  jsonrpc: z.literal("2.0"),
+  id: RequestIdSchema,
+  method: z.string(),
+  params: z.unknown(),
+});
+
 const TextPartSchema = z.object({
-  type: z.literal("text").default("text"),
+  kind: z.literal("text"),
   text: z.string().min(1).max(10000),
 });
 
-const DataPartSchema = z.object({
-  type: z.literal("data"),
-  data: z.string().max(1048576), // 1MB base64
-  mimeType: z
-    .string()
-    .regex(/^(text|application|image)\/(plain|json|pdf|png|jpeg)$/),
+const FilePartSchema = z.object({
+  kind: z.literal("file"),
+  file: z.object({
+    bytes: z.string().max(1048576), // 1MB base64
+    mimeType: z.enum(MEDIA_TYPES),
+    name: z.string().max(255).optional(),
+  }),
 });
 
-const PartSchema = z.discriminatedUnion("type", [TextPartSchema, DataPartSchema]);
+const PartSchema = z.discriminatedUnion("kind", [TextPartSchema, FilePartSchema]);
 
-const TaskMessageSchema = z.object({
+const MessageSchema = z.object({
+  kind: z.literal("message"),
+  messageId: z.string().min(1).max(128),
   role: z.enum(["user", "agent"]),
   parts: z.array(PartSchema).min(1).max(10),
+  contextId: z.string().min(1).max(128).optional(),
+  taskId: z.string().min(1).max(128).optional(),
 });
 
-const TaskRequestSchema = z.object({
-  task: z.object({
-    id: z.string().uuid().optional(),
-    message: TaskMessageSchema,
-    metadata: z.record(z.string(), z.string().max(1000)).optional(),
-  }),
+const MessageSendParamsSchema = z.object({
+  message: MessageSchema,
+  metadata: z.record(z.string(), z.string().max(1000)).optional(),
 });
 
 // --- Prompt Injection Detection ---
@@ -161,50 +183,106 @@ async function rateLimit(
   next();
 }
 
+// --- JSON-RPC Responses ---
+
+type RequestId = z.infer<typeof RequestIdSchema> | null;
+
+interface RpcError {
+  code: number;
+  message: string;
+  data?: { field: string; message: string }[];
+}
+
+// A JSON-RPC 2.0 error response. id is the request's id, or null when the
+// request has no valid one.
+function sendError(res: express.Response, status: number, id: RequestId, error: RpcError) {
+  return res.status(status).json({ jsonrpc: "2.0", id, error });
+}
+
+// The id of a request that failed validation, when it has a valid one.
+function requestIdOf(body: unknown): RequestId {
+  const parsed = RequestIdSchema.safeParse((body as { id?: unknown } | null)?.id);
+  return parsed.success ? parsed.data : null;
+}
+
+// Only expose field-level errors, not internal details
+function fieldErrors(issues: z.ZodIssue[], prefix: string[] = []) {
+  return issues.map((i) => ({ field: [...prefix, ...i.path].join("."), message: i.message }));
+}
+
+type ParsedRequest =
+  | { error: RpcError }
+  | { id: z.infer<typeof RequestIdSchema>; params: z.infer<typeof MessageSendParamsSchema> };
+
+// Check the JSON-RPC request, its method, then its params, and return the
+// message/send params or the error for the first check that fails.
+function parseRequest(body: unknown): ParsedRequest {
+  const request = JsonRpcRequestSchema.safeParse(body);
+  if (!request.success) {
+    return { error: { code: -32600, message: "Invalid Request", data: fieldErrors(request.error.issues) } };
+  }
+  if (request.data.method !== "message/send") {
+    return { error: { code: -32601, message: "Method not found" } };
+  }
+  const params = MessageSendParamsSchema.safeParse(request.data.params);
+  if (!params.success) {
+    return { error: { code: -32602, message: "Invalid params", data: fieldErrors(params.error.issues, ["params"]) } };
+  }
+  return { id: request.data.id, params: params.data };
+}
+
 // --- Task Handler ---
 
 // Parse the body only after authentication and rate limiting pass, so
 // unauthenticated and rate-limited clients never reach the JSON parser.
 const parseJson = express.json({ limit: "1mb" });
 
-app.post("/tasks", authenticate, rateLimit, parseJson, async (req, res) => {
+app.post("/", authenticate, rateLimit, parseJson, async (req, res) => {
   const clientIp = req.ip || "unknown";
   const requestId = randomUUID();
 
   // Schema validation
-  const parsed = TaskRequestSchema.safeParse(req.body);
-  if (!parsed.success) {
+  const parsed = parseRequest(req.body);
+  if ("error" in parsed) {
+    const { error } = parsed;
     audit({
       timestamp: new Date().toISOString(),
       taskId: requestId,
       clientIp,
       action: "validation_failed",
-      details: { issues: parsed.error.issues.length },
+      details: { code: error.code, issues: error.data?.length ?? 0 },
     });
-    return res.status(400).json({
-      error: "Invalid task format",
-      // Only expose field-level errors, not internal details
-      details: parsed.error.issues.map((i) => ({
-        field: i.path.join("."),
-        message: i.message,
-      })),
-    });
+    return sendError(res, 400, requestIdOf(req.body), error);
   }
 
-  const task = parsed.data.task;
-  const taskId = task.id || requestId;
+  const { id, params } = parsed;
+  const message = params.message;
+  const taskId = requestId;
+
+  // This agent keeps no task once it has answered, so a message that
+  // continues an earlier task names a task it cannot find.
+  if (message.taskId !== undefined) {
+    audit({
+      timestamp: new Date().toISOString(),
+      taskId,
+      clientIp,
+      action: "task_not_found",
+      details: { partCount: message.parts.length },
+    });
+    return sendError(res, 400, id, { code: -32001, message: "Task not found" });
+  }
 
   // Prompt injection check on all text parts
-  for (const part of task.message.parts) {
-    if ("text" in part && containsInjection(part.text)) {
+  for (const part of message.parts) {
+    if (part.kind === "text" && containsInjection(part.text)) {
       audit({
         timestamp: new Date().toISOString(),
         taskId,
         clientIp,
         action: "injection_detected",
-        details: { partCount: task.message.parts.length },
+        details: { partCount: message.parts.length },
       });
-      return res.status(400).json({ error: "Request rejected by security filter" });
+      return sendError(res, 400, id, { code: -32602, message: "Request rejected by security filter" });
     }
   }
 
@@ -215,14 +293,14 @@ app.post("/tasks", authenticate, rateLimit, parseJson, async (req, res) => {
     clientIp,
     action: "task_accepted",
     details: {
-      partCount: task.message.parts.length,
-      hasMetadata: !!task.metadata,
+      partCount: message.parts.length,
+      hasMetadata: !!params.metadata,
     },
   });
 
   try {
-    const result = await processTask(taskId, task);
-    return res.json(result);
+    const result = await processTask(taskId, message.contextId ?? randomUUID(), message);
+    return res.json({ jsonrpc: "2.0", id, result });
   } catch (error) {
     // Never leak internal error details
     audit({
@@ -232,27 +310,34 @@ app.post("/tasks", authenticate, rateLimit, parseJson, async (req, res) => {
       action: "task_failed",
       details: { error: error instanceof Error ? error.message : "unknown" },
     });
-    return res.status(500).json({ error: "Task processing failed" });
+    return sendError(res, 500, id, { code: -32603, message: "Task processing failed" });
   }
 });
 
 // --- Agent Card Endpoint ---
 
-app.get("/.well-known/agent.json", (_req, res) => {
-  res.json({
+// An AgentCard as A2A specification v0.3.0 defines it. Clients send JSON-RPC
+// requests to url. The card is public: securitySchemes says how to
+// authenticate and never holds a credential.
+function agentCard() {
+  return {
+    protocolVersion: "0.3.0",
     name: "SecureAnalysisAgent",
     description: "Analyzes documents for security compliance",
     url: process.env.AGENT_URL || `http://localhost:${port}`,
+    preferredTransport: "JSONRPC",
     version: "1.0.0",
     capabilities: {
       streaming: false,
       pushNotifications: false,
       stateTransitionHistory: false,
     },
-    authentication: {
-      schemes: ["bearer"],
-      credentials: null,
+    securitySchemes: {
+      bearer: { type: "http", scheme: "bearer" },
     },
+    security: [{ bearer: [] }],
+    defaultInputModes: [...MEDIA_TYPES],
+    defaultOutputModes: ["text/plain"],
     skills: [
       {
         id: "compliance-check",
@@ -260,11 +345,15 @@ app.get("/.well-known/agent.json", (_req, res) => {
         description: "Check a document against security compliance rules",
         tags: ["security", "compliance"],
         examples: ["Check this document for PCI-DSS compliance"],
-        inputModes: ["text"],
-        outputModes: ["text"],
       },
     ],
-  });
+  };
+}
+
+// Specification v0.3.0 names /.well-known/agent-card.json. Earlier versions
+// named /.well-known/agent.json, which still serves the same card.
+app.get(["/.well-known/agent-card.json", "/.well-known/agent.json"], (_req, res) => {
+  res.json(agentCard());
 });
 
 // --- Error Handling ---
@@ -316,12 +405,13 @@ app.use(
       },
     });
 
+    // No request id has been read, so the JSON-RPC error answers id null.
     if (type === "entity.parse.failed") {
-      res.status(400).json({ error: "Invalid JSON" });
+      sendError(res, 400, null, { code: -32700, message: "Invalid JSON" });
     } else if (clientError) {
-      res.status(responseStatus).json({ error: "Invalid request body" });
+      sendError(res, responseStatus, null, { code: -32600, message: "Invalid request body" });
     } else {
-      res.status(500).json({ error: "Request failed" });
+      sendError(res, 500, null, { code: -32603, message: "Request failed" });
     }
   }
 );
@@ -345,13 +435,15 @@ function requestTimedOut(req: express.Request): boolean {
 
 // --- Task Processing ---
 
+// Returns the completed task as an A2A v0.3.0 Task object.
 async function processTask(
   taskId: string,
-  task: z.infer<typeof TaskRequestSchema>["task"]
+  contextId: string,
+  message: z.infer<typeof MessageSchema>
 ) {
   // Extract text from parts
-  const textParts = task.message.parts
-    .filter((p): p is z.infer<typeof TextPartSchema> => "text" in p)
+  const textParts = message.parts
+    .filter((p): p is z.infer<typeof TextPartSchema> => p.kind === "text")
     .map((p) => p.text);
 
   const inputText = textParts.join("\n");
@@ -360,12 +452,16 @@ async function processTask(
   const responseText = `Processed task ${taskId}: received ${textParts.length} text parts (${inputText.length} chars total)`;
 
   return {
-    task: {
-      id: taskId,
-      status: "completed",
+    kind: "task",
+    id: taskId,
+    contextId,
+    status: {
+      state: "completed",
       message: {
+        kind: "message",
+        messageId: randomUUID(),
         role: "agent",
-        parts: [{ text: responseText }],
+        parts: [{ kind: "text", text: responseText }],
       },
     },
   };
@@ -375,7 +471,7 @@ async function processTask(
 
 const server = app.listen(port, () => {
   console.log(`Secure A2A agent listening on port ${port}`);
-  console.log(`Agent card: http://localhost:${port}/.well-known/agent.json`);
+  console.log(`Agent card: http://localhost:${port}/.well-known/agent-card.json`);
 });
 
 // Without a listener, a port that is already taken ends the process with the
