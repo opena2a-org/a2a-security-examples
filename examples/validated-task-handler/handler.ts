@@ -23,6 +23,8 @@ import { randomUUID } from "crypto";
 import { RateLimiterMemory } from "rate-limiter-flexible";
 
 const app = express();
+// Express names itself in an X-Powered-By header on every response otherwise.
+app.disable("x-powered-by");
 const port = parsePort(process.env.PORT ?? "3000");
 
 // Exit with one line naming the variable instead of the stack trace that
