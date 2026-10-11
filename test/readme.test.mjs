@@ -217,6 +217,20 @@ test("step 1 gives 400 for a request with more than one Authorization header, wh
   assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once gets 400/, "step 1 gives 400 for a header sent more than once");
 });
 
+test("step 1 gives 400 to a header sent more than once whatever scheme it names, as the handler counts the lines before it reads the scheme", () => {
+  // A single header that names another scheme gets 401, so step 1 says which
+  // answer two such lines get. test/validated-task-handler.test.mjs sends them.
+  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const counted = handler.indexOf("authorizationLines(req) > 1");
+  const read = handler.indexOf("bearerScheme.test(authHeader)");
+  assert.ok(counted !== -1 && read !== -1, "handler.ts counts the Authorization header lines and reads the scheme");
+  assert.ok(counted < read, "handler.ts counts the Authorization header lines before it reads the scheme");
+  const step = lines.find((l) => l.startsWith("1. Bearer authentication:"));
+  const repeated = step.split("; an invalid token ")[0].match(/, and so do two `Authorization: ([^`]+)` lines: the handler counts the header lines before it reads the scheme, so a repeated header gets 400 whatever scheme it names$/);
+  assert.ok(repeated, "step 1 gives 400 to two Authorization lines that name another scheme");
+  assert.doesNotMatch(received(repeated[1]), bearerSchemePattern(), `handler.ts reads ${repeated[1]} as another scheme, which gets 401 when sent once`);
+});
+
 test("step 1 names the challenges the handler's 400 and 401 responses carry and the header line count at which it answers 431", () => {
   // test/validated-task-handler.test.mjs sends requests that get these answers.
   const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
