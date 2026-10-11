@@ -176,37 +176,177 @@ test("README states the Node.js version npm test needs, as the root package.json
 const nodeTestMajor = 18;
 const nodeTestAddedIn = { test: 0, before: 8, after: 8 };
 
-// The names an import declaration takes from node:test when it starts a line
-// with import and a space, tab or line break, with either quote, a default
-// import, renamed names and a list over several lines. The default export is
-// test(). A namespace import gives "*", as it does not show which names the
-// file uses. The reader does not handle import{ or import* with no space after
-// import, a comment inside the declaration, an indented declaration, import()
-// or require.
-function namesImportedFromNodeTest(text) {
-  const names = [];
-  const declaration = /^import\s+(?:([\w$]+)\s*,?\s*)?(?:\{([^}]*)\}|(\*)\s*as\s+[\w$]+)?\s*from\s*["']node:test["']/gm;
-  for (const [, defaultName, list, namespace] of text.matchAll(declaration)) {
-    if (defaultName) names.push("test");
-    if (namespace) names.push("*");
-    for (const entry of (list ?? "").split(",").map((n) => n.trim()).filter(Boolean)) {
-      const name = entry.split(/\s+as\s+/)[0];
-      names.push(name === "default" ? "test" : name);
+const identifier = /(?:[\p{ID_Start}$_]|\\u[\da-fA-F]{4}|\\u\{[\da-fA-F]+\})(?:[\p{ID_Continue}$\u{200C}\u{200D}]|\\u[\da-fA-F]{4}|\\u\{[\da-fA-F]+\})*/uy;
+const keywordsBeforeExpression = new Set(["await", "case", "delete", "do", "else", "extends", "in", "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield"]);
+
+// The text of a name or string with its escape sequences replaced by the
+// characters they stand for.
+function decodeEscapes(raw) {
+  const simple = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", 0: "\0" };
+  return raw.replace(/\\(?:u\{([\da-fA-F]+)\}|u([\da-fA-F]{4})|x([\da-fA-F]{2})|(\r\n|[\s\S]))/g, (_, braced, four, two, other) =>
+    other === undefined ? String.fromCodePoint(parseInt(braced ?? four ?? two, 16)) : simple[other] ?? (/^(?:\r\n|[\n\r\u{2028}\u{2029}])$/u.test(other) ? "" : other)
+  );
+}
+
+// The index of the first line terminator at or after start.
+function lineEnd(source, start) {
+  const terminator = /[\n\r\u{2028}\u{2029}]/gu;
+  terminator.lastIndex = start;
+  return terminator.exec(source)?.index ?? source.length;
+}
+
+// The index after the slash that closes the regular expression literal
+// starting at start, or -1 if the line ends first.
+function regularExpressionEnd(source, start) {
+  let inClass = false;
+  for (let k = start + 1; k < source.length; k++) {
+    const c = source[k];
+    if ("\n\r\u{2028}\u{2029}".includes(c)) return -1;
+    if (c === "\\") k++;
+    else if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (c === "/" && !inClass) return k + 1;
+  }
+  return -1;
+}
+
+// The tokens of a module, read in one pass: names and strings with their escape
+// sequences decoded, punctuators one character each (or ${ where a template
+// substitution starts), and one token with no value for each number, regular
+// expression and template text. A byte order mark, a hashbang line, whitespace
+// and comments give no token. A slash after a name other than a keyword that
+// comes before an expression, after ) or ], or after a number, string,
+// template or regular expression is read as division; any other slash starts a
+// regular expression.
+function moduleTokens(text) {
+  const source = text.replace(/^\u{FEFF}/u, "");
+  const tokens = [];
+  // For each template substitution open at this point, the { opened inside it
+  // and not yet closed.
+  const substitutions = [];
+  const templateText = (start) => {
+    for (let k = start; k < source.length; k++) {
+      if (source[k] === "\\") k++;
+      else if (source[k] === "`") {
+        tokens.push({ type: "template" });
+        return k + 1;
+      } else if (source.startsWith("${", k)) {
+        substitutions.push(0);
+        tokens.push({ type: "punct", value: "${" });
+        return k + 2;
+      }
     }
+    return source.length;
+  };
+  let i = source.startsWith("#!") ? lineEnd(source, 0) : 0;
+  while (i < source.length) {
+    const c = source[i];
+    const previous = tokens.at(-1);
+    const slashStartsRegularExpression =
+      !previous ||
+      (previous.type === "punct" && previous.value !== ")" && previous.value !== "]") ||
+      (previous.type === "name" && keywordsBeforeExpression.has(previous.raw));
+    const regularExpression = c === "/" && slashStartsRegularExpression ? regularExpressionEnd(source, i) : -1;
+    identifier.lastIndex = i;
+    const name = identifier.exec(source);
+    if (/\s/.test(c)) i++;
+    else if (source.startsWith("//", i)) i = lineEnd(source, i);
+    else if (source.startsWith("/*", i)) {
+      const end = source.indexOf("*/", i + 2);
+      i = end < 0 ? source.length : end + 2;
+    } else if (c === "`") i = templateText(i + 1);
+    else if (c === "}" && substitutions.at(-1) === 0) {
+      substitutions.pop();
+      i = templateText(i + 1);
+    } else if (c === '"' || c === "'") {
+      let k = i + 1;
+      while (k < source.length && source[k] !== c && source[k] !== "\n" && source[k] !== "\r") {
+        k += source[k] !== "\\" ? 1 : source.startsWith("\r\n", k + 1) ? 3 : 2;
+      }
+      tokens.push({ type: "string", value: decodeEscapes(source.slice(i + 1, k)) });
+      i = k + 1;
+    } else if (regularExpression >= 0) {
+      const flags = /[\p{ID_Continue}$]*/uy;
+      flags.lastIndex = regularExpression;
+      flags.exec(source);
+      tokens.push({ type: "regex" });
+      i = flags.lastIndex;
+    } else if (name) {
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]) });
+      i += name[0].length;
+    } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
+      const number = /\.?\d[\w.]*/y;
+      number.lastIndex = i;
+      number.exec(source);
+      tokens.push({ type: "number" });
+      i = number.lastIndex;
+    } else {
+      if (substitutions.length > 0 && c === "{") substitutions[substitutions.length - 1]++;
+      if (substitutions.length > 0 && c === "}") substitutions[substitutions.length - 1]--;
+      tokens.push({ type: "punct", value: c });
+      i++;
+    }
+  }
+  return tokens;
+}
+
+// The names a module's import declarations take from node:test, in any layout:
+// either quote, a default import, renamed names, a name written as a string or
+// with Unicode escapes, and line breaks or comments anywhere in the
+// declaration. The default export is test(). A namespace import gives "*", as
+// it does not show which names the file uses. Import text inside a comment,
+// string, template or regular expression is not a declaration. The reader does
+// not handle import(), require or an import with a phase keyword such as
+// import defer.
+function namesImportedFromNodeTest(text) {
+  const tokens = moduleTokens(text);
+  // Keywords are matched on the text as written, as a keyword written with an
+  // escape sequence is not a keyword.
+  const is = (token, type, written) => token?.type === type && (written === undefined || (token.raw ?? token.value) === written);
+  const names = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (!is(tokens[i], "name", "import")) continue;
+    const found = [];
+    let j = i + 1;
+    if (is(tokens[j], "name")) {
+      found.push("test");
+      j += is(tokens[j + 1], "punct", ",") ? 2 : 1;
+    }
+    if (is(tokens[j], "punct", "*")) {
+      if (!is(tokens[j + 1], "name", "as") || !is(tokens[j + 2], "name")) continue;
+      found.push("*");
+      j += 3;
+    } else if (is(tokens[j], "punct", "{")) {
+      for (j++; is(tokens[j], "name") || is(tokens[j], "string"); ) {
+        found.push(tokens[j].value === "default" ? "test" : tokens[j].value);
+        j += is(tokens[j + 1], "name", "as") ? 3 : 1;
+        if (is(tokens[j], "punct", ",")) j++;
+      }
+      if (!is(tokens[j], "punct", "}")) continue;
+      j++;
+    }
+    if (is(tokens[j], "name", "from") && is(tokens[j + 1], "string") && tokens[j + 1].value === "node:test") names.push(...found);
   }
   return names;
 }
 
+// The path and text of each test file.
+function testFiles() {
+  return readdirSync(join(root, "test"))
+    .filter((name) => name.endsWith(".mjs"))
+    .map((name) => ({ path: `test/${name}`, text: readFileSync(join(root, "test", name), "utf8") }));
+}
+
 // The lowest Node.js 18 minor release that has node --test and every name
-// namesImportedFromNodeTest() finds in the test files. A name a file takes from
-// node:test in a form the reader does not handle is not counted.
-function lowestMinorThatCanRunTheTests() {
+// namesImportedFromNodeTest() finds in the given files, each a path and a text
+// as testFiles() gives them. A name a file takes from node:test in a form the
+// reader does not handle is not counted.
+function lowestMinorThatCanRunTheTests(files) {
   let minor = 1;
-  for (const file of readdirSync(join(root, "test")).filter((name) => name.endsWith(".mjs"))) {
-    const text = readFileSync(join(root, "test", file), "utf8");
+  for (const { path, text } of files) {
     for (const name of namesImportedFromNodeTest(text)) {
-      assert.notEqual(name, "*", `test/${file} imports node:test as a namespace; import the names it uses instead`);
-      assert.ok(Object.hasOwn(nodeTestAddedIn, name), `test/${file} imports ${name} from node:test; add the release that added it`);
+      assert.notEqual(name, "*", `${path} imports node:test as a namespace; import the names it uses instead`);
+      assert.ok(Object.hasOwn(nodeTestAddedIn, name), `${path} imports ${name} from node:test; add the release that added it`);
       minor = Math.max(minor, nodeTestAddedIn[name]);
     }
   }
@@ -223,10 +363,51 @@ test("the node:test import reader finds names with either quote, a default impor
   assert.deepEqual(namesImportedFromNodeTest('import assert from "node:assert/strict";\nimport { test } from "node:test2";\n'), []);
 });
 
-// Checks the npm test sentence against an engines.node value of >=X.Y. The
-// releases that cannot run the tests come from nodeTestAddedIn, so the floor
-// must be a Node.js 18 release above the lowest one that can run them.
-function checkTestedFloorSentence(engines, sentence) {
+test("the node:test import reader reads a name with letters outside ASCII, Unicode escapes or quotes, a file that starts with a byte order mark, and a declaration with no space, an indent or a comment", () => {
+  assert.deepEqual(namesImportedFromNodeTest('import * as né from "node:test";\n'), ["*"]);
+  assert.deepEqual(namesImportedFromNodeTest('import тест from "node:test";\n'), ["test"]);
+  assert.deepEqual(namesImportedFromNodeTest('import tést, { describe } from "node:test";\n'), ["test", "describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('import t\\u0065st from "node:test";\n'), ["test"]);
+  assert.deepEqual(namesImportedFromNodeTest('import { d\\u0065scribe, \\u{61}fter } from "node:t\\x65st";\n'), ["describe", "after"]);
+  assert.deepEqual(namesImportedFromNodeTest('import { "test" as t, \'default\' as run } from "node:test";\n'), ["test", "test"]);
+  assert.deepEqual(namesImportedFromNodeTest('\u{FEFF}import { describe } from "node:test";\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest("import{test}from\"node:test\";import*as nt from'node:test';\n"), ["test", "*"]);
+  assert.deepEqual(namesImportedFromNodeTest('  import { test, /* after, */ before } // it\n  from "node:test";\n'), ["test", "before"]);
+});
+
+test("the node:test import reader does not read import text inside a comment, string, template or regular expression as a declaration", () => {
+  assert.deepEqual(namesImportedFromNodeTest('/*\nimport { describe } from "node:test";\n*/\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('// import { describe } from "node:test";\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('const s = `\nimport { describe } from "node:test";\n`;\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('const s = `${`\nimport { describe } from "node:test";\n`}`;\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('const s = "\\\nimport { describe } from \'node:test\';";\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('const m = await import("node:test");\nconsole.log(import.meta.url);\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('const quote = /["\'`]/;\nimport { after } from "node:test";\n'), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest('const half = (a + b) / 2, slash = "/"; import { after } from "node:test";\n'), ["after"]);
+});
+
+test("the node:test import reader reads a long run of spaces in linear time", () => {
+  // A pattern with adjacent \s* quantifiers took more than a second on 2,000
+  // spaces after "import a" and grew with the cube of the length.
+  const start = performance.now();
+  assert.deepEqual(namesImportedFromNodeTest("import a" + " ".repeat(4000)), []);
+  const ms = performance.now() - start;
+  assert.ok(ms < 1000, `reading 4,000 spaces took ${Math.round(ms)} ms`);
+});
+
+test("the lowest release that can run the tests comes from the files it is given, and a name the release table does not list fails", () => {
+  const file = (text) => [{ path: "test/a.mjs", text }];
+  assert.equal(lowestMinorThatCanRunTheTests([...file("import { test } from 'node:test';\n"), ...file("import { after } from 'node:test';\n")]), 8);
+  assert.equal(lowestMinorThatCanRunTheTests(file('// import { after } from "node:test";\nimport run from "node:test";\n')), 1);
+  assert.throws(() => lowestMinorThatCanRunTheTests(file('import { toString } from "node:test";\n')), /test\/a\.mjs imports toString from node:test; add the release that added it/);
+  assert.throws(() => lowestMinorThatCanRunTheTests(file('import * as nt from "node:test";\n')), /test\/a\.mjs imports node:test as a namespace/);
+});
+
+// Checks the npm test sentence against an engines.node value of >=X.Y and the
+// test files, as testFiles() gives them. The releases that cannot run the tests
+// come from nodeTestAddedIn and the names the files import, so the floor must be
+// a Node.js 18 release above the lowest one that can run them.
+function checkTestedFloorSentence(engines, sentence, files) {
   const floor = engines?.match(/^>=(\d+)\.(\d+)(?:\.\d+)?$/);
   assert.ok(floor, "the root package.json sets engines.node to >=X.Y");
   const [major, minor] = [Number(floor[1]), Number(floor[2])];
@@ -239,7 +420,12 @@ function checkTestedFloorSentence(engines, sentence) {
     nodeTestMajor,
     `engines.node names Node.js ${major}, but nodeTestAddedIn lists Node.js ${nodeTestMajor} minor releases; give the Node.js ${major} releases before checking the README against them`
   );
-  const lowest = lowestMinorThatCanRunTheTests();
+  const lowest = lowestMinorThatCanRunTheTests(files);
+  const admitted = minor === lowest - 1 ? `${major}.${minor}` : `${major}.${minor} to ${major}.${lowest - 1}`;
+  assert.ok(
+    minor >= lowest,
+    `engines.node names Node.js ${major}.${minor}, below ${major}.${lowest}, the lowest release that can run the tests, so it admits Node.js ${admitted}, which cannot run them`
+  );
   assert.ok(
     minor > lowest,
     `engines.node names Node.js ${major}.${minor}, which is not above ${major}.${lowest}, the lowest release that can run the tests, so no release below the floor is untested`
@@ -261,22 +447,40 @@ test("README says the Node.js version for npm test is the lowest release tested,
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const sentence = lines.find((l) => l.includes("`npm test` from the repository root"));
   assert.ok(sentence, "README names the command that runs the tests");
-  checkTestedFloorSentence(pkg.engines?.node, sentence);
+  checkTestedFloorSentence(pkg.engines?.node, sentence, testFiles());
 });
 
 test("the tested-floor check does not pair Node.js 18 release numbers with another major or an empty range", () => {
   // The release numbers in nodeTestAddedIn are Node.js 18 minor releases. With
   // engines.node at >=20.0.0 they must not turn into "releases before 20.8" and
-  // "releases 20.8 to 20.-1", and a floor at or below 18.8 leaves no release
-  // between the two to call untested.
+  // "releases 20.8 to 20.-1", and a floor at 18.8 leaves no release between the
+  // two to call untested.
   const tail = "have no `after` in `node:test`, which the tests import";
+  const files = [{ path: "test/a.mjs", text: 'import { test, after } from "node:test";\n' }];
   assert.throws(
-    () => checkTestedFloorSentence(">=20.0.0", `releases before 20.8 ${tail}. Node.js 20.0 is the lowest release the tests have been run on, not a measured minimum: releases 20.8 to 20.-1 are untested.`),
+    () => checkTestedFloorSentence(">=20.0.0", `releases before 20.8 ${tail}. Node.js 20.0 is the lowest release the tests have been run on, not a measured minimum: releases 20.8 to 20.-1 are untested.`, files),
     /lists Node\.js 18 minor releases/
   );
   assert.throws(
-    () => checkTestedFloorSentence(">=18.8.0", `releases before 18.8 ${tail}. Node.js 18.8 is the lowest release the tests have been run on, not a measured minimum: releases 18.8 to 18.7 are untested.`),
+    () => checkTestedFloorSentence(">=18.8.0", `releases before 18.8 ${tail}. Node.js 18.8 is the lowest release the tests have been run on, not a measured minimum: releases 18.8 to 18.7 are untested.`, files),
     /is not above 18\.8/
+  );
+});
+
+test("the tested-floor check reads the test files it is given and says a floor below the lowest release that can run the tests admits releases that cannot run them", () => {
+  const tail = "have no `after` in `node:test`, which the tests import";
+  const files = [{ path: "test/a.mjs", text: 'import { test, after } from "node:test";\n' }];
+  assert.throws(
+    () => checkTestedFloorSentence(">=18.1.0", `releases before 18.8 ${tail}. Node.js 18.1 is the lowest release the tests have been run on, not a measured minimum: releases 18.8 to 18.0 are untested.`, files),
+    /names Node\.js 18\.1, below 18\.8, the lowest release that can run the tests, so it admits Node\.js 18\.1 to 18\.7, which cannot run them/
+  );
+  assert.throws(
+    () => checkTestedFloorSentence(">=18.7.0", `releases before 18.8 ${tail}. Node.js 18.7 is the lowest release the tests have been run on, not a measured minimum: releases 18.8 to 18.6 are untested.`, files),
+    /so it admits Node\.js 18\.7, which cannot run them/
+  );
+  assert.throws(
+    () => checkTestedFloorSentence(">=18.17.0", `releases before 18.8 ${tail}. Node.js 18.17 is the lowest release the tests have been run on, not a measured minimum: releases 18.8 to 18.16 are untested.`, [{ path: "test/a.mjs", text: "import { describe } from 'node:test';\n" }]),
+    /test\/a\.mjs imports describe from node:test; add the release that added it/
   );
 });
 
