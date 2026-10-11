@@ -208,7 +208,7 @@ test("the test agent check reports no title, not the title bounds, for a page th
   assert.deepEqual(await check("<titlebar>x</titlebar>" + " ".repeat(maxBodyBytes)), [noTitleInRead]);
   assert.deepEqual(await check("<!-- <title> -->" + " ".repeat(maxBodyBytes)), [noTitleInRead]);
   // A title tag ends its name with white space, / or >, and one outside a comment still names the bounds.
-  for (const tag of ["<title>", "<TITLE lang='en'>", "<title\n>", "<title\tlang='en'>", "<title/>"]) {
+  for (const tag of ["<title>", "<TITLE lang='en'>", "<title\n>", "<title\tlang='en'>", "<title\f>", "<title\r>", "<title/>"]) {
     assert.deepEqual(await check(`${tag}Probe <AI></title>`), [noTitleInBounds], `the tag ${JSON.stringify(tag)}`);
   }
   assert.deepEqual(await check("<!-- a --><title>Probe <AI></title>"), [noTitleInBounds]);
@@ -216,6 +216,68 @@ test("the test agent check reports no title, not the title bounds, for a page th
   assert.deepEqual(await check("<!---><title>Probe <AI></title>"), [noTitleInBounds]);
   assert.deepEqual(await check("<title>Probe <!-- AI</title>"), [noTitleInBounds]);
   assert.deepEqual(await check("<!-- <title> --><title>Probe AI</title>"), []);
+});
+
+// A check of a home page with the given body, served with a JSON card.
+const checkHome = (body) =>
+  checkAgent(
+    { name: "Probe AI", host: "probe.dev" },
+    stubFetch({
+      "https://probe.dev/.well-known/agent.json": card,
+      "https://probe.dev/": { status: 200, type: "text/html", body },
+    })
+  );
+
+test("the test agent check names the title bounds for a title tag after a comment that ends at --!> or a <!-- that starts no comment", async () => {
+  assert.deepEqual(await checkHome("<!-- a --!><title>Probe <AI></title>"), [noTitleInBounds]);
+  assert.deepEqual(await checkHome('<script>var s = "<!--";</script><title>Probe <AI></title>'), [noTitleInBounds]);
+  assert.deepEqual(await checkHome('<style>p::after { content: "<!--" }</style><title>Probe <AI></title>'), [noTitleInBounds]);
+  assert.deepEqual(await checkHome("<textarea><!--</textarea><title>Probe <AI></title>"), [noTitleInBounds]);
+  assert.deepEqual(await checkHome('<a title="<!--">x</a><title>Probe <AI></title>'), [noTitleInBounds]);
+  assert.deepEqual(await checkHome('<!-- a --!><script>var s = "<!--";</script><title>Probe AI</title>'), []);
+  // The dashes that start a comment do not end it at "!>".
+  assert.deepEqual(await checkHome("<!--!><title>Probe AI</title> -->"), [noTitle]);
+});
+
+test("the test agent check reports no title for a <title> in a script, style or textarea element, an attribute value or a declaration", async () => {
+  assert.deepEqual(await checkHome('<script>var s = "<title>";</script><p>x</p>'), [noTitle]);
+  assert.deepEqual(await checkHome("<style>/* <title> */</style><p>x</p>"), [noTitle]);
+  assert.deepEqual(await checkHome("<textarea><title></textarea><p>x</p>"), [noTitle]);
+  assert.deepEqual(await checkHome('<a href="<title>">x</a>'), [noTitle]);
+  assert.deepEqual(await checkHome("<a href='<title>'>x</a>"), [noTitle]);
+  assert.deepEqual(await checkHome("<! <title> ><p>x</p>"), [noTitle]);
+  assert.deepEqual(await checkHome("<?xml <title> ?><p>x</p>"), [noTitle]);
+  // A raw text element ends only at its own end tag, or at the end of the page.
+  assert.deepEqual(await checkHome("<script></scripts><title>Probe AI</title>"), [noTitle]);
+  assert.deepEqual(await checkHome('<SCRIPT>"<title>"</script ><title>Probe AI</title>'), []);
+  // A quoted attribute value may hold ">", which does not end its tag.
+  assert.deepEqual(await checkHome('<a b=">" c="<title>">x</a>'), [noTitle]);
+  assert.deepEqual(await checkHome('<title data-x="a>b">Probe AI</title>'), []);
+});
+
+test("the test agent check reads no title from a comment, a longer tag name or an svg or math element", async () => {
+  assert.deepEqual(await checkHome("<!-- <title>Probe AI</title> --><p>x</p>"), [noTitle]);
+  assert.deepEqual(await checkHome("<titlebar>Probe AI</title>"), [noTitle]);
+  assert.deepEqual(await checkHome("<svg><title>Probe AI</title></svg>"), [noTitle]);
+  assert.deepEqual(await checkHome("<math><title>Probe AI</title></math>"), [noTitle]);
+  assert.deepEqual(await checkHome("<!-- <title>Old</title> --><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<titlebar>Old</title><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<svg><title>Old</title></svg><title>Probe AI</title>"), []);
+  // An svg element ends at the end tag of its own, not at one in a nested svg, a comment, an attribute value or CDATA.
+  assert.deepEqual(await checkHome("<svg><svg></svg><title>Old</title></svg><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome('<svg><a title="</svg>"/><!-- </svg> --><![CDATA[</svg>]]><title>Old</title></svg><title>Probe AI</title>'), []);
+  assert.deepEqual(await checkHome("<svg><math></svg><title>Probe AI</title>"), []);
+  assert.deepEqual(await checkHome("<svg/><title>Probe AI</title>"), []);
+});
+
+test("the test agent check shows the control characters in a problem in a visible form", async () => {
+  assert.deepEqual(await checkHome("<title>\x1b[31mRED\x1b[0m</title>"), ['the home page calls the agent "\\x1B[31mRED\\x1B[0m", not "Probe AI"']);
+  assert.deepEqual(await checkHome("<title>Probe\x7fAI\u009b2J</title>"), ['the home page calls the agent "Probe\\x7FAI\\x9B2J", not "Probe AI"']);
+  const fetchImpl = stubFetch({
+    "https://probe.dev/.well-known/agent.json": { ...card, type: "text/html\x1b[2J" },
+    "https://probe.dev/": home("Probe AI"),
+  });
+  assert.deepEqual(await checkAgent({ name: "Probe AI", host: "probe.dev" }, fetchImpl), ["/.well-known/agent.json returned text/html\\x1B[2J, not JSON"]);
 });
 
 test("the test agent check reads a home page made of repeated <title with no > in linear time", async () => {
