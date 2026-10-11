@@ -38,11 +38,14 @@ const tagNameEnd = /[\t\n\f\r />]/g;
 const attributeNameEnd = `${space}/>=`;
 const unquotedValueEnd = `${space}>`;
 const isLetter = (c) => c !== undefined && /[A-Za-z]/.test(c);
-// The elements whose text runs to their end tag, so a "<title>" or "<!--" in
-// it starts nothing, and the end tag that ends each.
+// The elements other than script whose text runs to their end tag, so a
+// "<title>" or "<!--" in it starts nothing, and the end tag that ends each.
 const rawTextEnd = new Map(
-  ["script", "style", "textarea", "xmp", "iframe", "noembed", "noframes", "noscript"].map((name) => [name, new RegExp(`</${name}[\\t\\n\\f\\r />]`, "gi")])
+  ["style", "textarea", "xmp", "iframe", "noembed", "noframes", "noscript"].map((name) => [name, new RegExp(`</${name}[\\t\\n\\f\\r />]`, "gi")])
 );
+// The parts of a script's text that change where it ends: "<!--", "-->", and a
+// script start or end tag.
+const scriptToken = /<!--|-->|<(\/?)script(?=[\t\n\f\r />])/gi;
 // The elements whose title elements are not the page's title.
 const foreignElements = new Set(["svg", "math"]);
 
@@ -55,6 +58,34 @@ function commentEnd(body, i) {
   for (let dashes = body.indexOf("--", i); dashes !== -1; dashes = body.indexOf("--", dashes + 1)) {
     if (body[dashes + 2] === ">") return dashes + 3;
     if (body.startsWith("!>", dashes + 2)) return dashes + 4;
+  }
+  return -1;
+}
+
+// The index of the "</script" that ends a script whose text starts at i, or -1
+// if the page ends first. A script ends at its first "</script" followed by
+// white space, "/" or ">", except in a part of it that "<!--" starts and "-->"
+// ends: there a "<script" starts a part that the next "</script" ends in place
+// of the script, as in <script><!--<script></script>--></script>. The dashes of
+// a "<!--" are also the first two of a "-->", so "<!-->" ends the part it starts.
+function scriptEnd(body, i) {
+  // Whether the scan is in a part that "<!--" started, and in one that a
+  // "<script" started within it.
+  let escaped = false;
+  let nested = false;
+  scriptToken.lastIndex = i;
+  for (let token; (token = scriptToken.exec(body)) !== null; ) {
+    if (token[0] === "<!--") {
+      escaped = true;
+      scriptToken.lastIndex = token.index + 2;
+    } else if (token[0] === "-->") {
+      escaped = nested = false;
+    } else if (token[1] === "/") {
+      if (!nested) return token.index;
+      nested = false;
+    } else if (escaped) {
+      nested = true;
+    }
   }
   return -1;
 }
@@ -102,9 +133,14 @@ function tagEnd(body, i) {
 // comments, which end at "-->" or "--!>", doctypes and other "<!" and "<?"
 // declarations, quoted attribute values, the text of script, style, textarea
 // and the other raw text elements, and svg and math elements. The check builds
-// no tree as a parser does, so it reads a title in a template element and none
-// that an svg element holds in a foreignObject. Each search starts where the
-// last one stopped, which keeps the scan linear in the length of the page.
+// no tree as a parser does, so it reads a title in a template element, and it
+// keeps an svg or math element open to its own end tag: it reads no title that
+// such an element holds in an element that holds HTML, such as foreignObject
+// or desc in svg and mi in math, and none after markup at which a parser
+// closes the element, such as the end tag of an element that holds it, as in
+// <div><svg></div>, or the start tag of an HTML element such as p or div, as
+// in <svg><p>. Each search starts where the last one stopped, which keeps the
+// scan linear in the length of the page.
 function findTitle(body) {
   // The svg and math elements open at the scan position, innermost last.
   const foreign = [];
@@ -148,6 +184,8 @@ function findTitle(body) {
         return { text: tag.end - nameEnd <= maxTitleAttributes ? titleText.exec(body)?.[1] : undefined };
       } else if (htmlStartTag && name === "plaintext") {
         return undefined;
+      } else if (htmlStartTag && name === "script") {
+        i = scriptEnd(body, i);
       } else if (htmlStartTag && rawTextEnd.has(name)) {
         const end = rawTextEnd.get(name);
         end.lastIndex = i;
