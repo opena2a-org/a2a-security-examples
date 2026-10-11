@@ -530,6 +530,7 @@ test("the node:test import reader reads an of outside the parentheses after for 
     assert.deepEqual(namesImportedFromNodeTest(before + declaration), ["after"], JSON.stringify(before));
   }
   assert.deepEqual(namesImportedFromNodeTest("if (x) {}\nof / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("function g() {}\nof / 2, t = `/`;\n" + declaration), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest("if (x) of / 2, t = `/`;\n" + declaration), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest("for (x of y) of / 2, t = `/`;\n" + declaration), ["after"]);
   assert.deepEqual(namesImportedFromNodeTest("for (x of [() => { y\nof / 2, t = `/`; }]) ;\n" + declaration), ["after"]);
