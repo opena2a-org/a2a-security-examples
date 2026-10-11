@@ -3,7 +3,9 @@
  *
  * An agent written to A2A specification v0.3.0: it answers the JSON-RPC 2.0
  * method message/send at POST / and serves its agent card at
- * /.well-known/agent-card.json.
+ * /.well-known/agent-card.json. It also answers POST /a2a/message, a route
+ * A2A v0.3.0 does not define, which the a2a target of the HackMyAgent scanner
+ * posts its payloads to.
  *
  * Demonstrates secure task handling with:
  * - Zod schema validation on all inputs
@@ -101,6 +103,15 @@ const MessageSchema = z.object({
 const MessageSendParamsSchema = z.object({
   message: MessageSchema,
   metadata: z.record(z.string(), z.string().max(1000)).optional(),
+});
+
+// The message HackMyAgent's a2a target sends in place of a JSON-RPC request:
+// the names of the sending and receiving agents and one text payload, which
+// has the bounds of a text part.
+const AgentMessageSchema = z.object({
+  from: z.string().min(1).max(200),
+  to: z.string().min(1).max(200),
+  content: TextPartSchema.shape.text,
 });
 
 // --- Prompt Injection Detection ---
@@ -316,25 +327,43 @@ function fieldErrors(issues: z.ZodIssue[], prefix: string[] = []) {
   return issues.map((i) => ({ field: [...prefix, ...i.path].join("."), message: i.message }));
 }
 
+// What a route reads from a body: the message/send params, or the error for
+// the first check that fails, each with the id the reply answers.
 type ParsedRequest =
-  | { error: RpcError }
-  | { id: z.infer<typeof RequestIdSchema>; params: z.infer<typeof MessageSendParamsSchema> };
+  | { id: RequestId; error: RpcError }
+  | { id: RequestId; params: z.infer<typeof MessageSendParamsSchema> };
 
 // Check the JSON-RPC request, its method, then its params, and return the
 // message/send params or the error for the first check that fails.
 function parseRequest(body: unknown): ParsedRequest {
   const request = JsonRpcRequestSchema.safeParse(body);
   if (!request.success) {
-    return { error: { code: -32600, message: "Invalid Request", data: fieldErrors(request.error.issues) } };
+    return { id: requestIdOf(body), error: { code: -32600, message: "Invalid Request", data: fieldErrors(request.error.issues) } };
   }
+  const { id } = request.data;
   if (request.data.method !== "message/send") {
-    return { error: { code: -32601, message: "Method not found" } };
+    return { id, error: { code: -32601, message: "Method not found" } };
   }
   const params = MessageSendParamsSchema.safeParse(request.data.params);
   if (!params.success) {
-    return { error: { code: -32602, message: "Invalid params", data: fieldErrors(params.error.issues, ["params"]) } };
+    return { id, error: { code: -32602, message: "Invalid params", data: fieldErrors(params.error.issues, ["params"]) } };
   }
-  return { id: request.data.id, params: params.data };
+  return { id, params: params.data };
+}
+
+// Check the message HackMyAgent's a2a target sends and return it as the
+// message/send params of a user message with one text part. The message has
+// no request id, so the reply to it answers id null.
+function parseAgentMessage(body: unknown): ParsedRequest {
+  const agentMessage = AgentMessageSchema.safeParse(body);
+  if (!agentMessage.success) {
+    return { id: null, error: { code: -32600, message: "Invalid Request", data: fieldErrors(agentMessage.error.issues) } };
+  }
+  const text = agentMessage.data.content;
+  return {
+    id: null,
+    params: { message: { kind: "message", messageId: randomUUID(), role: "user", parts: [{ kind: "text", text }] } },
+  };
 }
 
 // --- Task Handler ---
@@ -348,12 +377,35 @@ const parseJson = express.json({ limit: "1mb" });
 // for each guess, once it has used up the requests the limiter allows it in
 // the 60 seconds that started with its first request. A request that
 // limitHeaderLines answers 431 never reaches the limiter and is not counted.
-app.post("/", rateLimit, authenticate, parseJson, async (req, res) => {
+app.post("/", rateLimit, authenticate, parseJson, (req, res) =>
+  handleMessage(req, res, parseRequest, (id, result) => ({ jsonrpc: "2.0", id, result }))
+);
+
+// HackMyAgent's a2a target (hackmyagent attack <url> --target-type a2a) posts
+// {"from", "to", "content"} to <url>/a2a/message, a route A2A v0.3.0 does not
+// define, in place of a message/send request. The content is read as a user
+// message with one text part, so the message counts toward the same rate
+// limit and gets the same authentication, injection filter, audit lines and
+// JSON-RPC errors as a message sent to POST /. The reply to a message the
+// agent accepts holds the text of the completed task's reply.
+app.post("/a2a/message", rateLimit, authenticate, parseJson, (req, res) =>
+  handleMessage(req, res, parseAgentMessage, (_id, result) => ({ content: result.status.message.parts[0].text }))
+);
+
+// Check the body with parse, run the message it gives through the checks
+// below, and answer with the completed task in the route's own reply format
+// or with a JSON-RPC error.
+async function handleMessage(
+  req: express.Request,
+  res: express.Response,
+  parse: (body: unknown) => ParsedRequest,
+  toReply: (id: RequestId, result: Awaited<ReturnType<typeof processTask>>) => unknown
+) {
   const clientIp = req.ip || "unknown";
   const requestId = randomUUID();
 
   // Schema validation
-  const parsed = parseRequest(req.body);
+  const parsed = parse(req.body);
   if ("error" in parsed) {
     const { error } = parsed;
     audit({
@@ -363,7 +415,7 @@ app.post("/", rateLimit, authenticate, parseJson, async (req, res) => {
       action: "validation_failed",
       details: { code: error.code, issues: error.data?.length ?? 0 },
     });
-    return sendError(res, 400, requestIdOf(req.body), error);
+    return sendError(res, 400, parsed.id, error);
   }
 
   const { id, params } = parsed;
@@ -411,7 +463,7 @@ app.post("/", rateLimit, authenticate, parseJson, async (req, res) => {
 
   try {
     const result = await processTask(taskId, message.contextId ?? randomUUID(), message);
-    return res.json({ jsonrpc: "2.0", id, result });
+    return res.json(toReply(id, result));
   } catch (error) {
     // Never leak internal error details
     audit({
@@ -423,7 +475,7 @@ app.post("/", rateLimit, authenticate, parseJson, async (req, res) => {
     });
     return sendError(res, 500, id, { code: -32603, message: "Task processing failed" });
   }
-});
+}
 
 // --- Agent Card Endpoint ---
 
