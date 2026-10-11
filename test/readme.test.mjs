@@ -213,12 +213,15 @@ function regularExpressionEnd(source, start) {
 // The tokens of a module, read in one pass: names and strings with their escape
 // sequences decoded, one token with no value for each number and regular
 // expression, one template token where a template ends, and punctuators one
-// character each except ++, -- and the ${ that starts a template substitution.
-// A byte order mark, a hashbang line, whitespace, comments and the text of a
-// template give no token. A slash is read as division after a name other than
-// a keyword in keywordsBeforeExpression (a keyword after a . is a property
-// name), after ) or ], after a number, string, template or regular expression,
-// and after a ++ or -- that follows one of these. So a slash right after the )
+// character each except ++, --, the ... of a spread or rest element and the ${
+// that starts a template substitution. A byte order mark, a hashbang line,
+// whitespace, comments and the text of a template give no token. A slash is
+// read as division after a name other than a keyword in
+// keywordsBeforeExpression (a keyword after a . is a property name and one
+// after a # is a private name, while one after ... is a keyword), after ) or ],
+// after a number, string, template or regular expression, and after a ++ or --
+// that follows one of these on the same line (a line break before a ++ or --,
+// in a comment or not, makes it a prefix operator). So a slash right after the )
 // of if (...), for (...) or while (...) is read as division, though it starts a
 // regular expression there. Any other slash starts a regular expression if one
 // closes on the same line, and is read as a punctuator if not.
@@ -246,6 +249,8 @@ function moduleTokens(text) {
     return source.length;
   };
   let i = source.startsWith("#!") ? lineEnd(source, 0) : 0;
+  // The index after the last token read.
+  let previousEnd = i;
   while (i < source.length) {
     const c = source[i];
     const previous = tokens.at(-1);
@@ -275,7 +280,7 @@ function moduleTokens(text) {
       tokens.push({ type: "regex" });
       i = flags.lastIndex;
     } else if (name) {
-      const property = previous?.type === "punct" && previous.value === ".";
+      const property = previous?.type === "punct" && (previous.value === "." || previous.value === "#");
       tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), beforeExpression: !property && keywordsBeforeExpression.has(name[0]) });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
@@ -285,14 +290,19 @@ function moduleTokens(text) {
       tokens.push({ type: "number" });
       i = number.lastIndex;
     } else if (source.startsWith("++", i) || source.startsWith("--", i)) {
-      tokens.push({ type: "punct", value: c + c, postfix: slashDivides(previous) });
+      const lineBreak = /[\n\r\u{2028}\u{2029}]/u.test(source.slice(previousEnd, i));
+      tokens.push({ type: "punct", value: c + c, postfix: !lineBreak && slashDivides(previous) });
       i += 2;
+    } else if (source.startsWith("...", i)) {
+      tokens.push({ type: "punct", value: "..." });
+      i += 3;
     } else {
       if (substitutions.length > 0 && c === "{") substitutions[substitutions.length - 1]++;
       if (substitutions.length > 0 && c === "}") substitutions[substitutions.length - 1]--;
       tokens.push({ type: "punct", value: c });
       i++;
     }
+    if (tokens.at(-1) !== previous) previousEnd = i;
   }
   return tokens;
 }
@@ -431,6 +441,17 @@ test("the node:test import reader reads a slash after export default as a regula
   assert.deepEqual(namesImportedFromNodeTest('if (x) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('for (;;) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('while (x) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
+});
+
+test("the node:test import reader reads a slash after a private name such as #default as division, a slash after a keyword that follows a spread as a regular expression, and a ++ or -- after a line break as a prefix operator", () => {
+  const declaration = 'import { after } from "node:test";\nconst u = ``;\n';
+  assert.deepEqual(namesImportedFromNodeTest("x = this.#default / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("x = this?.#void / 2, t = `/`;\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("f(...void /`/);\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest("a = [...typeof /`/];\n" + declaration), ["after"]);
+  assert.deepEqual(namesImportedFromNodeTest('x\n++/import { describe } from "node:test"/.lastIndex;\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('a[0] /* note\n */ --/import { describe } from "node:test"/.lastIndex;\n'), []);
+  assert.deepEqual(namesImportedFromNodeTest('a /* note */ ++ / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
 });
 
 test("the node:test import reader reads a long run of spaces in linear time", () => {
