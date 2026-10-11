@@ -1200,10 +1200,12 @@ test("a request with more than one Authorization header gets 401, whichever head
 
 test("a request with 1,000 or more header lines gets 431, so an Authorization header past the lines Node.js reads is not ignored", async () => {
   await withOwnServer(async (serverPort, audited) => {
-    // Node.js 20 stops reading the header lines of a request once it holds
-    // about 1,000 and passes the request on without the rest, so the handler
-    // would read only the first Authorization line of these requests. Later
-    // releases answer them with a bare 431 before the handler runs.
+    // Node.js 18 and 20, and Node.js 22, 24 and 26 releases before 22.23.2,
+    // 24.18.1 and 26.5.1, stop reading the header lines of a request at about
+    // 1,000 and pass the request on without the rest, so the handler would
+    // read only the first Authorization line of these requests. Node.js
+    // 22.23.2, 24.18.1, 26.5.1 and later releases of those three lines answer
+    // them with a bare 431 before the handler runs.
     const valid = "Authorization: Bearer demo-token";
     const invalid = "Authorization: Bearer undefined";
     const filler = (count) => Array(count).fill("a:");
