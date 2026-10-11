@@ -72,12 +72,16 @@ const rootEntryFields = [
 // The bin npm records for a package.json: each command with the path of its
 // file inside the package. A command is named after the last segment of its
 // name once that name is resolved as a path, so a bin named a/b/.. is a. A bin
-// that is one path is a command named after the package, a bin that is a list
-// names each command after its file, and an entry left without a name or a
-// path is dropped.
+// that is one path is a command named after the package. A bin that is a list
+// first names each path after its last segment, where only a slash ends a
+// segment and trailing slashes are set aside, and that name is then resolved
+// like any other, so the list path a/b/.. is named .. and gives no command.
+// An entry left without a name or a path is dropped. For a list entry that is
+// not a string, npm install stops with ERR_INVALID_ARG_TYPE and this function
+// throws that error.
 function recordedBin({ name, bin }) {
   if (typeof bin === "string") bin = name ? { [name]: bin } : {};
-  if (Array.isArray(bin)) bin = Object.fromEntries(bin.map((path) => [path, path]));
+  if (Array.isArray(bin)) bin = Object.fromEntries(bin.map((path) => [posix.basename(path), path]));
   const recorded = {};
   for (const [command, path] of Object.entries(bin ?? {})) {
     const base = posix.basename(posix.join("/", command.replace(/[\\:]/g, "/")));
@@ -270,6 +274,9 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
       { name: "probe", bin: ["./bin/one.js", "two.js"], funding: { type: "individual", url: "https://example.com/c" } },
       { name: "probe", bin: { "one.js": "bin/one.js", "two.js": "two.js" }, funding: { type: "individual", url: "https://example.com/c" } },
     ],
+    // A path in a bin list that ends in /. or /.. is named . or .., not after
+    // the directory it resolves to, and gives no command.
+    [{ name: "probe", bin: ["a/b/..", "lib/cli/.", "two.js"] }, { name: "probe", bin: { "two.js": "two.js" } }],
     // A command name that ends in a . or .. segment is named after the segment
     // it resolves to, and the type of a license object is recorded even when empty.
     [
