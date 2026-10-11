@@ -471,6 +471,12 @@ test("the lock file check expects the root entry npm 11.19.0 writes for a packag
       ['{"name":"probe","funding":[{"__proto__":"a"}]}', { name: "probe", funding: [{}] }],
       ['{"name":"probe","peerDependenciesMeta":{"x":{"__proto__":true}}}', { name: "probe", peerDependenciesMeta: { x: {} } }],
       ['{"name":"probe","license":{"type":{"__proto__":"MIT"}}}', { name: "probe", license: {} }],
+      ['{"name":"probe","engines":{"__proto__":{"node":">=1"}}}', { name: "probe", engines: {} }],
+      [
+        '{"name":"probe","funding":["https://example.com/a",{"url":"u","__proto__":{"x":1}}]}',
+        { name: "probe", funding: ["https://example.com/a", { url: "u" }] },
+      ],
+      ['{"name":"probe","license":{"type":{"__proto__":{"a":1}}}}', { name: "probe", license: {} }],
     ].map(([pkg, entry]) => [JSON.parse(pkg), entry]),
     // bundleDependencies false is set, so npm does not read bundledDependencies.
     [
