@@ -94,7 +94,8 @@ test("the audit sentence names the handler's audit actions, including the one fo
 // comment nor one key: value pair with the key quoted or not, such as a spread,
 // a shorthand property or a second pair after a comma, as the options such a
 // line gives cannot be read from it. A comma or a // inside a string, template
-// or regular expression in a value does not end the value.
+// or regular expression in a value does not end the value, nor does a comma
+// inside brackets or a template substitution that the same line closes.
 function limiterOptionKeys(handler) {
   const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
   if (!options) return null;
@@ -104,17 +105,21 @@ function limiterOptionKeys(handler) {
     const pair = line.match(/^\s*(["']?)(\w+)\1\s*:(\s*[^\s,/].*)$/);
     if (!pair) return null;
     // moduleTokens() gives no token for a comment and one token for a string,
-    // template or regular expression, so a comma token before the last token
-    // is followed by more than a comment.
+    // a regular expression or a template without a substitution. A template
+    // with one gives the tokens of each substitution too, and a comma among
+    // them or inside brackets is part of the value when the line closes what
+    // it is inside: a later token then has fewer brackets and substitutions
+    // open than the comma has. Any other comma token ends the value, so one
+    // before the last token is followed by more than a comment.
     const value = moduleTokens(pair[3]);
-    const comma = value.findIndex((token) => token.type === "punct" && token.value === ",");
+    const comma = value.findIndex((token, i) => token.type === "punct" && token.value === "," && value.slice(i + 1).every((later) => later.open >= token.open));
     if (comma >= 0 && comma < value.length - 1) return null;
     keys.push(pair[2]);
   }
   return keys;
 }
 
-test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key nor a pair after another on one line, even after a value holding a // or a comma in a string or template", () => {
+test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a template substitution or brackets", () => {
   const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
   assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
@@ -123,6 +128,9 @@ test("the limiter options reader reads a key in either quote and skips a comment
   assert.deepEqual(limiterOptionKeys(add("  /* blockDuration: 300, */")), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add("")), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  keyPrefix: "a, // b", // c')), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${f(a, b)}`, // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: f(a, b), // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a}, ${[b, { c, d }].length}`, // e")), ["points", "duration", "keyPrefix"]);
   for (const line of [
     "  ...{ blockDuration: 300 },",
     "  ...extraOptions,",
@@ -135,6 +143,15 @@ test("the limiter options reader reads a key in either quote and skips a comment
     '  duration: "//", blockDuration: 300,',
     '  duration: "//".length * 30, blockDuration: 300,',
     "  keyPrefix: `//`, blockDuration: 300,",
+    "  keyPrefix: f(a, b), blockDuration: 300,",
+    "  keyPrefix: `${f(a, b)}`, blockDuration: 300,",
+    "  keyPrefix: `${a}${b}`, blockDuration: 300,",
+    "  keyPrefix: `${`${a}`}`, blockDuration: 300,",
+    // A bracket or a substitution the line does not close, and a closing
+    // bracket it does not open, hide no comma.
+    "  keyPrefix: f(a, [b, blockDuration: 300,",
+    "  keyPrefix: `${a, blockDuration: 300,",
+    "  duration: 60 }), blockDuration: 300,",
   ]) {
     assert.equal(limiterOptionKeys(add(line)), null, `${line.trim()} is read as neither a comment nor one key: value pair`);
   }
@@ -597,8 +614,12 @@ function regularExpressionEnd(source, start) {
 // expression, one template token where a template ends, and punctuators one
 // character each except ++, --, the ... of a spread or rest element and the ${
 // that starts a template substitution. A byte order mark, a hashbang line,
-// whitespace, comments and the text of a template give no token. A slash is
-// read as division after a name other than a keyword in
+// whitespace, comments and the text of a template give no token. Each token
+// has in open the number of (, [ and { not yet closed and of template
+// substitutions not yet ended after it: a ( counts itself, a ) does not count
+// the ( it closes, and a template token does not count the substitution that
+// ends before it. A closing bracket with none open leaves the number at 0.
+// A slash is read as division after a name other than a keyword in
 // keywordsBeforeExpression (a keyword after a . is a property name and one
 // after a # is a private name, while one after ... is a keyword, except of,
 // which is a keyword only directly inside the parentheses after for or
@@ -704,7 +725,10 @@ function moduleTokens(text) {
       tokens.push({ type: "punct", value: c });
       i++;
     }
-    if (tokens.at(-1) !== previous) previousEnd = i;
+    if (tokens.at(-1) !== previous) {
+      tokens.at(-1).open = brackets.length + substitutions.length;
+      previousEnd = i;
+    }
   }
   return tokens;
 }
