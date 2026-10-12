@@ -123,6 +123,17 @@ function stopServer(proc, signal = "SIGTERM") {
 // close only once tsx and the server it started have both exited.
 const started = new Set();
 
+// The process ids of the tsx processes spawnExample has started whose output
+// pipes have closed.
+const closedTsx = [];
+
+// The socket a tsx process binds under the temporary directory, which it takes
+// from the TMPDIR it inherits from this process, and removes when it exits. On
+// Windows tsx binds a named pipe, which leaves no file, and there is no path.
+function tsxSocket(pid) {
+  return process.platform === "win32" ? undefined : join(tmpdir(), `tsx-${process.geteuid()}`, `${pid}.pipe`);
+}
+
 // Start tsx and the example, or Node with args instead. On POSIX the process
 // leads a process group of its own, so stopServer reaches the server tsx starts
 // without tsx passing a signal on.
@@ -135,7 +146,10 @@ function spawnExample(env, cwd = example, args = [tsx, "handler.ts"]) {
   });
   if (proc.pid !== undefined) {
     started.add(proc);
-    proc.once("close", () => started.delete(proc));
+    proc.once("close", () => {
+      started.delete(proc);
+      if (args[0] === tsx) closedTsx.push(proc.pid);
+    });
   }
   return proc;
 }
@@ -720,8 +734,14 @@ test("stopping a server ends tsx and the server it started even when tsx cannot 
   // ends. Windows has no signals; there stopServer ends the process tree.
   const proc = await startServer(await freePort());
   const closed = new Promise((resolve) => proc.once("close", resolve));
+  // SIGKILL gives tsx no chance to remove its socket, so remove it here once
+  // tsx has exited. A check that looks for the socket in the wrong place would
+  // find it removed whether or not it was, so look for it first.
+  const socket = tsxSocket(proc.pid);
+  if (socket) assert.ok(existsSync(socket), `tsx has bound its socket at ${socket}`);
   stopServer(proc, "SIGKILL");
   await within(closed, 10000, "tsx and the server it started still hold the output pipes 10 seconds after stopServer");
+  if (socket) rmSync(socket, { force: true });
 });
 
 test("the stalled-upload test loads its preload with --require, not --import", () => {
@@ -732,6 +752,23 @@ test("the stalled-upload test loads its preload with --require, not --import", (
   // Node.js 18.0 to 18.17 exit with "--import= is not allowed in NODE_OPTIONS".
   assert.doesNotMatch(stalledTest, /--import/, "the stalled-upload test passes no --import in NODE_OPTIONS");
   assert.match(stalledTest, /NODE_OPTIONS: requireOptions\(file\)/, "the stalled-upload test loads its preload with --require");
+});
+
+test("the interrupted-run test reads the output of the test run it starts and gives it in each of its failure messages", () => {
+  // Without that output, a run that cannot start a server fails with no cause.
+  // The line break after test( keeps the search from finding this test's own
+  // string, which comes first in the file.
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const start = source.indexOf('test(\n  "interrupting a test run stops the servers it started');
+  assert.ok(start >= 0, "this file has the interrupted-run test");
+  const interruptedTest = source.slice(start, source.indexOf("\ntest(", start));
+  assert.match(interruptedTest, /\{ env, stdio: \["ignore", "pipe", "pipe"\], detached: true \}/, "the run's stdout and stderr are piped to the test");
+  assert.match(interruptedTest, /run\.stdout\.on\("data", \(chunk\) => \(log \+= chunk\)\)/, "the test reads the run's stdout");
+  assert.match(interruptedTest, /run\.stderr\.on\("data", \(chunk\) => \(log \+= chunk\)\)/, "the test reads the run's stderr");
+  const messages = interruptedTest.match(/\b(?:assert\.\w+|within)\(/g);
+  const withOutput = interruptedTest.match(/:\\n\$\{log\}`/g) ?? [];
+  assert.ok(messages.length > 0, "the interrupted-run test makes assertions");
+  assert.equal(withOutput.length, messages.length, "each assertion message in the interrupted-run test ends with the run's output");
 });
 
 test("the stalled-upload preload sets the connection check interval when the server is created", () => {
@@ -961,7 +998,7 @@ test("the size limit admits a message whose every part is a file part with bytes
   });
 });
 
-test("a file part whose bytes are not base64 fails schema validation, so every message the schema accepts fits the size limit", async () => {
+test("a file part whose bytes are not base64 fails schema validation, so the file parts of a message the schema accepts fit the size limit when their bytes are written without JSON escapes", async () => {
   const auth = { Authorization: "Bearer demo-token" };
   const filePart = (bytes) => JSON.stringify(sendMessage([{ kind: "file", file: { bytes, mimeType: "text/plain" } }]));
   const invalidBytes = (message) => ({
@@ -1008,6 +1045,29 @@ test("a file part whose bytes are not base64 fails schema validation, so every m
     const after = await postTask(auth, filePart("aGVsbG8="), serverPort);
     assert.equal(after.status, 200, "the server still answers after bytes as long as the size limit admits");
     await after.arrayBuffer();
+  });
+});
+
+test("a message the schema accepts whose file bytes are written as JSON escapes can be over the size limit, and gets 413", async () => {
+  const auth = { Authorization: "Bearer demo-token" };
+  // count file parts of bytes of the longest length the schema allows, each
+  // character written as a \uXXXX escape of six bytes, the longest form JSON
+  // has for a character.
+  const escapedTask = (count) => fileTask(count, maxBytesLength).replaceAll("A".repeat(maxBytesLength), "\\u0041".repeat(maxBytesLength));
+  // The fewest such parts whose body is over the limit.
+  const count = Math.floor(bodyLimit / (6 * maxBytesLength)) + 1;
+  assert.ok(count <= maxParts, `${count} file parts are as many as the schema allows or fewer`);
+  await withOwnServer(async (serverPort) => {
+    const one = escapedTask(1);
+    assert.deepEqual(JSON.parse(one), JSON.parse(fileTask(1, maxBytesLength)), "the escapes stand for the bytes the schema accepts");
+    const accepted = await postTask(auth, one, serverPort);
+    assert.equal(accepted.status, 200, `one such part, ${one.length} bytes, is accepted`);
+    assert.equal((await accepted.json()).result.status.state, "completed");
+    const body = escapedTask(count);
+    assert.ok(body.length > bodyLimit, `${count} such parts take ${body.length} bytes, over the limit of ${bodyLimit}`);
+    const res = await postTask(auth, body, serverPort);
+    assert.equal(res.status, 413, `${count} such parts get 413`);
+    assert.deepEqual(await res.json(), bodyError(-32600, "Invalid request body"));
   });
 });
 
@@ -1273,47 +1333,65 @@ test(
     const run = spawn(
       process.execPath,
       ["--test", "--test-name-pattern=^an upload that stalls", fileURLToPath(import.meta.url)],
-      { env, stdio: "ignore", detached: true }
+      { env, stdio: ["ignore", "pipe", "pipe"], detached: true }
     );
     const exited = new Promise((resolve) => run.once("exit", resolve));
+    // What the run writes, for the failure messages: when the run cannot start
+    // a server, the server's error is in its output.
+    let log = "";
+    run.stdout.on("data", (chunk) => (log += chunk));
+    run.stderr.on("data", (chunk) => (log += chunk));
+    let ended = false;
+    run.once("close", () => (ended = true));
     const preloadDirs = () => readdirSync(runTmp).filter((name) => name.startsWith("a2a-preload-"));
     let groups = new Set();
     try {
-      for (let i = 0; i < 600 && groups.size < 2; i++) {
+      // A run that has ended has started all the servers it will start.
+      for (let i = 0; i < 600 && groups.size < 2 && !ended; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
         groups = descendantGroups(run.pid);
       }
-      assert.equal(groups.size, 2, "the run started the main server and the stalled-upload server");
       // A server that has exited counts as stopped while it waits to be reaped.
       const running = () => {
         const live = liveGroups();
         return [...groups].filter((pid) => live.has(pid));
       };
+      const runningBefore = running();
+      // When a server has not started or has already stopped, a test in the
+      // run fails, and the run reports the server's output only once that test
+      // has failed. Wait for the run to end, so that the report is in the
+      // messages below.
+      if (groups.size < 2 || runningBefore.length < 2) {
+        for (let i = 0; i < 600 && !ended; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      assert.equal(groups.size, 2, `the run started the main server and the stalled-upload server:\n${log}`);
       // A check that cannot see the servers while they run would report them
       // stopped after the interrupt whether or not the run stopped them.
-      assert.deepEqual(running(), [...groups], "ps lists both servers as running before the run is interrupted");
+      assert.deepEqual(runningBefore, [...groups], `ps lists both servers as running before the run is interrupted:\n${log}`);
       // Likewise, a check that cannot see the preload directory while the
       // stalled-upload server runs would report it removed either way.
-      assert.equal(preloadDirs().length, 1, "the run has made the preload directory before it is interrupted");
+      assert.equal(preloadDirs().length, 1, `the run has made the preload directory before it is interrupted:\n${log}`);
       // tsx binds its socket under the run's TMPDIR, which is this run's, so
       // the run makes nothing in its own directory but the preload directory.
       assert.deepEqual(
         readdirSync(runTmp).filter((name) => !name.startsWith("a2a-preload-")),
         [],
-        "the run makes nothing in its own directory but the preload directory"
+        `the run makes nothing in its own directory but the preload directory:\n${log}`
       );
       process.kill(-run.pid, "SIGINT");
-      await within(exited, 10000, "the interrupted run did not exit within 10 seconds");
+      await within(exited, 10000, `the interrupted run did not exit within 10 seconds:\n${log}`);
       for (let i = 0; i < 100 && running().length > 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      assert.deepEqual(running(), [], "no server the interrupted run started is still running");
+      assert.deepEqual(running(), [], `no server the interrupted run started is still running:\n${log}`);
       // The process that has exited is the one that starts the test file. The
       // one that runs the file removes the directory, and can end after it.
       for (let i = 0; i < 100 && preloadDirs().length > 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      assert.deepEqual(preloadDirs(), [], "no preload directory the interrupted run made is left");
+      assert.deepEqual(preloadDirs(), [], `no preload directory the interrupted run made is left:\n${log}`);
     } finally {
       // Stop the run and whatever it left running, even when an assertion
       // failed, and remove its temporary directory even when stopping them fails.
@@ -1616,7 +1694,7 @@ test("an agent card file that is not JSON or is missing, for handler.ts and for 
     const compiled = run([join(outDir, "handler.js")], { NODE_PATH: join(example, "node_modules") });
     assert.equal(oneLine(compiled, "a build outside dist/"), missing);
   } finally {
-    rmSync(top, { recursive: true, force: true });
+    removeTempDir(top);
   }
 });
 
@@ -2057,4 +2135,15 @@ test("requests to /a2a/message and to POST / count toward one rate limit, before
       [...Array(rateLimitPoints).fill("auth_failed"), "rate_limited", "rate_limited"]
     );
   });
+});
+
+// Keep this test last: it checks what the tests above it have left behind.
+test("the tests leave no temporary directory in the set an interrupted run removes, and no socket of a tsx process that has exited", () => {
+  // Every test removes its temporary directories with removeTempDir, which
+  // takes each out of the set as well, so the set is empty here.
+  assert.deepEqual([...tempDirs], [], "removeTempDir has removed every temporary directory makeTempDir made");
+  if (process.platform !== "win32") {
+    const left = closedTsx.map(tsxSocket).filter((socket) => existsSync(socket));
+    assert.deepEqual(left, [], "no tsx process that has exited has left its socket behind");
+  }
 });
