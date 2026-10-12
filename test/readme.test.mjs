@@ -139,9 +139,13 @@ function slashMayBeMisread(tokens, i) {
   const keyword = (token, ...raw) => is(token, "name") && !token.property && raw.includes(token.raw);
   if (is(tokens[i], "regex")) return is(tokens[i - 1], "punct", "}");
   if (!is(tokens[i], "punct", "/") || !is(tokens[i - 1], "punct", ")")) return false;
-  // Every token inside the parentheses has more brackets and substitutions
-  // open than the ) has, so the ( is the token after the last one before the
-  // ) that does not.
+  // In a line whose brackets and substitutions match, every token inside the
+  // parentheses has more of them open than the ) has, so the ( is the token
+  // after the last one before the ) that does not. In any other line that
+  // token may be another one. One that is not a ( gives true, as in
+  // (a] ) / 2, where the ] closes the ( in its place, so the walk stops at
+  // the ] and the token after it is the ) itself; another ( is read as the
+  // ( of this ).
   const close = i - 1;
   let before = close - 1;
   while (before >= 0 && tokens[before].open > tokens[close].open) before--;
@@ -229,6 +233,10 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     // The same holds when the line sets one option.
     "  keyPrefix: (() => { if (1) /x/; return 'k'; })(), // c",
     "  keyPrefix: a) / 2,",
+    // Here the ] or } closes the ( in its place and the ) closes nothing, so
+    // no ( is found for the ) before the slash and the slash may be misread.
+    "  blockDuration: (a] ) / 2, // c",
+    "  blockDuration: (a} ) / 2, // c",
   ]) {
     assert.equal(limiterOptionKeys(add(line)), null, `${line.trim()} is read as neither a comment nor one key: value pair`);
   }
