@@ -1,10 +1,10 @@
 {
   "protocolVersion": "0.3.0",
-  "name": "SecureAnalysisAgent",
-  "description": "Validates each message it is sent and replies with the number of text parts it received and the length of their combined text.",
+  "name": "TextPartCounterAgent",
+  "description": "Validates each message it is sent and replies with the number of text parts it received and the total number of characters in them.",
   "url": "https://your-agent.example.com",
   "preferredTransport": "JSONRPC",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "documentationUrl": "https://your-agent.example.com/docs",
   "provider": {
     "organization": "Your Organization",
@@ -25,7 +25,7 @@
     {
       "id": "count-text-parts",
       "name": "Count Text Parts",
-      "description": "Reply with the number of text parts in the message and the length in characters of their combined text. File parts are accepted and not read.",
+      "description": "Reply with the number of text parts in the message and the total number of characters in them. File parts are accepted and not decoded.",
       "tags": ["example"],
       "examples": [
         "Count the text parts in this message"

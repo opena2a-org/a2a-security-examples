@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -938,6 +938,74 @@ test("the size limit admits a message whose every part is a file part with bytes
   });
 });
 
+test("a file part whose bytes are not base64 fails schema validation, so every message the schema accepts fits the size limit", async () => {
+  const auth = { Authorization: "Bearer demo-token" };
+  const filePart = (bytes) => JSON.stringify(sendMessage([{ kind: "file", file: { bytes, mimeType: "text/plain" } }]));
+  const invalidBytes = (message) => ({
+    jsonrpc: "2.0",
+    id: 1,
+    error: { code: -32602, message: "Invalid params", data: [{ field: "params.message.parts.0.file.bytes", message }] },
+  });
+  // Base64 as RFC 4648, section 4, defines it: no bytes, each length of the
+  // last group and both characters the base64url alphabet replaces.
+  const base64 = ["", "YWJj", "YWI=", "YQ==", "aGVsbG8=", "+/+/"];
+  const notBase64 = {
+    "characters outside ASCII, as many as the length limit allows": "é".repeat(maxBytesLength),
+    "a last group without its padding": "aGk",
+    "a padded group of five characters": "aGk==",
+    "padding before the last group": "YQ==YWJj",
+    "three padding characters": "Y===",
+    "padding alone": "====",
+    "a space": "aG k",
+    "a line break after the padding": "YQ==\n",
+    "the base64url alphabet": "ab-_",
+  };
+  await withOwnServer(async (serverPort, audited) => {
+    for (const bytes of base64) {
+      const res = await postTask(auth, filePart(bytes), serverPort);
+      assert.equal(res.status, 200, `bytes ${JSON.stringify(bytes)} are base64`);
+      await res.arrayBuffer();
+    }
+    for (const [name, bytes] of Object.entries(notBase64)) {
+      const seen = audited().length;
+      const res = await postTask(auth, filePart(bytes), serverPort);
+      assert.equal(res.status, 400, `bytes with ${name} fail schema validation`);
+      assert.deepEqual(await res.json(), invalidBytes("Invalid base64"), name);
+      const lines = (await waitForAudit(seen + 1, audited)).slice(seen);
+      assert.deepEqual(lines.map((l) => l.action), ["validation_failed"], name);
+    }
+    // Bytes over the length limit are rejected for their length alone, base64
+    // or not, at the longest the size limit admits too: the base64 check does
+    // not run on them, and the server goes on answering.
+    for (const bytes of ["A".repeat(maxBytesLength + 4), "A".repeat(bodyLimit - 1024), "A".repeat(bodyLimit - 1024) + "!"]) {
+      const res = await postTask(auth, filePart(bytes), serverPort);
+      assert.equal(res.status, 400, `bytes of ${bytes.length} characters fail schema validation`);
+      assert.deepEqual(await res.json(), invalidBytes(`String must contain at most ${maxBytesLength} character(s)`));
+    }
+    const after = await postTask(auth, filePart("aGVsbG8="), serverPort);
+    assert.equal(after.status, 200, "the server still answers after bytes as long as the size limit admits");
+    await after.arrayBuffer();
+  });
+});
+
+test("the reply counts the characters of the text parts themselves, as the agent card's skill says, and none between two parts", async () => {
+  const cases = [
+    [[{ kind: "text", text: "a" }, { kind: "text", text: "b" }], 2, 2],
+    [[{ kind: "text", text: "Hello" }, { kind: "file", file: { bytes: "aGk=", mimeType: "text/plain" } }, { kind: "text", text: "wor\nld" }], 2, 11],
+    [[{ kind: "file", file: { bytes: "aGk=", mimeType: "text/plain" } }], 0, 0],
+  ];
+  await withOwnServer(async (serverPort) => {
+    for (const [parts, textParts, chars] of cases) {
+      const res = await postTask({ Authorization: "Bearer demo-token" }, JSON.stringify(sendMessage(parts)), serverPort);
+      assert.equal(res.status, 200);
+      const { text } = (await res.json()).result.status.message.parts[0];
+      assert.ok(text.endsWith(`: received ${textParts} text parts (${chars} chars total)`), `${JSON.stringify(parts)} gets ${text}`);
+    }
+  });
+  const card = JSON.parse(readFileSync(cardFile, "utf8"));
+  assert.match(card.skills[0].description, /the number of text parts in the message and the total number of characters in them/);
+});
+
 test("no response carries an X-Powered-By header naming the framework", async () => {
   const responses = {
     "GET /.well-known/agent.json": await fetch(`http://127.0.0.1:${port}/.well-known/agent.json`),
@@ -1460,6 +1528,45 @@ test("with maxHeaderLines raised to 1,500, a request with 1,100 header lines and
   }
 });
 
+test("an agent card file that is not JSON or is missing, for handler.ts and for a build that is not one directory below the example, exits with one line naming the file", async () => {
+  const { top, dir } = exampleCopy((source) => source);
+  try {
+    // Node.js runs a file under its real path, and tmpdir() can hold a
+    // symbolic link, as /var is on macOS.
+    const card = join(realpathSync(top), "secure-agent-card", "agent-card.json");
+    const env = { ...process.env, PORT: String(await freePort()) };
+    // A run that reads its card starts a server and ends with the timeout.
+    const run = (args, extra = {}) => spawnSync(process.execPath, args, { cwd: dir, env: { ...env, ...extra }, encoding: "utf8", timeout: 30000 });
+    const oneLine = (finished, name) => {
+      assert.equal(finished.status, 1, `${name}:\n${finished.stdout}${finished.stderr}`);
+      assert.equal(finished.stdout, "", `${name} starts no server`);
+      const lines = finished.stderr.trim().split("\n");
+      assert.equal(lines.length, 1, `${name} writes one line, not a stack trace:\n${finished.stderr}`);
+      return lines[0];
+    };
+
+    writeFileSync(join(top, "secure-agent-card", "agent-card.json"), "{bad");
+    const notJson = oneLine(run([tsx, "handler.ts"]), "a card that is not JSON");
+    assert.ok(notJson.startsWith(`Cannot read the agent card at ${card}: `), notJson);
+
+    const missing = `No agent card at ${card}; keep the secure-agent-card directory beside the example's directory`;
+    rmSync(join(top, "secure-agent-card"), { recursive: true });
+    assert.equal(oneLine(run([tsx, "handler.ts"]), "handler.ts without the secure-agent-card directory"), missing);
+
+    // A build that is not in dist/ below the example's directory: the handler
+    // takes the directory above the one that holds handler.js for the
+    // example's, here build, and looks for the card beside it, where the copy
+    // has none now.
+    const outDir = join(top, "build", "out");
+    const build = spawnSync(process.execPath, [tsc, "-p", dir, "--outDir", outDir], { encoding: "utf8" });
+    assert.equal(build.status, 0, build.stdout + build.stderr);
+    const compiled = run([join(outDir, "handler.js")], { NODE_PATH: join(example, "node_modules") });
+    assert.equal(oneLine(compiled, "a build outside dist/"), missing);
+  } finally {
+    rmSync(top, { recursive: true, force: true });
+  }
+});
+
 test("a 401 response carries the Bearer challenge with a realm in a WWW-Authenticate header, with invalid_token for an invalid token, a 400 for a malformed header carries it with invalid_request, and a 200 response carries none", async () => {
   // RFC 9110, section 15.5.2: a 401 response carries at least one challenge.
   // RFC 6750, section 3: the Bearer scheme in it is followed by one or more
@@ -1767,7 +1874,8 @@ test("a message sent to /a2a/message gets the authentication, JSON parsing, vali
       const lines = (await waitForAudit(seen + 1, audited)).slice(seen);
       assert.deepEqual(lines.map((l) => l.action), [action], name);
     }
-    // A body that is not JSON is rejected by the parser both routes share.
+    // A body that is not JSON is rejected by the route's parser as by the
+    // parser of POST /.
     const seen = audited().length;
     const malformed = await fetch(`http://127.0.0.1:${serverPort}/a2a/message`, {
       method: "POST",
@@ -1782,6 +1890,51 @@ test("a message sent to /a2a/message gets the authentication, JSON parsing, vali
     const longest = await postAgentMessage(serverPort, auth, { from: "a".repeat(200), to: "b".repeat(200), content: "c".repeat(10000) });
     assert.equal(longest.status, 200);
     assert.match((await longest.json()).content, /: received 1 text parts \(10000 chars total\)$/);
+  });
+});
+
+test("POST /a2a/message has a body limit of its own, which admits the longest message the route reads with every character written as an escape, and answers 413 to a larger body that POST / parses", async () => {
+  // The body limit of POST /a2a/message in bytes, as handler.ts sets it.
+  const kilobytes = handlerSource.match(/express\.json\(\{ limit: "(\d+)kb" \}\)/);
+  assert.ok(kilobytes, "handler.ts sets a JSON body limit in kilobytes beside the limit of POST /");
+  const agentMessageBodyLimit = Number(kilobytes[1]) * 1024;
+  const auth = { Authorization: "Bearer demo-token" };
+  const post = (serverPort, body) =>
+    fetch(`http://127.0.0.1:${serverPort}/a2a/message`, { method: "POST", headers: { "Content-Type": "application/json", ...auth }, body });
+  // A message of length bytes: one the route accepts and a field it does not
+  // read.
+  const padded = (length) => {
+    const head = '{"from":"a","to":"b","content":"x","pad":"';
+    return head + "A".repeat(length - head.length - 2) + '"}';
+  };
+  // count copies of char, each written as a \uXXXX escape of six bytes, the
+  // longest form JSON has for a character.
+  const escaped = (char, count) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`.repeat(count);
+  assert.ok(agentMessageBodyLimit < bodyLimit, "the limit of POST /a2a/message is below the limit of POST /");
+  await withOwnServer(async (serverPort, audited) => {
+    // The longest from, to and content the route takes.
+    const longest = `{"from":"${escaped("a", 200)}","to":"${escaped("b", 200)}","content":"${escaped("c", 10000)}"}`;
+    assert.deepEqual(Object.values(JSON.parse(longest)).map((value) => value.length), [200, 200, 10000]);
+    assert.ok(longest.length <= agentMessageBodyLimit, `the longest message, ${longest.length} bytes, fits the limit of ${agentMessageBodyLimit}`);
+    const accepted = await post(serverPort, longest);
+    assert.equal(accepted.status, 200);
+    assert.match((await accepted.json()).content, /: received 1 text parts \(10000 chars total\)$/);
+    const atLimit = await post(serverPort, padded(agentMessageBodyLimit));
+    assert.equal(atLimit.status, 200, `a body of ${agentMessageBodyLimit} bytes is parsed`);
+    assert.match((await atLimit.json()).content, /: received 1 text parts \(1 chars total\)$/);
+    // One byte over the limit, and 16 bytes under the limit of POST /.
+    for (const length of [agentMessageBodyLimit + 1, bodyLimit - 16]) {
+      const seen = audited().length;
+      const res = await post(serverPort, padded(length));
+      assert.equal(res.status, 413, `a body of ${length} bytes gets 413`);
+      assert.deepEqual(await res.json(), bodyError(-32600, "Invalid request body"));
+      const lines = (await waitForAudit(seen + 1, audited)).slice(seen);
+      assert.deepEqual(lines.map((l) => [l.action, l.details]), [["request_rejected", { status: 413, reason: "entity.too.large" }]]);
+    }
+    // POST / parses a body of that length, and its schema rejects it.
+    const parsed = await postTask(auth, padded(bodyLimit - 16), serverPort);
+    assert.equal(parsed.status, 400);
+    assert.equal((await parsed.json()).error.message, "Invalid Request");
   });
 });
 

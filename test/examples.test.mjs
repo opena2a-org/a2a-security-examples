@@ -68,6 +68,23 @@ test("the agent card example validates against the A2A v0.3.0 AgentCard and sets
   assert.equal(card.protocolVersion, "0.3.0");
 });
 
+test("the agent card example is named for the skills it lists: each word of its name but Agent is a word of a skill's name or a form of one", () => {
+  const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
+  // The words of a name written in capitalised words, with or without spaces.
+  const words = (name) => name.split(/(?=[A-Z])|[^A-Za-z]+/).filter(Boolean).map((word) => word.toLowerCase());
+  assert.deepEqual(words("SecureAnalysisAgent"), ["secure", "analysis", "agent"]);
+  const skillWords = card.skills.flatMap((skill) => words(skill.name));
+  // Counter is a form of Count, and Part of Parts.
+  const advertised = (word) => skillWords.some((skillWord) => word.startsWith(skillWord) || skillWord.startsWith(word));
+  const named = words(card.name).filter((word) => word !== "agent");
+  assert.ok(named.length > 0, `${card.name} says what the agent does`);
+  for (const word of named) {
+    assert.ok(advertised(word), `${word} in the name ${card.name} is in no skill name: ${card.skills.map((skill) => skill.name).join(", ")}`);
+  }
+  // The name the card had when it listed two analysis skills.
+  assert.ok(!advertised("secure") && !advertised("analysis"), "the check fails for the name SecureAnalysisAgent");
+});
+
 test("the schema check rejects the agent card and task request the examples used before they followed A2A v0.3.0", () => {
   const card = {
     name: "SecureAnalysisAgent",

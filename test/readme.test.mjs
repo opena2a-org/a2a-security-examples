@@ -952,6 +952,52 @@ test("step 3 says a body the parser cannot read gets Invalid request body, not I
   assert.match(step, /bare HTTP 408 with no body when the upload stalls until Node's request timeout/, "step 3 names the bare 408 for a stalled upload");
 });
 
+test("the audit sentence and the attack section give the body limit of POST /a2a/message as handler.ts sets it, with the characters the route reads and the bytes they take", () => {
+  const handler = readText("examples/validated-task-handler/handler.ts");
+  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
+  const routeLimit = handler.match(/const (\w+) = express\.json\(\{ limit: "(\d+)kb" \}\);/);
+  assert.ok(routeLimit, "handler.ts sets a second JSON body limit in kilobytes");
+  assert.ok(handler.includes(`app.post("/a2a/message", rateLimit, authenticate, ${routeLimit[1]}, `), "POST /a2a/message uses the parser with the second limit");
+  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  assert.ok(sentence.startsWith("Requests to `POST /` and to `POST /a2a/message` "), "the audit sentence names POST /a2a/message second");
+  const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
+  assert.ok(rejected.includes(`over ${limit[1]} MB, or over ${routeLimit[2]} KB at the second route,`), "README says request_rejected covers a body over the limit of each route");
+  // The longest from, to and content the route takes, and the bytes they take
+  // when each character is written as a \uXXXX escape, the longest form JSON
+  // has for one.
+  assert.match(handler, /^  content: TextPartSchema\.shape\.text,$/m, "content has the bounds of a text part");
+  const longest = [/^  from: z\.string\(\)\.min\(1\)\.max\((\d+)\),$/m, /^  to: z\.string\(\)\.min\(1\)\.max\((\d+)\),$/m, /^  text: z\.string\(\)\.min\(1\)\.max\((\d+)\),$/m];
+  const characters = longest.reduce((sum, pattern) => sum + Number(handler.match(pattern)?.[1]), 0);
+  assert.ok(Number.isInteger(characters), "handler.ts sets the longest from, to and text");
+  const bytes = characters * 6;
+  assert.ok(bytes < Number(routeLimit[2]) * 1024, `${bytes} bytes fit the limit of ${routeLimit[2]} KB`);
+  const count = (number) => number.toLocaleString("en-US");
+  const section = attackSection(readme);
+  assert.ok(section.includes(`413 for a body over ${routeLimit[2]} KB, not ${limit[1]} MB`), "the attack section gives the body limit of POST /a2a/message beside the limit of POST /");
+  assert.ok(
+    section.includes(`the ${count(characters)} characters it reads take at most ${count(bytes)} bytes, each written as a six-byte \`\\uXXXX\` escape`),
+    `the attack section says the ${count(characters)} characters the route reads take at most ${count(bytes)} bytes`
+  );
+});
+
+test("step 4 says the bytes of a file part must be base64, as the handler's schema checks, and each declaration in the schema excerpt is in handler.ts", () => {
+  const handler = readText("examples/validated-task-handler/handler.ts");
+  const bytes = handler.match(/^    bytes: z\.string\(\)\.max\((\d+)\)\.pipe\(z\.string\(\)\.refine\(isBase64, "[^"]+"\)\),/m);
+  assert.ok(bytes, "the schema checks the length of bytes, then that they are base64");
+  const step = lines.find((l) => l.startsWith("4. Schema validation"));
+  assert.ok(step, "README lists schema validation as step 4");
+  assert.ok(step.includes(`up to ${Number(bytes[1]).toLocaleString("en-US")} characters of \`bytes\`, which must be base64 as RFC 4648, section 4, defines it`), "step 4 gives the longest bytes and says they must be base64");
+  const section = readme.split(/^## Input validation$/m)[1] ?? "";
+  const excerpt = codeBlocks(section).find((b) => b.lang === "typescript");
+  assert.ok(excerpt, "the Input validation section has a TypeScript excerpt");
+  const declarations = excerpt.body.trim().split("\n\n");
+  assert.ok(declarations.some((d) => d.startsWith("const FilePartSchema = ")), "the excerpt declares FilePartSchema");
+  for (const declaration of declarations) {
+    assert.ok(handler.includes(declaration), `handler.ts declares ${declaration.split("\n")[0]} as the excerpt does`);
+  }
+});
+
 test("README names the command that runs the tests", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.ok(pkg.scripts?.test, "the root package.json defines npm test");
