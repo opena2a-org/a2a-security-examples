@@ -998,6 +998,26 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
   }
 });
 
+test("each name of handler.ts the schema excerpt uses is declared in the excerpt, or the Input validation section says handler.ts declares it", () => {
+  // A reader who pastes the excerpt into a file of their own otherwise meets a
+  // name the excerpt never declares and nothing says where it is.
+  const handler = readText("examples/validated-task-handler/handler.ts");
+  const section = (readme.split(/^## Input validation$/m)[1] ?? "").split(/^## /m)[0];
+  const excerpt = codeBlocks(section).find((b) => b.lang === "typescript");
+  assert.ok(excerpt, "the Input validation section has a TypeScript excerpt");
+  const declared = (source) => [...source.matchAll(/^(?:const|function) (\w+)/gm)].map((m) => m[1]);
+  const own = declared(excerpt.body);
+  const prose = section.replace(/^```[\s\S]*?^```$/gm, "").split("\n");
+  const used = declared(handler).filter((name) => !own.includes(name) && new RegExp(`\\b${name}\\b`).test(excerpt.body));
+  assert.ok(declared(handler).includes("FilePartSchema") && own.includes("FilePartSchema"), "the check reads the declarations of handler.ts and of the excerpt");
+  for (const name of used) {
+    assert.ok(
+      prose.some((line) => line.includes(`\`${name}\``) && line.includes("handler.ts declares")),
+      `the excerpt uses ${name}, which handler.ts declares, and the section does not say so`
+    );
+  }
+});
+
 test("README names the command that runs the tests", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.ok(pkg.scripts?.test, "the root package.json defines npm test");
