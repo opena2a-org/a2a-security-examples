@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -791,10 +791,11 @@ test("unknown routes get a JSON 404, not the framework's HTML page", async () =>
 // Start a server of its own for a test, so that the requests it sends do not
 // count against the rate limit of the server the other tests share, and pass
 // its port and its audit lines to fn. Then stop it and wait until it has exited.
-async function withOwnServer(fn) {
+// The server runs the handler.ts in cwd, by default the example's.
+async function withOwnServer(fn, cwd = example) {
   let log = "";
   const serverPort = await freePort();
-  const proc = await startServer(serverPort, (chunk) => (log += chunk));
+  const proc = await startServer(serverPort, (chunk) => (log += chunk), cwd);
   const closed = new Promise((resolve) => proc.once("close", resolve));
   try {
     await fn(serverPort, () => auditLines(log));
@@ -1382,6 +1383,81 @@ test("a request answered 431 for too many header lines does not count toward the
     await waitForAudit(1, audited);
     assert.deepEqual(audited().map((a) => a.action), ["task_accepted"]);
   });
+});
+
+// Copy the example into validated-task-handler in a new temporary directory,
+// with handler.ts changed by edit, and copy the files of
+// examples/secure-agent-card into secure-agent-card beside it, as the two sit
+// side by side in the repository, so that the handler finds a file it reads
+// from there. Link the example's node_modules into the copy so tsx finds the
+// dependencies. Return the temporary directory, which the caller removes, and
+// the directory of the copy.
+function exampleCopy(edit) {
+  const top = mkdtempSync(join(tmpdir(), "a2a-copy-"));
+  const dir = join(top, "validated-task-handler");
+  try {
+    mkdirSync(dir);
+    for (const file of ["package.json", "tsconfig.json"]) copyFileSync(join(example, file), join(dir, file));
+    writeFileSync(join(dir, "handler.ts"), edit(readFileSync(join(example, "handler.ts"), "utf8")));
+    const cards = join(root, "examples/secure-agent-card");
+    mkdirSync(join(top, "secure-agent-card"));
+    for (const entry of readdirSync(cards, { withFileTypes: true })) {
+      if (entry.isFile()) copyFileSync(join(cards, entry.name), join(top, "secure-agent-card", entry.name));
+    }
+    // Windows creates a junction without the privilege a symbolic link needs;
+    // other platforms ignore the type.
+    symlinkSync(join(example, "node_modules"), join(dir, "node_modules"), "junction");
+  } catch (err) {
+    rmSync(top, { recursive: true, force: true });
+    throw err;
+  }
+  return { top, dir };
+}
+
+test("with maxHeaderLines raised to 1,500, a request with 1,100 header lines and two Authorization headers gets 400 and one with 1,500 gets the handler's 431, so server.maxHeadersCount follows maxHeaderLines", async () => {
+  // While maxHeaderLines is 1,000, server.maxHeadersCount changes nothing, so
+  // the test runs a copy of the example with a higher limit. If
+  // server.maxHeadersCount is not set from maxHeaderLines, Node.js reads no
+  // more header lines than its default of about 1,000 while the handler checks
+  // for 1,500. Node.js 22.23.2, 24.18.1, 26.5.1 and later releases of those
+  // three lines then answer each request below with a bare 431, and earlier
+  // releases pass it on without its later lines, so the handler would read only
+  // the first Authorization line of the first request and accept its token.
+  const { top, dir } = exampleCopy((source) => {
+    const raised = source.replace("const maxHeaderLines = 1000;", "const maxHeaderLines = 1500;");
+    assert.notEqual(raised, source, "handler.ts sets maxHeaderLines to 1000");
+    return raised;
+  });
+  try {
+    await withOwnServer(async (serverPort, audited) => {
+      const valid = "Authorization: Bearer demo-token";
+      const invalid = "Authorization: Bearer undefined";
+      const filler = (count) => Array(count).fill("a:");
+      for (const sent of [[valid, ...filler(1100), invalid], [invalid, ...filler(1100), valid]]) {
+        const res = await postRaw(serverPort, sent);
+        assert.equal(res.status, 400, `${sent[0]}, 1,100 other lines and ${sent.at(-1)} get 400`);
+        assert.deepEqual(JSON.parse(res.body), { error: "More than one Authorization header" });
+        assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), `the 400 to ${sent[0]}, 1,100 other lines and ${sent.at(-1)} carries the Bearer challenge with invalid_request`);
+      }
+      // postRaw sends four header lines besides the given ones, so these
+      // requests have 1,500 and 1,499 header lines.
+      const atLimit = await postRaw(serverPort, [valid, ...filler(1495)]);
+      assert.equal(atLimit.status, 431, "a request with 1,500 header lines gets 431");
+      assert.deepEqual(JSON.parse(atLimit.body), { error: "Too many header lines" });
+      const belowLimit = await postRaw(serverPort, [valid, ...filler(1494)]);
+      assert.equal(belowLimit.status, 200, "a request with 1,499 header lines is accepted");
+      assert.equal(JSON.parse(belowLimit.body).result.status.state, "completed");
+      // Each of the two 400s wrote an auth_failed line before the accepted
+      // request wrote its line, and the 431 wrote none.
+      await waitForAudit(3, audited);
+      assert.deepEqual(audited().map((a) => a.action), ["auth_failed", "auth_failed", "task_accepted"]);
+      for (const line of audited().slice(0, 2)) {
+        assert.deepEqual(line.details, { status: 400, reason: "repeated_header" });
+      }
+    }, dir);
+  } finally {
+    rmSync(top, { recursive: true, force: true });
+  }
 });
 
 test("a 401 response carries the Bearer challenge with a realm in a WWW-Authenticate header, with invalid_token for an invalid token, a 400 for a malformed header carries it with invalid_request, and a 200 response carries none", async () => {
