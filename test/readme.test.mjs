@@ -159,15 +159,18 @@ function limiterOptionKeys(handler) {
 // a slash divides after, where in TypeScript each ! is a non-null assertion
 // and a slash divides, as in a! / 2, or right after a ++ or -- that follows
 // such a ! or run of them, where in TypeScript the ++ or -- is a postfix
-// operator and a slash divides, as in a!++ / 2, or right after the > that ends
-// the type arguments of a TypeScript type, or a run of ! after it, where a
-// slash divides too, as in 60 as D<1> / 2. A ! right after the ) that closes
-// the parentheses after if, for, for await or while negates, as a statement
-// starts there, so when the line holds the ( of that ) a regular expression
-// right after the ! or a run of them is read as one and is not such a slash.
-// A ! right after the } of a block negates too, but that } is not told from
-// the } that ends an object literal or a function, so a regular expression
-// right after the ! or a run of them is such a slash.
+// operator and a slash divides, as in a!++ / 2, or right after a > that
+// moduleTokens() marks as the end of the type arguments of a TypeScript type,
+// or a run of ! after it, where a slash divides too, as in 60 as D<1> / 2. A
+// regular expression right after a > that ends type arguments and has no such
+// mark, as in {} as D<1> / 2, is not such a slash, so a comma that ends the
+// value can be hidden there. A ! right after the ) that closes the
+// parentheses after if, for, for await or while negates, as a statement starts
+// there, so when the line holds the ( of that ) a regular expression right
+// after the ! or a run of them is read as one and is not such a slash. A !
+// right after the } of a block negates too, but that } is not told from the }
+// that ends an object literal or a function, so a regular expression right
+// after the ! or a run of them is such a slash.
 function slashMayBeMisread(tokens, i) {
   const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
   const keyword = (token, ...raw) => is(token, "name") && !token.property && raw.includes(token.raw);
@@ -964,15 +967,19 @@ function slashDivides(token) {
 // endsTypeArguments set. A line break before a !, in a comment or not, makes
 // it a logical not. A > has endsTypeArguments set to true when it ends the
 // type arguments of the type after an as or satisfies that follows a token
-// that ends an operand on the same line, as TypeScript reads only such an as
-// or satisfies as an operator. The type starts with the name after the as or
-// satisfies and goes on with a name after a . that follows that one. A < right
-// after one of these names on that name's line, or a < inside type arguments,
-// starts type arguments, and a > inside them that is not the > of a => ends
-// them. A < right after the name after the as or satisfies starts none,
-// though, when that name is any, bigint, boolean, false, function, never,
-// null, number, object, string, symbol, this, true, undefined, unknown or
-// void: TypeScript reads that < as a comparison, as in a as number < b. The
+// that ends an operand on the same line. The type starts with the name after
+// the as or satisfies and goes on with a name after a . that follows that one.
+// A < right after one of these names on that name's line, or a < inside type
+// arguments, starts type arguments, and a > inside them that is not the > of
+// a => ends them. A < right after the name after the as or satisfies starts
+// none, though, when that name is any, bigint, boolean, false, function,
+// never, null, number, object, string, symbol, this, true, undefined, unknown
+// or void: TypeScript reads that < as a comparison, as in a as number < b. So
+// the > that ends the type arguments of a type that comes later in a union or
+// intersection, as in 60 as A | D<1>, is not marked. Nor is the one after an
+// as or satisfies that follows the } of an object literal or a ++ or -- after
+// a non-null !, as in {} as D<1> and a!++ as D<1>: TypeScript reads that as or
+// satisfies as an operator too, but neither token ends an operand here. The
 // array has unclosed set to true when the text ends inside a block comment, a
 // string or the text of a template, as a line of a module does when one of
 // these continues on the next line.
