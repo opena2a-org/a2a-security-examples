@@ -107,14 +107,18 @@ test("the audit sentence names the handler's audit actions, including the one fo
 // comment nor one key: value pair with the key quoted or not, such as a spread,
 // a shorthand property, a key with no value after it on its line, a value that
 // a block comment, string or template continues on the next line, a value that
-// ends with a token it goes on after, such as the ? of a conditional, so that
-// the next line continues it, a value with a closing bracket that the line does
-// not open, as when the options object closes before the }); line, or a second
+// ends with a token it goes on after, such as the ? of a conditional or an as,
+// so that the next line continues it, a value that leaves a bracket, a template
+// substitution or type arguments open at the end of its line, as the next line
+// continues it and the first }); line, where the options are taken to end, can
+// be inside the value, a value with a closing bracket that the line does not
+// open, as when the options object closes before the }); line, or a second
 // pair after a comma, as the options such a line gives cannot be read from it.
 // A comma or a // inside a string, template or regular expression in a value,
 // the regular expression a value starts with among them, does not end the
-// value, nor does a comma inside brackets or a template substitution that the
-// same line closes. Null too when a value holds a slash that
+// value, nor does a comma inside brackets, a template substitution or the type
+// arguments of a TypeScript type that the same line closes, as in
+// x as Record<string, number>. Null too when a value holds a slash that
 // slashMayBeMisread() finds moduleTokens() may misread, even if the line sets
 // one option: a bracket or comma after that slash may be read outside a
 // regular expression when it is inside one, or inside one when it is outside,
@@ -132,28 +136,35 @@ function limiterOptionKeys(handler) {
     // value pair, though it may read as one. Otherwise moduleTokens() gives no
     // token for a comment and one token for a string, a regular expression or
     // a template without a substitution. A template with one gives the tokens
-    // of each substitution too, and a comma among them or inside brackets is
-    // part of the value when the line closes what it is inside: a later token
-    // then has fewer brackets and substitutions open than the comma has. Any
-    // other comma token ends the value, so the key has no value on its line
-    // when there is no token or the first one is a comma, and such a comma
-    // before the last token is followed by more than a comment. A closing
-    // bracket that no earlier token on the line opens has as many brackets and
-    // substitutions open as the token before it, or none as the first token.
-    // A value goes on after its last token unless that is a comma, a } or a
-    // token a slash divides after, as one that ends an operand is, so the next
-    // line continues a value that ends with an operator such as the ? of a
-    // conditional, and the : after a key on that line can be the conditional's.
-    // A TypeScript non-null assertion and the > that ends the type arguments
-    // of a type after as or satisfies end an operand too, as in
+    // of each substitution too, and a comma among them, inside brackets or
+    // inside type arguments is part of the value when the line closes what it
+    // is inside: a later token then has fewer brackets and substitutions, or
+    // fewer type arguments, open than the comma has. Any other comma token
+    // ends the value, so the key has no value on its line when there is no
+    // token or the first one is a comma, and such a comma before the last
+    // token is followed by more than a comment. A closing bracket that no
+    // earlier token on the line opens has as many brackets and substitutions
+    // open as the token before it, or none as the first token.
+    // A value goes on after its last token when that leaves a bracket, a
+    // substitution or type arguments open, and otherwise unless it is a
+    // comma, a } or a token a slash divides after, as one that ends an operand
+    // is, so the next line continues a value that ends with an operator such
+    // as the ? of a conditional, and the : after a key on that line can be the
+    // conditional's. A TypeScript non-null assertion and the > that ends the
+    // type arguments of a type after as or satisfies end an operand too, as in
     // settings.duration! or 60 as Duration<60>, while a ! or > that is an
-    // operator does not; moduleTokens() marks the first two.
-    const value = moduleTokens(pair[3]);
+    // operator does not; moduleTokens() marks the first two. A value goes on
+    // after an as or satisfies that follows another token, though a slash
+    // divides after either name: TypeScript reads it as an operator after a
+    // token that ends an operand, and moduleTokens() does not mark each such
+    // token, as the ++ of a!++ as or the } of function () {} as.
+    const value = moduleTokens(pair[3], { expression: true });
     if (value.some((token, i) => slashMayBeMisread(value, i))) return null;
     const unopened = value.some((token, i) => token.type === "punct" && [")", "]", "}"].includes(token.value) && token.open === (value[i - 1]?.open ?? 0));
-    const comma = value.findIndex((token, i) => token.type === "punct" && token.value === "," && value.slice(i + 1).every((later) => later.open >= token.open));
+    const comma = value.findIndex((token, i) => token.type === "punct" && token.value === "," && value.slice(i + 1).every((later) => later.open >= token.open && later.typeArguments >= token.typeArguments));
     const last = value.at(-1);
-    const goesOn = last !== undefined && !slashDivides(last) && !last.nonNull && !last.endsTypeArguments && !(last.type === "punct" && ["}", ","].includes(last.value));
+    const endsWithAs = value.length > 1 && last.type === "name" && !last.property && ["as", "satisfies"].includes(last.raw);
+    const goesOn = last !== undefined && (last.open > 0 || last.typeArguments > 0 || endsWithAs || (!slashDivides(last) && !last.nonNull && !last.endsTypeArguments && !(last.type === "punct" && ["}", ","].includes(last.value))));
     if (value.unclosed || unopened || goesOn || value.length === 0 || comma === 0 || (comma >= 0 && comma < value.length - 1)) return null;
     keys.push(pair[2]);
   }
@@ -167,23 +178,29 @@ function limiterOptionKeys(handler) {
 // may close such parentheses, or right after a ++ or -- read as postfix right
 // after either ), where the ++ or -- is a prefix operator and the slash starts
 // its operand when the ) closes such parentheses, and a regular expression
-// right after a }, where a slash divides when the } ends an object literal or
-// a function, or right after a ! or a run of them that follows a } or a token
-// a slash divides after, where in TypeScript each ! is a non-null assertion
-// and a slash divides, as in a! / 2, or right after a ++ or -- that follows
-// such a ! or run of them, where in TypeScript the ++ or -- is a postfix
-// operator and a slash divides, as in a!++ / 2, or right after a > that
-// moduleTokens() marks as the end of the type arguments of a TypeScript type,
-// or a run of ! after it, where a slash divides too, as in 60 as D<1> / 2. A
-// regular expression right after a > that ends type arguments and has no such
-// mark, as in {} as D<1> / 2, is not such a slash, so a comma that ends the
-// value can be hidden there. A ! right after the ) that closes the
-// parentheses after if, for, for await or while negates, as a statement starts
-// there, so when the line holds the ( of that ) a regular expression right
-// after the ! or a run of them is read as one and is not such a slash. A !
-// right after the } of a block negates too, but that } is not told from the }
-// that ends an object literal or a function, so a regular expression right
-// after the ! or a run of them is such a slash.
+// right after a } that moduleTokens() does not mark as the end of a block,
+// where a slash divides when the } ends an object literal or a function, or
+// right after a ! or a run of them that follows such a } or a token a slash
+// divides after, where in TypeScript each ! is a non-null assertion when the
+// token before them ends an operand and a slash then divides, as in a! / 2, or
+// right after a ++ or -- that follows such a ! or run of them, where in
+// TypeScript the ++ or -- is then a postfix operator and a slash divides, as
+// in a!++ / 2, or right after a > that moduleTokens() marks as the end of the
+// type arguments of a TypeScript type, or a run of ! after it, where a slash
+// divides too, as in 60 as D<1> / 2. A regular expression right after a > that
+// ends type arguments and has no such mark, as in a!++ as D<1> / 2, is not
+// such a slash, so a comma that ends the value can be hidden there. A ! right
+// after the ) that closes the parentheses after if, for, for await or while
+// negates, as a statement starts there, so when the line holds the ( of that )
+// a regular expression right after the ! or a run of them is read as one and
+// is not such a slash. A statement starts right after the } of a block too,
+// so a regular expression right after a } that moduleTokens() marks as the end
+// of a block, right after a ! or a run of them that follows that }, each of
+// which negates, or right after a ++ or -- that follows them, which is a
+// prefix operator, is read as one and is not such a slash. moduleTokens() does
+// not mark the } of every block, though: the } of a function declaration, as
+// in function g() {} !/x/, is not told from the } that ends a function
+// expression, so a regular expression after it is such a slash.
 function slashMayBeMisread(tokens, i) {
   const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
   const keyword = (token, ...raw) => is(token, "name") && !token.property && raw.includes(token.raw);
@@ -209,6 +226,7 @@ function slashMayBeMisread(tokens, i) {
     const last = is(tokens[i - 1], "punct", "++") || is(tokens[i - 1], "punct", "--") ? i - 2 : i - 1;
     let before = last;
     while (is(tokens[before], "punct", "!")) before--;
+    if (tokens[before]?.block === true) return false;
     if (before === last) return last === i - 1 && (is(tokens[before], "punct", "}") || tokens[before]?.endsTypeArguments === true);
     // moduleTokens() reads a slash right after a ) as division, so a ) found
     // here has a ! between it and the regular expression.
@@ -238,6 +256,9 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: x(/a, b/), // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  blockDuration: (a + b) / 2, // c")), ["points", "duration", "blockDuration"]);
   assert.deepEqual(limiterOptionKeys(add("  blockDuration: f(a, b) / a.if(b) / [c][0] / 2, // d")), ["points", "duration", "blockDuration"]);
+  // Only the await of for await comes before the parentheses of a loop, so a
+  // slash right after the ) of await (...) divides.
+  assert.deepEqual(limiterOptionKeys(add("  blockDuration: await (b) / 2 + 4 / 2,")), ["points", "duration", "blockDuration"]);
   // The comma here is inside no bracket, so only reading the regular
   // expression keeps it in the value.
   assert.deepEqual(limiterOptionKeys(add('  keyPrefix: "" + /a, b/.source, // c')), ["points", "duration", "keyPrefix"]);
@@ -295,6 +316,17 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: (() => { for (;0;) !/x/.test(s); return 'k'; })(),",
     "  keyPrefix: (async () => { for await (const x of []) !/x/.test(s); return 'k'; })(),",
     "  keyPrefix: (() => { do ; while (0) !/x/.test(s); return 'k'; })(),",
+    // A regular expression right after the } of a block after if (...),
+    // while (...), else or finally is read as one too, as a statement starts
+    // there, and so is one right after a ! or a run of them after that }, each
+    // of which negates, or right after a ++ or -- that follows them, which is
+    // a prefix operator.
+    "  keyPrefix: (() => { if (a) { } /x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { if (a) { } !/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { if (a) {} else { b(); } !/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { try { b(); } finally { } !!/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { if (a) { b(); } !++/x/.lastIndex; return 'k'; })(),",
+    "  keyPrefix: (() => { while (a) { b(); } !--/x/.lastIndex; return 'k'; })(),",
     // A <= right after the name of a type after an as compares, so the > after
     // it here is an operator and the slash right after that > starts a regular
     // expression.
@@ -379,6 +411,15 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  blockDuration: 60 as D<() => 1> / 2, keyPrefix: 'rl' + 4 / 2,",
     "  blockDuration: a! as D<1> / 2, keyPrefix: 'rl' + 4 / 2,",
     "  blockDuration: 60 as D<1>! / 2, keyPrefix: 'rl' + 4 / 2,",
+    // That holds for a type after the } of an object literal, a later type in
+    // a union or intersection and a typeof query too.
+    "  keyPrefix: {} as D<1> / 2, blockDuration: 300 / 1,",
+    "  blockDuration: { a: 60 } satisfies D<1> / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: 60 as A | D<1> / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: x as typeof f<1> / 2, keyPrefix: 'rl' + 4 / 2,",
+    // A ! right after the ) of await (...) is a non-null assertion too, as
+    // only the await of for await comes before the parentheses of a loop.
+    "  blockDuration: await (b)! / 2, keyPrefix: 'rl' + 4 / 2,",
     // A ! right after the ) of a call to a property named if or while is a
     // non-null assertion too, as that ) ends an operand.
     "  blockDuration: a.if(b)! / 2, keyPrefix: 'rl' + 4 / 2,",
@@ -395,10 +436,12 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: (() => { if (1) ++/x/.lastIndex; return 'k'; })(), // c",
     "  blockDuration: a!++ / 2 + 4 / 2, // c",
     "  keyPrefix: a) / 2,",
-    // A ! right after the } of a block negates, as one right after the ) of
-    // if (...) does, but that } is not told from the } that ends an object
-    // literal or a function, so the value is not read.
-    "  keyPrefix: (() => { if (a) { } !/x/.test(s); return 'k'; })(),",
+    // A ! right after the } of a function declaration negates, as one right
+    // after the } of a block after if (...) does, but that } is not told from
+    // the } that ends a function expression, after which a ! is a non-null
+    // assertion and a slash divides, so neither value is read.
+    "  keyPrefix: (() => { function g() {} !/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: function () {}! / 2, blockDuration: 300 / 1,",
     // Here the ] or } closes the ( in its place and the ) closes nothing, so
     // no ( is found for the ) before the slash and the slash may be misread.
     "  blockDuration: (a] ) / 2, // c",
@@ -445,7 +488,7 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   assert.equal(limiterOptionKeys(add().replace("new RateLimiterMemory({", "new RateLimiterMemory(extraOptions, {")), null, "a limiter created without an options object on its own lines has no options read");
 });
 
-test("the limiter options reader reads a last value that ends with a TypeScript non-null assertion or with the type arguments of a type after as or satisfies, and no value that ends with a ! or > the next line continues", () => {
+test("the limiter options reader reads a last value that ends with a TypeScript non-null assertion or with the type arguments of a type after as or satisfies, a comma among them, after the } of an object literal, of a later type in a union or intersection and of a typeof query too, and no value that ends with a !, >, as or satisfies the next line continues or that leaves a bracket or type arguments open", () => {
   const options = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", ...lines, "});", ""].join("\n");
   for (const line of [
     "  duration: settings.duration!",
@@ -457,6 +500,18 @@ test("the limiter options reader reads a last value that ends with a TypeScript 
     "  duration: 60 as Duration<() => void>",
     "  duration: 60 as Duration<{ a: 1 }>",
     "  duration: settings.duration! as Duration<60>",
+    // A comma inside type arguments is part of the value. A ! right after the
+    // } of an object literal is a non-null assertion, and the type arguments
+    // of a type after an as or satisfies that follows that }, of a later type
+    // in a union or intersection and of a typeof query end an operand too.
+    "  duration: x as Record<string, number>",
+    "  duration: { a: 60 } satisfies Record<string, number>",
+    "  duration: {} as D<1>",
+    "  duration: {}!",
+    "  duration: 60 as A | D<1>",
+    "  duration: 60 as A<1> & D<2> | E<3>",
+    "  duration: x as typeof f<number>",
+    "  duration: x as A | typeof ns.f<number>",
   ]) {
     assert.deepEqual(limiterOptionKeys(options(line)), ["points", "duration"], `${line.trim()} is read as one key: value pair`);
   }
@@ -485,6 +540,21 @@ test("the limiter options reader reads a last value that ends with a TypeScript 
     ["  keyPrefix: x ? a as D <= b && c >", "  duration: 60, // per minute"],
     ["  keyPrefix: x ? a as D <= b > !", "  duration: 60, // per minute"],
     ["  keyPrefix: x ? a as number < b as D <= c >", "  duration: 60, // per minute"],
+    // TypeScript reads a < right after number or one of the 15 other names as
+    // a comparison when the name starts a later type in a union too, so the >
+    // after it is an operator as well.
+    ["  keyPrefix: x ? a as A | number < b >", "  duration: 60, // per minute"],
+    // An as or satisfies at the end of a value is an operator that the next
+    // line continues, whether moduleTokens() marks it or not, and the : on that
+    // line is the conditional's.
+    ["  keyPrefix: x ? a as", "  'duration': 60,"],
+    ["  keyPrefix: x ? a satisfies", "  'duration': 60,"],
+    ["  keyPrefix: x ? a!++ as", "  'duration': 60,"],
+    ["  keyPrefix: x ? function () {} as", "  'duration': 60,"],
+    // The next line continues a value that leaves a bracket or type arguments
+    // open, and a }); line there does not end the options.
+    ["  duration: (() => { g({ a: 1", "}); return 60; })(), blockDuration: 300,"],
+    "  duration: x as Record<string,",
   ]) {
     const added = [line].flat();
     assert.equal(limiterOptionKeys(options(...added)), null, `${added.map((l) => l.trim()).join(" then ")} is read as neither a comment nor one key: value pair`);
@@ -997,28 +1067,49 @@ function slashDivides(token) {
 // A ! has nonNull set to true when TypeScript reads it as a non-null
 // assertion: when it follows a token that ends an operand on the same line
 // and does not start != or !==. A token ends an operand when a slash divides
-// after it, when it is a ! with nonNull set and when it is a > with
-// endsTypeArguments set. A line break before a !, in a comment or not, makes
-// it a logical not. A > has endsTypeArguments set to true when it ends the
-// type arguments of the type after an as or satisfies that follows a token
-// that ends an operand on the same line. The type starts with the name after
-// the as or satisfies and goes on with a name after a . that follows that one.
-// A < right after one of these names on that name's line, or a < inside type
-// arguments, starts type arguments, and a > inside them that is not the > of
-// a => ends them. A < that starts <= starts none, though: TypeScript reads <=
-// as a comparison, as in a as D <= b. Nor does a < right after the name after
-// the as or satisfies when that name is any, bigint, boolean, false, function,
-// never, null, number, object, string, symbol, this, true, undefined, unknown
-// or void: TypeScript reads that < as a comparison, as in a as number < b. So
-// the > that ends the type arguments of a type that comes later in a union or
-// intersection, as in 60 as A | D<1>, is not marked. Nor is the one after an
-// as or satisfies that follows the } of an object literal or a ++ or -- after
-// a non-null !, as in {} as D<1> and a!++ as D<1>: TypeScript reads that as or
-// satisfies as an operator too, but neither token ends an operand here. The
+// after it, other than a ) that closes the parentheses after if, for,
+// for await or while, after which a statement starts, as in if (a) !b, when
+// it is a } that closes an object literal, when it is a ! with nonNull set
+// and when it is a > with endsTypeArguments set. A line break before a !, in a
+// comment or not, makes it a logical not. A ) that closes those parentheses
+// has statementHead set to true. A { opens an object literal, or a pattern or
+// a TypeScript type literal written in the same way, at the start of the text
+// when expression is true, as the text is then read as an expression such as
+// the value of a property, and right after (, [, a comma, =, ?, ... or ${, and
+// the } that closes it has objectLiteral set to true. A { right
+// after a ) with statementHead set or after else, do, try or finally opens a
+// block, and the } that closes it has block set to true. Any other { is not
+// told, as it may open a block, a function or class body or an object
+// literal, as after =>, after the ) of function g() or after a :.
+// A > has endsTypeArguments set to true when it ends the type arguments of a
+// type after an as or satisfies that follows a token that ends an operand on
+// the same line, and such an as or satisfies has typeOperator set to true.
+// The type starts with the name after it, or with the name after the typeof
+// that comes there, as in x as typeof f<number>. It goes on with a name after
+// a . that follows one of these names, and with a | or & and the type after
+// it when that | or & comes right after one of these names or the > that ends
+// their type arguments, as in 60 as A | D<1>, though a || or && ends the type
+// and so do |= and &=. Each of these names has typeName set to true. A <
+// right after one of them on that name's line, or a < inside type arguments,
+// starts type arguments, and a > inside them that is not the > of a => ends
+// them. A < that starts <= starts none, though: TypeScript reads <= as a
+// comparison, as in a as D <= b. Nor does a < right after the name a type
+// starts with after the as, satisfies, | or &, which has typeStart set to
+// true, when that name is any, bigint, boolean, false, function, never, null,
+// number, object, string, symbol, this, true, undefined, unknown or void:
+// TypeScript reads that < as a comparison, as in a as number < b. The type is
+// followed through these names and their type arguments only, so the > that
+// ends the type arguments of a type after keyof, readonly or unique, or of a
+// type in a union after another kind of type, as in 60 as keyof D<1> and
+// 60 as A[] | D<1>, is not marked. Nor is the one after an as or satisfies
+// that follows the } of a function or a ++ or -- after a non-null !, as in
+// function () {} as D<1> and a!++ as D<1>: TypeScript reads that as or
+// satisfies as an operator too, but neither token ends an operand here. Each
+// token has in typeArguments the number of type arguments open after it. The
 // array has unclosed set to true when the text ends inside a block comment, a
 // string or the text of a template, as a line of a module does when one of
 // these continues on the next line.
-function moduleTokens(text) {
+function moduleTokens(text, { expression = false } = {}) {
   const source = text.replace(/^\u{FEFF}/u, "");
   const tokens = [];
   const regularExpressionEnd = regularExpressionEnds(source);
@@ -1026,11 +1117,20 @@ function moduleTokens(text) {
   // For each template substitution open at this point, the { opened inside it
   // and not yet closed.
   const substitutions = [];
-  // For each (, [ or { open at this point, whether it is the ( after for or
-  // for await. A for after a . or # is a property or private name, not the
-  // keyword.
+  // For each (, [ or { open at this point, what it opens: "for" for the ( after
+  // for or for await, "head" for the ( after if or while, "object" for a {
+  // that opens an object literal, "block" for a { that opens a block, and ""
+  // for any other. A for, if, while, else, do, try or finally after a . or # is
+  // a property or private name, not the keyword.
   const brackets = [];
   const keywordFor = (token) => token?.raw === "for" && !token.property;
+  const isKeyword = (token, ...raw) => token?.type === "name" && !token.property && raw.includes(token.raw);
+  const opens = (c, previous) => {
+    if (c === "(") return keywordFor(previous) || (previous?.raw === "await" && keywordFor(tokens.at(-2))) ? "for" : isKeyword(previous, "if", "while") ? "head" : "";
+    if (c !== "{") return "";
+    if (previous === undefined ? expression : previous.type === "punct" && ["(", "[", ",", "=", "?", "...", "${"].includes(previous.value)) return "object";
+    return previous?.statementHead === true || isKeyword(previous, "else", "do", "try", "finally") ? "block" : "";
+  };
   const templateText = (start) => {
     for (let k = start; k < source.length; k++) {
       if (source[k] === "\\") k++;
@@ -1053,7 +1153,7 @@ function moduleTokens(text) {
   // read and before index i.
   const lineBreakBefore = () => /[\n\r\u{2028}\u{2029}]/u.test(source.slice(previousEnd, i));
   // Whether TypeScript reads the token as the end of an operand.
-  const endsOperand = (token) => slashDivides(token) || token?.nonNull === true || token?.endsTypeArguments === true;
+  const endsOperand = (token) => (slashDivides(token) && token.statementHead !== true) || token?.objectLiteral === true || token?.nonNull === true || token?.endsTypeArguments === true;
   // The number of type arguments open in a TypeScript type.
   let typeArguments = 0;
   while (i < source.length) {
@@ -1097,7 +1197,7 @@ function moduleTokens(text) {
       // pattern, as in for (x of ...) or for (const { a } of ...), other than
       // as the name a const, let or var right after the ( declares, as in
       // for (const of of ...).
-      const forHead = brackets.at(-1) === true;
+      const forHead = brackets.at(-1) === "for";
       const declared = ["const", "let", "var"].includes(previous?.raw) && tokens.at(-2)?.type === "punct" && tokens.at(-2).value === "(";
       const keyword = forHead && !declared && (slashDivides(previous) || (previous?.type === "punct" && previous.value === "}"));
       const of = name[0] === "of" && !keyword;
@@ -1109,10 +1209,13 @@ function moduleTokens(text) {
       // declares nothing.
       const firstDeclared = ["let", "var"].includes(previous?.raw) && !previous.property;
       // An as or satisfies starts a TypeScript type, which starts with the
-      // name after it and goes on with a name after a . that follows that one.
+      // name after it, or with the name after the typeof there, and goes on
+      // with a name after a . that follows one of these names and with the
+      // type after a | or & that continues it.
       const typeOperator = !property && ["as", "satisfies"].includes(name[0]) && endsOperand(previous) && !lineBreakBefore();
-      const typeName = previous?.typeOperator === true || (previous?.type === "punct" && previous.value === "." && tokens.at(-2)?.typeName === true);
-      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), property, firstDeclared, beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]), typeOperator, typeName });
+      const typeStart = previous?.typeOperator === true || previous?.continuesType === true;
+      const typeName = (typeStart && name[0] !== "typeof") || (previous?.typeStart === true && previous.raw === "typeof") || (previous?.type === "punct" && previous.value === "." && tokens.at(-2)?.typeName === true);
+      tokens.push({ type: "name", raw: name[0], value: decodeEscapes(name[0]), property, firstDeclared, beforeExpression: !property && !of && keywordsBeforeExpression.has(name[0]), typeOperator, typeStart, typeName });
       i += name[0].length;
     } else if (/\d/.test(c) || (c === "." && /\d/.test(source[i + 1] ?? ""))) {
       const number = /\.?\d[\w.]*/y;
@@ -1129,22 +1232,25 @@ function moduleTokens(text) {
     } else {
       if (substitutions.length > 0 && c === "{") substitutions[substitutions.length - 1]++;
       if (substitutions.length > 0 && c === "}") substitutions[substitutions.length - 1]--;
-      if ("([{".includes(c)) brackets.push(c === "(" && (keywordFor(previous) || (previous?.raw === "await" && keywordFor(tokens.at(-2)))));
-      if (")]}".includes(c)) brackets.pop();
+      if ("([{".includes(c)) brackets.push(opens(c, previous));
+      const opened = ")]}".includes(c) ? brackets.pop() : undefined;
       // A > right after a = with nothing between them is the > of a =>. A <
       // that starts <= compares, and so does a < right after one of
-      // typesWithoutTypeArguments when that name is the one after the as or
-      // satisfies.
+      // typesWithoutTypeArguments when that name is the one a type starts
+      // with.
       let endsTypeArguments = false;
-      const compares = tokens.at(-2)?.typeOperator === true && typesWithoutTypeArguments.has(previous?.raw);
+      const compares = previous?.typeStart === true && typesWithoutTypeArguments.has(previous.raw);
       if (c === "<" && source[i + 1] !== "=" && !compares && (typeArguments > 0 || (previous?.typeName && !lineBreakBefore()))) typeArguments++;
       else if (c === ">" && typeArguments > 0 && !(previous.type === "punct" && previous.value === "=" && previousEnd === i)) endsTypeArguments = --typeArguments === 0;
       const nonNull = c === "!" && source[i + 1] !== "=" && endsOperand(previous) && !lineBreakBefore();
-      tokens.push({ type: "punct", value: c, nonNull, endsTypeArguments });
+      const continuesType = (c === "|" || c === "&") && !["|", "&", "="].includes(source[i + 1]) && (previous?.typeName === true || previous?.endsTypeArguments === true);
+      const statementHead = c === ")" && (opened === "for" || opened === "head");
+      tokens.push({ type: "punct", value: c, nonNull, endsTypeArguments, continuesType, statementHead, objectLiteral: c === "}" && opened === "object", block: c === "}" && opened === "block" });
       i++;
     }
     if (tokens.at(-1) !== previous) {
       tokens.at(-1).open = brackets.length + substitutions.length;
+      tokens.at(-1).typeArguments = typeArguments;
       previousEnd = i;
     }
   }
@@ -1547,16 +1653,24 @@ test("moduleTokens() reads a long run of /[ in linear time", () => {
   assert.ok(ms < 1000, `reading 40,000 characters took ${Math.round(ms)} ms`);
 });
 
-test("moduleTokens() marks a TypeScript non-null assertion and the > that ends the type arguments of a type after as or satisfies, and not a ! or > that is an operator, and reads a slash after any of them as the start of a regular expression", () => {
+test("moduleTokens() marks a TypeScript non-null assertion and the > that ends the type arguments of a type after as or satisfies, after the } of an object literal, of a later type in a union or intersection and of a typeof query too, and not a ! or > that is an operator, as a ! right after the ) of if (...) is, and reads a slash after any of them as the start of a regular expression", () => {
   // The last ! or > before the regular expression the text holds.
-  const beforeRegularExpression = (text) => {
-    const tokens = moduleTokens(text);
+  const beforeRegularExpression = (text, options) => {
+    const tokens = moduleTokens(text, options);
     const regex = tokens.findIndex((token) => token.type === "regex");
     assert.ok(regex > 0, `${JSON.stringify(text)} has a regular expression after a token`);
     return tokens.slice(0, regex).findLast((token) => token.type === "punct" && ["!", ">"].includes(token.value));
   };
   for (const text of ["a! / b / c", "f(a)[0]! / b / c", "a!! / b / c", "x as A<1>! / b / c"]) {
     assert.equal(beforeRegularExpression(text).nonNull, true, JSON.stringify(text));
+  }
+  // The } of an object literal ends an operand: one right after (, [, a
+  // comma, =, ?, ... or ${, or at the start of a text read as an expression.
+  for (const [text, options] of [["x = {}! / b / c"], ["f(a, [{}!! / b / c])"], ["{}! / b / c", { expression: true }], ["{ a: 1 }! / b / c", { expression: true }]]) {
+    assert.equal(beforeRegularExpression(text, options).nonNull, true, JSON.stringify(text));
+  }
+  for (const [text, options] of [["x = {} as A<1> / b / c"], ["{} satisfies A<1> / b / c", { expression: true }], ["x as A | B<1> / b / c"], ["x as A<1> & B<1> / b / c"], ["x as A | B | C<1> / b / c"], ["x as typeof f<1> / b / c"], ["x as typeof ns.f<1> / b / c"], ["x as typeof number<1> / b / c"], ["x as A | typeof f<1> / b / c"]]) {
+    assert.equal(beforeRegularExpression(text, options).endsTypeArguments, true, JSON.stringify(text));
   }
   // Type arguments follow a name after a . even when that name, or the one
   // before the ., is a name such as number, and a < right after such a name
@@ -1572,6 +1686,15 @@ test("moduleTokens() marks a TypeScript non-null assertion and the > that ends t
   // last two texts: the <= right after the name of a type before it compares
   // and starts no type arguments.
   for (const text of ["a\n!/b/.test(c)", "a /*\n*/ !/b/.test(c)", "x ? !/b/.test(c) : d", "a != /b/.test(c)", "a !== /b/.test(c)", "a < b > /b/.test(c)", "x as A > /b/.test(c)", "x as A<1> > /b/.test(c)", "x as A\n<1> /b/.test(c)", "x\nas A<1> /b/.test(c)", "x as number < b > /b/.test(c)", "x satisfies void < b > /b/.test(c)", "x as D <= b > /b/.test(c)", "x satisfies ns.D <= b > /b/.test(c)"]) {
+    const token = beforeRegularExpression(text);
+    assert.ok(!token.nonNull && !token.endsTypeArguments, JSON.stringify(text));
+  }
+  // A ! right after the ) of if (...), for (...), for await (...) or
+  // while (...) negates, as a statement starts there, and so does one right
+  // after the } of a block, as at the start of a module. A < right after
+  // number compares when number starts a later type in a union, and a || or
+  // && ends the type, so the > after the < is an operator in the last three.
+  for (const text of ["if (a) !/b/.test(c)", "while (a) !!/b/.test(c)", "for (;0;) !/b/.test(c)", "for await (const x of y) !/b/.test(c)", "do ; while (a) !/b/.test(c)", "if (a) {} !/b/.test(c)", "{}! /b/.test(c)", "x as A | number < b > /b/.test(c)", "x as A || b < c > /b/.test(c)", "x as A && b < c > /b/.test(c)"]) {
     const token = beforeRegularExpression(text);
     assert.ok(!token.nonNull && !token.endsTypeArguments, JSON.stringify(text));
   }
