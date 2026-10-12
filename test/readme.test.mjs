@@ -92,34 +92,38 @@ test("the audit sentence names the handler's audit actions, including the one fo
 // The keys of the options object handler.ts creates the limiter with, in
 // order. Null when there is no such object, or when a line of it is neither a
 // comment nor one key: value pair with the key quoted or not, such as a spread,
-// a shorthand property or a second pair after a comma, as the options such a
-// line gives cannot be read from it. A comma or a // inside a string, template
-// or regular expression in a value does not end the value, nor does a comma
-// inside brackets or a template substitution that the same line closes.
+// a shorthand property, a key with no value after it on its line or a second
+// pair after a comma, as the options such a line gives cannot be read from it.
+// A comma or a // inside a string, template or regular expression in a value,
+// the regular expression a value starts with among them, does not end the
+// value, nor does a comma inside brackets or a template substitution that the
+// same line closes.
 function limiterOptionKeys(handler) {
   const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
   if (!options) return null;
   const keys = [];
   for (const line of options[1].split("\n")) {
     if (/^\s*(\/\/.*|\/\*(?:[^*]|\*(?!\/))*\*\/\s*)?$/.test(line)) continue;
-    const pair = line.match(/^\s*(["']?)(\w+)\1\s*:(\s*[^\s,/].*)$/);
+    const pair = line.match(/^\s*(["']?)(\w+)\1\s*:(.*)$/);
     if (!pair) return null;
     // moduleTokens() gives no token for a comment and one token for a string,
     // a regular expression or a template without a substitution. A template
     // with one gives the tokens of each substitution too, and a comma among
     // them or inside brackets is part of the value when the line closes what
     // it is inside: a later token then has fewer brackets and substitutions
-    // open than the comma has. Any other comma token ends the value, so one
-    // before the last token is followed by more than a comment.
+    // open than the comma has. Any other comma token ends the value, so the
+    // key has no value on its line when there is no token or the first one is
+    // a comma, and such a comma before the last token is followed by more
+    // than a comment.
     const value = moduleTokens(pair[3]);
     const comma = value.findIndex((token, i) => token.type === "punct" && token.value === "," && value.slice(i + 1).every((later) => later.open >= token.open));
-    if (comma >= 0 && comma < value.length - 1) return null;
+    if (value.length === 0 || comma === 0 || (comma >= 0 && comma < value.length - 1)) return null;
     keys.push(pair[2]);
   }
   return keys;
 }
 
-test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a template substitution or brackets", () => {
+test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets", () => {
   const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
   assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
@@ -131,6 +135,11 @@ test("the limiter options reader reads a key in either quote and skips a comment
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${f(a, b)}`, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: f(a, b), // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a}, ${[b, { c, d }].length}`, // e")), ["points", "duration", "keyPrefix"]);
+  // A value that starts with a regular expression or a comment is read too.
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a/.source, // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a, [//] b/.source, // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a\\/\\/b/.source")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  blockDuration: /* seconds */ 300,")), ["points", "duration", "blockDuration"]);
   for (const line of [
     "  ...{ blockDuration: 300 },",
     "  ...extraOptions,",
@@ -147,6 +156,14 @@ test("the limiter options reader reads a key in either quote and skips a comment
     "  keyPrefix: `${f(a, b)}`, blockDuration: 300,",
     "  keyPrefix: `${a}${b}`, blockDuration: 300,",
     "  keyPrefix: `${`${a}`}`, blockDuration: 300,",
+    "  keyPrefix: /,/.source, blockDuration: 300,",
+    "  keyPrefix: /[//]/.source, blockDuration: 300,",
+    "  keyPrefix: /* a */ /a/.source, blockDuration: 300,",
+    "  blockDuration:",
+    "  blockDuration: ,",
+    "  blockDuration: // 300,",
+    "  blockDuration: /* 300 */",
+    "  blockDuration: /* 300 */,",
     // A bracket or a substitution the line does not close, and a closing
     // bracket it does not open, hide no comma.
     "  keyPrefix: f(a, [b, blockDuration: 300,",
