@@ -150,20 +150,41 @@ function limiterOptionKeys(handler) {
 // Whether the token at index i of the tokens moduleTokens() gives for a line
 // is a slash it may have misread: one read as division right after a ) that
 // closes the parentheses after if, for, for await or while, where a slash
-// starts a regular expression, or a ) whose ( the line does not hold, or
-// right after a ++ or -- read as postfix right after such a ), where the ++ or
-// -- is a prefix operator and the slash starts its operand, and a regular
-// expression right after a }, where a slash divides when the } ends an object
-// literal or a function, or right after a ! or a run of them that follows a }
-// or a token a slash divides after, where in TypeScript each ! is a non-null
-// assertion and a slash divides, as in a! / 2, or right after a ++ or -- that
-// follows such a ! or run of them, where in TypeScript the ++ or -- is a
-// postfix operator and a slash divides, as in a!++ / 2, or right after the >
-// that ends the type arguments of a TypeScript type, or a run of ! after it,
-// where a slash divides too, as in 60 as D<1> / 2.
+// starts a regular expression, or a ) whose ( the line does not hold, which
+// may close such parentheses, or right after a ++ or -- read as postfix right
+// after either ), where the ++ or -- is a prefix operator and the slash starts
+// its operand when the ) closes such parentheses, and a regular expression
+// right after a }, where a slash divides when the } ends an object literal or
+// a function, or right after a ! or a run of them that follows a } or a token
+// a slash divides after, where in TypeScript each ! is a non-null assertion
+// and a slash divides, as in a! / 2, or right after a ++ or -- that follows
+// such a ! or run of them, where in TypeScript the ++ or -- is a postfix
+// operator and a slash divides, as in a!++ / 2, or right after the > that ends
+// the type arguments of a TypeScript type, or a run of ! after it, where a
+// slash divides too, as in 60 as D<1> / 2. A ! right after the ) that closes
+// the parentheses after if, for, for await or while negates, as a statement
+// starts there, so when the line holds the ( of that ) a regular expression
+// right after the ! or a run of them is read as one and is not such a slash.
+// A ! right after the } of a block negates too, but that } is not told from
+// the } that ends an object literal or a function, so a regular expression
+// right after the ! or a run of them is such a slash.
 function slashMayBeMisread(tokens, i) {
   const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
   const keyword = (token, ...raw) => is(token, "name") && !token.property && raw.includes(token.raw);
+  // Whether the ) at index close closes the parentheses after if, for,
+  // for await or while, or null when its ( is not found. In a line whose
+  // brackets and substitutions match, every token inside the parentheses has
+  // more of them open than the ) has, so the ( is the token after the last
+  // one before the ) that does not. In any other line that token may be
+  // another one. One that is not a ( gives null, as in (a] ) / 2, where the ]
+  // closes the ( in its place, so the walk stops at the ] and the token after
+  // it is the ) itself; another ( is read as the ( of this ).
+  const afterKeyword = (close) => {
+    let before = close - 1;
+    while (before >= 0 && tokens[before].open > tokens[close].open) before--;
+    if (!is(tokens[before + 1], "punct", "(")) return null;
+    return keyword(tokens[before], "if", "for", "while") || (keyword(tokens[before], "await") && keyword(tokens[before - 1], "for"));
+  };
   if (is(tokens[i], "regex")) {
     // moduleTokens() reads a ++ or -- right after a ! as a prefix operator, so
     // a regular expression can follow it. A ++ or -- with no ! before it is a
@@ -173,21 +194,15 @@ function slashMayBeMisread(tokens, i) {
     let before = last;
     while (is(tokens[before], "punct", "!")) before--;
     if (before === last) return last === i - 1 && (is(tokens[before], "punct", "}") || tokens[before]?.endsTypeArguments === true);
+    // moduleTokens() reads a slash right after a ) as division, so a ) found
+    // here has a ! between it and the regular expression.
+    if (is(tokens[before], "punct", ")") && afterKeyword(before) === true) return false;
     return is(tokens[before], "punct", "}") || slashDivides(tokens[before]) || tokens[before]?.endsTypeArguments === true;
   }
   const close = tokens[i - 1]?.postfix ? i - 2 : i - 1;
   if (!is(tokens[i], "punct", "/") || !is(tokens[close], "punct", ")")) return false;
-  // In a line whose brackets and substitutions match, every token inside the
-  // parentheses has more of them open than the ) has, so the ( is the token
-  // after the last one before the ) that does not. In any other line that
-  // token may be another one. One that is not a ( gives true, as in
-  // (a] ) / 2, where the ] closes the ( in its place, so the walk stops at
-  // the ] and the token after it is the ) itself; another ( is read as the
-  // ( of this ).
-  let before = close - 1;
-  while (before >= 0 && tokens[before].open > tokens[close].open) before--;
-  if (!is(tokens[before + 1], "punct", "(")) return true;
-  return keyword(tokens[before], "if", "for", "while") || (keyword(tokens[before], "await") && keyword(tokens[before - 1], "for"));
+  // A ) whose ( is not found may close the parentheses after one of these.
+  return afterKeyword(close) !== false;
 }
 
 test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line, a value that a block comment, string, template or an operator at its end continues on the next line, a value with a closing bracket it does not open nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets, nor a value holding a slash that moduleTokens() may misread", () => {
@@ -255,6 +270,15 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: a && !--/x/.lastIndex ? 'a' : 'b',",
     "  keyPrefix: ++/x/.lastIndex ? 'a' : 'b',",
     "  keyPrefix: (() => { if (a) { b(); } ++/x/.lastIndex; return 'k'; })(),",
+    // So does a ! or a run of them right after the ) of if (...), for (...),
+    // for await (...) or while (...), the while that ends a do statement
+    // among them, as a statement starts there and no operand comes before it.
+    "  keyPrefix: (() => { if (a) !/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { if (a) !!/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { while (a) !/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { for (;0;) !/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (async () => { for await (const x of []) !/x/.test(s); return 'k'; })(),",
+    "  keyPrefix: (() => { do ; while (0) !/x/.test(s); return 'k'; })(),",
   ]) {
     assert.deepEqual(limiterOptionKeys(add(line)), ["points", "duration", "keyPrefix"], `${line.trim()} is read as one key: value pair`);
   }
@@ -335,11 +359,26 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  blockDuration: 60 as D<() => 1> / 2, keyPrefix: 'rl' + 4 / 2,",
     "  blockDuration: a! as D<1> / 2, keyPrefix: 'rl' + 4 / 2,",
     "  blockDuration: 60 as D<1>! / 2, keyPrefix: 'rl' + 4 / 2,",
+    // A ! right after the ) of a call to a property named if or while is a
+    // non-null assertion too, as that ) ends an operand.
+    "  blockDuration: a.if(b)! / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: a.while(b)!! / 2, keyPrefix: 'rl' + 4 / 2,",
+    // So may be a ! right after a ) whose ( is not found, as that ) may end an
+    // operand. Here the ) closes the { in its place, so no closing bracket
+    // goes unopened.
+    "  keyPrefix: { a )! / 2, blockDuration: 300 / 1,",
+    // A ! that negates right after the ) of if (...) hides no comma: the
+    // regular expression after it is read as one, so the second pair is found.
+    "  keyPrefix: (() => { if (a) !/[(]/.test(s); return 'k'; })(), blockDuration: (() => { if (a) !/[)]/.test(s); return 300; })(),",
     // The same holds when the line sets one option.
     "  keyPrefix: (() => { if (1) /x/; return 'k'; })(), // c",
     "  keyPrefix: (() => { if (1) ++/x/.lastIndex; return 'k'; })(), // c",
     "  blockDuration: a!++ / 2 + 4 / 2, // c",
     "  keyPrefix: a) / 2,",
+    // A ! right after the } of a block negates, as one right after the ) of
+    // if (...) does, but that } is not told from the } that ends an object
+    // literal or a function, so the value is not read.
+    "  keyPrefix: (() => { if (a) { } !/x/.test(s); return 'k'; })(),",
     // Here the ] or } closes the ( in its place and the ) closes nothing, so
     // no ( is found for the ) before the slash and the slash may be misread.
     "  blockDuration: (a] ) / 2, // c",
@@ -349,6 +388,10 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     // for the ( of the ) gives null.
     "  keyPrefix: { a ) / 2,",
     "  keyPrefix: [ a ) / 2,",
+    // The same holds with a ++ or -- between that ) and the slash, which is
+    // postfix unless the ) closes the parentheses after if, for, for await or
+    // while.
+    "  keyPrefix: { a )++ / 2,",
     // A closing bracket the line does not open ends the options object
     // before the }); line, and the limiter gets the object after it.
     "  duration: 60 } && { blockDuration: 300, // per minute",
