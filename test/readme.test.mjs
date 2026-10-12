@@ -146,14 +146,17 @@ function limiterOptionKeys(handler) {
 // Whether the token at index i of the tokens moduleTokens() gives for a line
 // is a slash it may have misread: one read as division right after a ) that
 // closes the parentheses after if, for, for await or while, where a slash
-// starts a regular expression, or a ) whose ( the line does not hold, and a
-// regular expression right after a }, where a slash divides when the } ends
-// an object literal or a function.
+// starts a regular expression, or a ) whose ( the line does not hold, or
+// right after a ++ or -- read as postfix right after such a ), where the ++ or
+// -- is a prefix operator and the slash starts its operand, and a regular
+// expression right after a }, where a slash divides when the } ends an object
+// literal or a function.
 function slashMayBeMisread(tokens, i) {
   const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
   const keyword = (token, ...raw) => is(token, "name") && !token.property && raw.includes(token.raw);
   if (is(tokens[i], "regex")) return is(tokens[i - 1], "punct", "}");
-  if (!is(tokens[i], "punct", "/") || !is(tokens[i - 1], "punct", ")")) return false;
+  const close = tokens[i - 1]?.postfix ? i - 2 : i - 1;
+  if (!is(tokens[i], "punct", "/") || !is(tokens[close], "punct", ")")) return false;
   // In a line whose brackets and substitutions match, every token inside the
   // parentheses has more of them open than the ) has, so the ( is the token
   // after the last one before the ) that does not. In any other line that
@@ -161,7 +164,6 @@ function slashMayBeMisread(tokens, i) {
   // (a] ) / 2, where the ] closes the ( in its place, so the walk stops at
   // the ] and the token after it is the ) itself; another ( is read as the
   // ( of this ).
-  const close = i - 1;
   let before = close - 1;
   while (before >= 0 && tokens[before].open > tokens[close].open) before--;
   if (!is(tokens[before + 1], "punct", "(")) return true;
@@ -203,10 +205,7 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a, b}`, // c")), ["points", "duration", "keyPrefix"]);
   // A value with a name, a string, a template, a number, an opening bracket
   // or a minus sign right after the ) of if (...), for (...), for await (...)
-  // or while (...) is read. A ++ or -- there on the same line is read as a
-  // postfix operator, and so a slash right after it as division, though that
-  // slash starts a regular expression. slashMayBeMisread() does not find that
-  // slash, so a comma that ends the value can be hidden.
+  // or while (...) is read.
   for (const line of [
     "  keyPrefix: (() => { if (a) return 'x'; return 'k'; })(),",
     "  keyPrefix: (() => { for (const x of a) return x; return 'k'; })(),",
@@ -219,6 +218,11 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: (() => { while (a) (b)(); return 'k'; })(),",
     "  keyPrefix: (() => { for (const x of a) [x].pop(); return 'k'; })(),",
     "  keyPrefix: (async () => { for await (const x of a) -x; return 'k'; })(),",
+    // So is a postfix ++ or -- and a slash right after another ). Read as a
+    // prefix operator, the ++ or -- would make that slash start a regular
+    // expression that ends after c, and the ) after 2 would close no bracket.
+    "  keyPrefix: (() => { if (a) (b)++ / (c / 2); return 'k'; })(), // d",
+    "  keyPrefix: (() => { while (a) (b)-- / (c / 2); return 'k'; })(), // d",
   ]) {
     assert.deepEqual(limiterOptionKeys(add(line)), ["points", "duration", "keyPrefix"], `${line.trim()} is read as one key: value pair`);
   }
@@ -266,8 +270,17 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: (() => { for (;0;) /[(]/; })(), blockDuration: (() => { for (;0;) /[)]/; })(),",
     "  keyPrefix: (async () => { for await (const x of []) /[(]/; })(), blockDuration: (async () => { for await (const x of []) /[)]/; })(),",
     "  keyPrefix: {} / 2, blockDuration: 300 / 1,",
+    // It reads a ++ or -- right after such a ) on the same line as a postfix
+    // operator, and so the regular expression after it as division too.
+    "  keyPrefix: (() => { if (1) ++/[(]/.lastIndex; return 'k'; })(), blockDuration: (() => { if (1) ++/[)]/.lastIndex; return 300; })(),",
+    "  keyPrefix: (() => { if (1) --/[(]/.lastIndex; return 'k'; })(), blockDuration: (() => { if (1) --/[)]/.lastIndex; return 300; })(),",
+    "  keyPrefix: (() => { while (0) ++/[(]/.lastIndex; })(), blockDuration: (() => { while (0) ++/[)]/.lastIndex; })(),",
+    "  keyPrefix: (() => { for (;0;) --/[(]/.lastIndex; })(), blockDuration: (() => { for (;0;) --/[)]/.lastIndex; })(),",
+    "  keyPrefix: (async () => { for await (const x of []) ++/[(]/.lastIndex; })(), blockDuration: (async () => { for await (const x of []) ++/[)]/.lastIndex; })(),",
+    "  keyPrefix: (() => { do ; while (0) --/[(]/.lastIndex; })(), blockDuration: (() => { do ; while (0) --/[)]/.lastIndex; })(),",
     // The same holds when the line sets one option.
     "  keyPrefix: (() => { if (1) /x/; return 'k'; })(), // c",
+    "  keyPrefix: (() => { if (1) ++/x/.lastIndex; return 'k'; })(), // c",
     "  keyPrefix: a) / 2,",
     // Here the ] or } closes the ( in its place and the ) closes nothing, so
     // no ( is found for the ) before the slash and the slash may be misread.
