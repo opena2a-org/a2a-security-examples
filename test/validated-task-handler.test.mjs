@@ -143,10 +143,11 @@ function spawnExample(env, cwd = example, args = [tsx, "handler.ts"]) {
 // Temporary directories makeTempDir has made and removeTempDir has not removed.
 const tempDirs = new Set();
 
-// Make a temporary directory whose name starts with prefix. The caller removes
-// it with removeTempDir.
+// Make a temporary directory whose name starts with prefix, in the directory
+// A2A_TEST_TMPDIR names when it is set and in the system's temporary directory
+// otherwise. The caller removes it with removeTempDir.
 function makeTempDir(prefix) {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = mkdtempSync(join(process.env.A2A_TEST_TMPDIR || tmpdir(), prefix));
   tempDirs.add(dir);
   return dir;
 }
@@ -1261,9 +1262,12 @@ test(
     // shell runs a job, and once the run has started the main server and the
     // stalled-upload server, send SIGINT to that group, as Ctrl-C does. The run
     // makes its temporary directories in a directory of its own, so the only
-    // preload directories there are its own.
+    // preload directories there are its own. Its TMPDIR stays as it is: tsx
+    // binds a socket under TMPDIR, and where a TMPDIR one directory deeper
+    // makes that socket's path longer than a Unix socket path may be, tsx
+    // starts no server.
     const runTmp = makeTempDir("a2a-tmp-");
-    const env = { ...process.env, TMPDIR: runTmp };
+    const env = { ...process.env, A2A_TEST_TMPDIR: runTmp };
     // Left set, the nested run reports to this run instead of running on its own.
     delete env.NODE_TEST_CONTEXT;
     const run = spawn(
@@ -1291,6 +1295,13 @@ test(
       // Likewise, a check that cannot see the preload directory while the
       // stalled-upload server runs would report it removed either way.
       assert.equal(preloadDirs().length, 1, "the run has made the preload directory before it is interrupted");
+      // tsx binds its socket under the run's TMPDIR, which is this run's, so
+      // the run makes nothing in its own directory but the preload directory.
+      assert.deepEqual(
+        readdirSync(runTmp).filter((name) => !name.startsWith("a2a-preload-")),
+        [],
+        "the run makes nothing in its own directory but the preload directory"
+      );
       process.kill(-run.pid, "SIGINT");
       await within(exited, 10000, "the interrupted run did not exit within 10 seconds");
       for (let i = 0; i < 100 && running().length > 0; i++) {
