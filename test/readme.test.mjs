@@ -193,10 +193,12 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   // part of the value whether or not a comma follows the template.
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a, b}` // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a, b}`, // c")), ["points", "duration", "keyPrefix"]);
-  // Of the tokens right after the ) of if (...), for (...), for await (...)
-  // or while (...), only a slash may be misread, so a value with another
-  // token there is read: a name, a string, a template, a number, an opening
-  // bracket or a punctuator other than a slash.
+  // A value with a name, a string, a template, a number, an opening bracket
+  // or a minus sign right after the ) of if (...), for (...), for await (...)
+  // or while (...) is read. A ++ or -- there on the same line is read as a
+  // postfix operator, and so a slash right after it as division, though that
+  // slash starts a regular expression. slashMayBeMisread() does not find that
+  // slash, so a comma that ends the value can be hidden.
   for (const line of [
     "  keyPrefix: (() => { if (a) return 'x'; return 'k'; })(),",
     "  keyPrefix: (() => { for (const x of a) return x; return 'k'; })(),",
