@@ -261,10 +261,10 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  duration: 60 }), blockDuration: 300,",
     "  duration: 60, blockDuration: 300 }),",
     // moduleTokens() reads a regular expression right after the ) of
-    // if (...), for (...) or while (...) as division, as it does right after
-    // a ) whose ( the line does not hold, and a slash that divides right
-    // after a } as a regular expression, so a bracket or comma it reads
-    // there may hide a comma.
+    // if (...), for (...), for await (...) or while (...) as division, as it
+    // does right after a ) whose ( the line does not hold, and a slash that
+    // divides right after a } as a regular expression, so a bracket or comma
+    // it reads there may hide a comma.
     "  keyPrefix: (() => { if (1) /[(]/.test(''); return 'k'; })(), blockDuration: (() => { if (1) /[)]/.test(''); return 300; })(),",
     "  keyPrefix: (() => { while (0) /[(]/; })(), blockDuration: (() => { while (0) /[)]/; })(),",
     "  keyPrefix: (() => { for (;0;) /[(]/; })(), blockDuration: (() => { for (;0;) /[)]/; })(),",
@@ -810,12 +810,14 @@ function slashDivides(token) {
 // after ) or ], after a number, string, template or regular expression, and
 // after a ++ or -- that follows one of these on the same line (a line break
 // before a ++ or --, in a comment or not, makes it a prefix operator). So a
-// slash right after the ) of if (...), for (...) or while (...) is read as
-// division, though it starts a regular expression there. Any other slash
-// starts a regular expression if one closes on the same line, and is read as
-// a punctuator if not. The array has unclosed set to true when the text ends
-// inside a block comment, a string or the text of a template, as a line of a
-// module does when one of these continues on the next line.
+// slash right after the ) of if (...), for (...), for await (...) or
+// while (...), or right after a ++ or -- that follows that ) on the same
+// line, is read as division, though it starts a regular expression there.
+// Any other slash starts a regular expression if one closes on the same
+// line, and is read as a punctuator if not. The array has unclosed set to
+// true when the text ends inside a block comment, a string or the text of a
+// template, as a line of a module does when one of these continues on the
+// next line.
 function moduleTokens(text) {
   const source = text.replace(/^\u{FEFF}/u, "");
   const tokens = [];
@@ -927,8 +929,10 @@ function moduleTokens(text) {
 // it does not show which names the file uses. Import text inside a comment,
 // string or template is not a declaration, nor is import text inside a slash
 // pair that moduleTokens() reads as a regular expression. moduleTokens() reads
-// a slash right after the ) of if (...), for (...) or while (...) as division,
-// so import text inside a regular expression there is read as a declaration.
+// a slash right after the ) of if (...), for (...), for await (...) or
+// while (...), or right after a ++ or -- that follows that ) on the same line,
+// as division, so import text inside a regular expression there is read as a
+// declaration.
 // The reader does not handle import(), require or an import with a phase
 // keyword such as import defer.
 function namesImportedFromNodeTest(text) {
@@ -1085,7 +1089,7 @@ test("the node:test import reader finds a declaration after a regular expression
   }
 });
 
-test("the node:test import reader reads a slash after export default as a regular expression, and a slash after a postfix ++ or --, a property named default or the ) of if (...), for (...) or while (...) as division", () => {
+test("the node:test import reader reads a slash after export default as a regular expression, and a slash after a postfix ++ or --, a property named default, the ) of if (...), for (...), for await (...) or while (...), or a ++ or -- that follows that ) on the same line as division", () => {
   assert.deepEqual(namesImportedFromNodeTest('export default /import { describe } from "node:test"/;\n'), []);
   assert.deepEqual(namesImportedFromNodeTest('a++ / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('a[0]-- / 2; import { describe } from "node:test"; x / 3;\n'), ["describe"]);
@@ -1096,6 +1100,15 @@ test("the node:test import reader reads a slash after export default as a regula
   assert.deepEqual(namesImportedFromNodeTest('if (x) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('for (;;) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
   assert.deepEqual(namesImportedFromNodeTest('while (x) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('for await (const x of a) /import { describe } from "node:test"/.test(s);\n'), ["describe"]);
+  // A ++ or -- right after such a ) on the same line is a prefix operator,
+  // but the reader reads it as a postfix one and so the slash after it as
+  // division too. After a line break it reads it as a prefix operator.
+  assert.deepEqual(namesImportedFromNodeTest('if (x) ++/import { describe } from "node:test"/.lastIndex;\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('for (;;) --/import { describe } from "node:test"/.lastIndex;\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('for await (const x of a) ++/import { describe } from "node:test"/.lastIndex;\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('while (x) /* note */ --/import { describe } from "node:test"/.lastIndex;\n'), ["describe"]);
+  assert.deepEqual(namesImportedFromNodeTest('if (x)\n++/import { describe } from "node:test"/.lastIndex;\n'), []);
 });
 
 test("the node:test import reader reads a slash after a private name such as #default as division, a slash after a keyword that follows a spread as a regular expression, and a ++ or -- after a line break as a prefix operator", () => {
