@@ -150,11 +150,17 @@ function limiterOptionKeys(handler) {
 // right after a ++ or -- read as postfix right after such a ), where the ++ or
 // -- is a prefix operator and the slash starts its operand, and a regular
 // expression right after a }, where a slash divides when the } ends an object
-// literal or a function.
+// literal or a function, or right after a ! or a run of them that follows a }
+// or a token a slash divides after, where in TypeScript each ! is a non-null
+// assertion and a slash divides, as in a! / 2.
 function slashMayBeMisread(tokens, i) {
   const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
   const keyword = (token, ...raw) => is(token, "name") && !token.property && raw.includes(token.raw);
-  if (is(tokens[i], "regex")) return is(tokens[i - 1], "punct", "}");
+  if (is(tokens[i], "regex")) {
+    let before = i - 1;
+    while (is(tokens[before], "punct", "!")) before--;
+    return is(tokens[before], "punct", "}") || (before < i - 1 && slashDivides(tokens[before]));
+  }
   const close = tokens[i - 1]?.postfix ? i - 2 : i - 1;
   if (!is(tokens[i], "punct", "/") || !is(tokens[close], "punct", ")")) return false;
   // In a line whose brackets and substitutions match, every token inside the
@@ -223,6 +229,11 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     // expression that ends after c, and the ) after 2 would close no bracket.
     "  keyPrefix: (() => { if (a) (b)++ / (c / 2); return 'k'; })(), // d",
     "  keyPrefix: (() => { while (a) (b)-- / (c / 2); return 'k'; })(), // d",
+    // A ! that follows no operand negates, and a slash right after it starts
+    // a regular expression.
+    "  keyPrefix: !/x/.test(s) ? 'a' : 'b',",
+    "  keyPrefix: a && !!/x/.test(s) ? 'a' : 'b',",
+    "  keyPrefix: typeof !/x/ === 'boolean' ? 'a' : 'b',",
   ]) {
     assert.deepEqual(limiterOptionKeys(add(line)), ["points", "duration", "keyPrefix"], `${line.trim()} is read as one key: value pair`);
   }
@@ -278,6 +289,15 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: (() => { for (;0;) --/[(]/.lastIndex; })(), blockDuration: (() => { for (;0;) --/[)]/.lastIndex; })(),",
     "  keyPrefix: (async () => { for await (const x of []) ++/[(]/.lastIndex; })(), blockDuration: (async () => { for await (const x of []) ++/[)]/.lastIndex; })(),",
     "  keyPrefix: (() => { do ; while (0) --/[(]/.lastIndex; })(), blockDuration: (() => { do ; while (0) --/[)]/.lastIndex; })(),",
+    // In TypeScript a ! right after an operand, or a run of them, is a
+    // non-null assertion and a slash after it divides, but moduleTokens()
+    // reads that slash as the start of a regular expression.
+    "  blockDuration: a! / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: a.b! / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: f()! / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: a[0]! / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: a!! / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  keyPrefix: {}! / 2, blockDuration: 300 / 1,",
     // The same holds when the line sets one option.
     "  keyPrefix: (() => { if (1) /x/; return 'k'; })(), // c",
     "  keyPrefix: (() => { if (1) ++/x/.lastIndex; return 'k'; })(), // c",
@@ -814,7 +834,9 @@ function slashDivides(token) {
 // while (...), or right after a ++ or -- that follows that ) on the same
 // line, is read as division, though it starts a regular expression there.
 // Any other slash starts a regular expression if one closes on the same
-// line, and is read as a punctuator if not. The array has unclosed set to
+// line, and is read as a punctuator if not, though in TypeScript one right
+// after the ! of a non-null assertion, as in a! / 2, divides. The array has
+// unclosed set to
 // true when the text ends inside a block comment, a string or the text of a
 // template, as a line of a module does when one of these continues on the
 // next line.
