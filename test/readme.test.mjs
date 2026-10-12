@@ -92,16 +92,18 @@ test("the audit sentence names the handler's audit actions, including the one fo
 // The keys of the options object handler.ts creates the limiter with, in
 // order. Null when there is no such object, or when a line of it is neither a
 // comment nor one key: value pair with the key quoted or not, such as a spread,
-// a shorthand property, a key with no value after it on its line or a second
-// pair after a comma, as the options such a line gives cannot be read from it.
-// A comma or a // inside a string, template or regular expression in a value,
-// the regular expression a value starts with among them, does not end the
-// value, nor does a comma inside brackets or a template substitution that the
-// same line closes. Null too when a value holds a slash that
-// slashMayBeMisread() finds moduleTokens() may misread, even if the line sets
-// one option: a bracket or comma after that slash may be read outside a
-// regular expression when it is inside one, or inside one when it is outside,
-// so a comma that ends the value can be hidden.
+// a shorthand property, a key with no value after it on its line, a value that
+// a block comment, string or template continues on the next line, a value with
+// a closing bracket that the line does not open, as when the options object
+// closes before the }); line, or a second pair after a comma, as the options
+// such a line gives cannot be read from it. A comma or a // inside a string,
+// template or regular expression in a value, the regular expression a value
+// starts with among them, does not end the value, nor does a comma inside
+// brackets or a template substitution that the same line closes. Null too when
+// a value holds a slash that slashMayBeMisread() finds moduleTokens() may
+// misread, even if the line sets one option: a bracket or comma after that
+// slash may be read outside a regular expression when it is inside one, or
+// inside one when it is outside, so a comma that ends the value can be hidden.
 function limiterOptionKeys(handler) {
   const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
   if (!options) return null;
@@ -110,19 +112,24 @@ function limiterOptionKeys(handler) {
     if (/^\s*(\/\/.*|\/\*(?:[^*]|\*(?!\/))*\*\/\s*)?$/.test(line)) continue;
     const pair = line.match(/^\s*(["']?)(\w+)\1\s*:(.*)$/);
     if (!pair) return null;
-    // moduleTokens() gives no token for a comment and one token for a string,
-    // a regular expression or a template without a substitution. A template
-    // with one gives the tokens of each substitution too, and a comma among
-    // them or inside brackets is part of the value when the line closes what
-    // it is inside: a later token then has fewer brackets and substitutions
-    // open than the comma has. Any other comma token ends the value, so the
-    // key has no value on its line when there is no token or the first one is
-    // a comma, and such a comma before the last token is followed by more
-    // than a comment.
+    // moduleTokens() marks a value that a block comment, string or template
+    // continues on the next line as unclosed, and that next line is not a key:
+    // value pair, though it may read as one. Otherwise moduleTokens() gives no
+    // token for a comment and one token for a string, a regular expression or
+    // a template without a substitution. A template with one gives the tokens
+    // of each substitution too, and a comma among them or inside brackets is
+    // part of the value when the line closes what it is inside: a later token
+    // then has fewer brackets and substitutions open than the comma has. Any
+    // other comma token ends the value, so the key has no value on its line
+    // when there is no token or the first one is a comma, and such a comma
+    // before the last token is followed by more than a comment. A closing
+    // bracket that no earlier token on the line opens has as many brackets and
+    // substitutions open as the token before it, or none as the first token.
     const value = moduleTokens(pair[3]);
     if (value.some((token, i) => slashMayBeMisread(value, i))) return null;
+    const unopened = value.some((token, i) => token.type === "punct" && [")", "]", "}"].includes(token.value) && token.open === (value[i - 1]?.open ?? 0));
     const comma = value.findIndex((token, i) => token.type === "punct" && token.value === "," && value.slice(i + 1).every((later) => later.open >= token.open));
-    if (value.length === 0 || comma === 0 || (comma >= 0 && comma < value.length - 1)) return null;
+    if (value.unclosed || unopened || value.length === 0 || comma === 0 || (comma >= 0 && comma < value.length - 1)) return null;
     keys.push(pair[2]);
   }
   return keys;
@@ -153,7 +160,7 @@ function slashMayBeMisread(tokens, i) {
   return keyword(tokens[before], "if", "for", "while") || (keyword(tokens[before], "await") && keyword(tokens[before - 1], "for"));
 }
 
-test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets, nor a value holding a slash that moduleTokens() may misread", () => {
+test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line, a value that a block comment, string or template continues on the next line, a value with a closing bracket it does not open nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets, nor a value holding a slash that moduleTokens() may misread", () => {
   const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
   assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
@@ -170,10 +177,17 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: x(/a, b/), // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  blockDuration: (a + b) / 2, // c")), ["points", "duration", "blockDuration"]);
   assert.deepEqual(limiterOptionKeys(add("  blockDuration: f(a, b) / a.if(b) / [c][0] / 2, // d")), ["points", "duration", "blockDuration"]);
+  // The comma here is inside no bracket, so only reading the regular
+  // expression keeps it in the value.
+  assert.deepEqual(limiterOptionKeys(add('  keyPrefix: "" + /a, b/.source, // c')), ["points", "duration", "keyPrefix"]);
   // A value that starts with a regular expression or a comment is read too.
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a/.source, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a, [//] b/.source, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a\\/\\/b/.source")), ["points", "duration", "keyPrefix"]);
+  // Only the character class keeps the first of these open past its first
+  // slash, and only the escape the second.
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /[//], b/.source, // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a\\/, b/.source, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  blockDuration: /* seconds */ 300,")), ["points", "duration", "blockDuration"]);
   // A comma directly inside a substitution, with no bracket around it, is
   // part of the value whether or not a comma follows the template.
@@ -237,8 +251,21 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     // no ( is found for the ) before the slash and the slash may be misread.
     "  blockDuration: (a] ) / 2, // c",
     "  blockDuration: (a} ) / 2, // c",
+    // A closing bracket the line does not open ends the options object
+    // before the }); line, and the limiter gets the object after it.
+    "  duration: 60 } && { blockDuration: 300, // per minute",
+    "  duration: /* s */ 60 } && { blockDuration: 300, // per minute",
+    // A value that a block comment, string or template continues on the next
+    // line. That line reads as a key: value pair in the first four of these,
+    // and as a comment in the last.
+    ["  points: 30, /* requests", "  duration: 60 */ // per minute"],
+    ["  points: x && `", "  duration: 60` && 30, // requests"],
+    ["  points: /x/.source && `", "  duration: 60` && 30, // requests"],
+    ['  points: "a\\', '  duration: 60" && 30, // requests'],
+    ["  keyPrefix: `a", "  // b`,"],
   ]) {
-    assert.equal(limiterOptionKeys(add(line)), null, `${line.trim()} is read as neither a comment nor one key: value pair`);
+    const added = [line].flat();
+    assert.equal(limiterOptionKeys(add(...added)), null, `${added.map((l) => l.trim()).join(" then ")} is read as neither a comment nor one key: value pair`);
   }
   assert.equal(limiterOptionKeys(add().replace("new RateLimiterMemory({", "new RateLimiterMemory(extraOptions, {")), null, "a limiter created without an options object on its own lines has no options read");
 });
@@ -679,19 +706,25 @@ function lineEnd(source, start) {
   return terminator.exec(source)?.index ?? source.length;
 }
 
-// The index after the slash that closes the regular expression literal
-// starting at start, or -1 if the line ends first.
-function regularExpressionEnd(source, start) {
-  let inClass = false;
-  for (let k = start + 1; k < source.length; k++) {
+// A function that gives, for an index start of source, the index after the
+// slash that closes the regular expression literal starting at start, or -1 if
+// the line ends first. A backslash escapes the character after it, and a slash
+// inside a character class does not close the literal. Where a literal that has
+// read up to index k closes depends only on k and on whether a class is open
+// there, so both answers for every k are found in one pass from the end of
+// source, and a line of slashes that never close, as in a run of /[, takes
+// linear time.
+function regularExpressionEnds(source) {
+  const outside = new Int32Array(source.length + 2).fill(-1);
+  const inside = new Int32Array(source.length + 2).fill(-1);
+  for (let k = source.length - 1; k >= 0; k--) {
     const c = source[k];
-    if ("\n\r\u{2028}\u{2029}".includes(c)) return -1;
-    if (c === "\\") k++;
-    else if (c === "[") inClass = true;
-    else if (c === "]") inClass = false;
-    else if (c === "/" && !inClass) return k + 1;
+    if ("\n\r\u{2028}\u{2029}".includes(c)) continue;
+    const next = c === "\\" ? k + 2 : k + 1;
+    outside[k] = c === "/" ? k + 1 : c === "[" ? inside[next] : outside[next];
+    inside[k] = c === "]" ? outside[next] : inside[next];
   }
-  return -1;
+  return (start) => outside[start + 1];
 }
 
 // The tokens of a module, read in one pass: names and strings with their escape
@@ -717,10 +750,14 @@ function regularExpressionEnd(source, start) {
 // slash right after the ) of if (...), for (...) or while (...) is read as
 // division, though it starts a regular expression there. Any other slash
 // starts a regular expression if one closes on the same line, and is read as
-// a punctuator if not.
+// a punctuator if not. The array has unclosed set to true when the text ends
+// inside a block comment, a string or the text of a template, as a line of a
+// module does when one of these continues on the next line.
 function moduleTokens(text) {
   const source = text.replace(/^\u{FEFF}/u, "");
   const tokens = [];
+  const regularExpressionEnd = regularExpressionEnds(source);
+  let unclosed = false;
   const slashDivides = (token) =>
     token !== undefined &&
     (token.type === "name" ? !token.beforeExpression : token.type !== "punct" || token.value === ")" || token.value === "]" || token.postfix);
@@ -744,6 +781,7 @@ function moduleTokens(text) {
         return k + 2;
       }
     }
+    unclosed = true;
     return source.length;
   };
   let i = source.startsWith("#!") ? lineEnd(source, 0) : 0;
@@ -752,13 +790,14 @@ function moduleTokens(text) {
   while (i < source.length) {
     const c = source[i];
     const previous = tokens.at(-1);
-    const regularExpression = c === "/" && !slashDivides(previous) ? regularExpressionEnd(source, i) : -1;
+    const regularExpression = c === "/" && !slashDivides(previous) ? regularExpressionEnd(i) : -1;
     identifier.lastIndex = i;
     const name = identifier.exec(source);
     if (/\s/.test(c)) i++;
     else if (source.startsWith("//", i)) i = lineEnd(source, i);
     else if (source.startsWith("/*", i)) {
       const end = source.indexOf("*/", i + 2);
+      if (end < 0) unclosed = true;
       i = end < 0 ? source.length : end + 2;
     } else if (c === "`") i = templateText(i + 1);
     else if (c === "}" && substitutions.at(-1) === 0) {
@@ -769,6 +808,7 @@ function moduleTokens(text) {
       while (k < source.length && source[k] !== c && source[k] !== "\n" && source[k] !== "\r") {
         k += source[k] !== "\\" ? 1 : source.startsWith("\r\n", k + 1) ? 3 : 2;
       }
+      if (k >= source.length) unclosed = true;
       tokens.push({ type: "string", value: decodeEscapes(source.slice(i + 1, k)) });
       i = k + 1;
     } else if (regularExpression >= 0) {
@@ -816,6 +856,7 @@ function moduleTokens(text) {
       previousEnd = i;
     }
   }
+  tokens.unclosed = unclosed;
   return tokens;
 }
 
@@ -1111,6 +1152,17 @@ test("the node:test import reader reads a long run of spaces in linear time", ()
   assert.deepEqual(namesImportedFromNodeTest("import a" + " ".repeat(4000)), []);
   const ms = performance.now() - start;
   assert.ok(ms < 1000, `reading 4,000 spaces took ${Math.round(ms)} ms`);
+});
+
+test("moduleTokens() reads a long run of /[ in linear time", () => {
+  // Each slash of the run starts a regular expression whose character class
+  // never closes. Scanning from each one to the end of the line took more than
+  // three seconds on 40,000 characters and grew with the square of the length.
+  const start = performance.now();
+  const tokens = moduleTokens("/[".repeat(20000));
+  const ms = performance.now() - start;
+  assert.equal(tokens.length, 40000, "each character is one punctuator");
+  assert.ok(ms < 1000, `reading 40,000 characters took ${Math.round(ms)} ms`);
 });
 
 test("the lowest release that can run the tests comes from the files it is given, and a name the release table does not list fails", () => {
