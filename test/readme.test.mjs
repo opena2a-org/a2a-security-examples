@@ -7,7 +7,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const readme = readFileSync(join(root, "README.md"), "utf8");
+
+// The text of a file in the repository with "\n" line endings, so the checks
+// below hold on a checkout with "\r\n" ones, as core.autocrlf=true gives.
+function readText(path) {
+  return readFileSync(join(root, path), "utf8").replace(/\r\n/g, "\n");
+}
+
+const readme = readText("README.md");
 const lines = readme.split("\n");
 
 // Fenced code blocks in document order, with their info string.
@@ -63,7 +70,7 @@ test("every relative link points to a file in the repository", () => {
 });
 
 test("the audit sentence names the handler's audit actions, including the one for a request that fails authentication", () => {
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const actions = [...handler.matchAll(/action: "(\w+)"/g)].map((m) => m[1]);
   assert.ok(actions.length > 0, "handler.ts writes audit entries with an action");
   assert.ok(actions.includes("auth_failed"), "handler.ts writes an audit entry for a request that fails authentication");
@@ -81,11 +88,16 @@ test("step 1 is the rate limit, which every request that reaches it counts towar
   // test/validated-task-handler.test.mjs sends requests that fail
   // authentication until the next request gets 429, and requests answered 431
   // that the limiter does not count.
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   assert.match(handler, /app\.post\("\/", rateLimit, authenticate, /, "handler.ts runs the rate limiter before authentication");
   const points = handler.match(/points: (\d+), \/\/ requests/);
   const duration = handler.match(/duration: 60, \/\/ per minute/);
   assert.ok(points && duration, "handler.ts allows a number of requests per minute");
+  // Another option, such as a blockDuration, would change when a client's
+  // count starts again from what step 1 says.
+  const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
+  assert.ok(options, "handler.ts creates the limiter with an options object");
+  assert.deepEqual([...options[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]), ["points", "duration"], "handler.ts gives the limiter no option but points and duration");
   const step = lines.find((l) => l.startsWith("1. "));
   assert.ok(step, "README lists a step 1");
   assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: 429. Every request that reaches the limiter counts, including one that then fails authentication; a request answered 431 for too many header lines (see step 2) is not counted.`), "README lists the rate limit as step 1 and says a request that fails authentication counts and one answered 431 does not");
@@ -93,18 +105,36 @@ test("step 1 is the rate limit, which every request that reaches it counts towar
   assert.ok(step.includes("The limiter counts a client's requests for 60 seconds from its first one and starts again with its first request after those 60 seconds have ended"), "step 1 says the 60 seconds start with a client's first request and the count starts again after they have ended");
 });
 
-test("step 1 says that clients behind a reverse proxy share one count unless the deployment sets trust proxy", () => {
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+test("step 1 says that clients behind a reverse proxy share one count unless the deployment sets trust proxy to the proxies' addresses, and never to true", () => {
+  // test/validated-task-handler.test.mjs sends requests with a different
+  // X-Forwarded-For value each until the next request gets 429, which fails
+  // when handler.ts sets trust proxy.
+  const handler = readText("examples/validated-task-handler/handler.ts");
   assert.match(handler, /const clientIp = req\.ip \|\| "unknown";\n  try \{\n    await rateLimiter\.consume\(clientIp\);/, "handler.ts keys the limiter on req.ip");
   const step = lines.find((l) => l.startsWith("1. "));
   assert.ok(step.includes("It keys on the client IP Express gives as `req.ip`, which behind a reverse proxy is the proxy's address, so every client behind the proxy shares one count"), "step 1 says clients behind a reverse proxy share one count");
   assert.ok(step.includes("A deployment behind a proxy sets Express's `trust proxy` to the proxies it runs, so that `req.ip` is the client's address."), "step 1 says a deployment behind a proxy sets trust proxy");
+  assert.ok(step.includes('as in `app.set("trust proxy", "10.0.0.2")` for one proxy at 10.0.0.2'), "step 1 shows the setting with a proxy's address");
+  assert.ok(step.includes("never sets it to `true`: Express then gives as `req.ip` the leftmost `X-Forwarded-For` address, which the client chooses"), "step 1 says not to set trust proxy to true, and why");
+});
+
+test("a checkout gets \"\\n\" line endings, and this file reads each text file it checks through readText", () => {
+  // core.autocrlf=true checks text files out with "\r\n" line endings unless
+  // .gitattributes says otherwise, and the line splits and patterns in this
+  // file expect "\n".
+  assert.ok(readText(".gitattributes").split("\n").includes("* text=auto eol=lf"), ".gitattributes checks text files out with \"\\n\" line endings");
+  const source = readText("test/readme.test.mjs").replace(/^function readText\(path\) \{\n[\s\S]*?\n\}$/m, "");
+  const reads = [...source.matchAll(/(JSON\.parse\()?readFileSync\(/g)];
+  assert.ok(reads.length > 0, "this file reads package.json files");
+  for (const read of reads) {
+    assert.ok(read[1], `the read at offset ${read.index} parses JSON, which allows "\\r\\n", or goes through readText`);
+  }
 });
 
 test("step 2 puts the 431 for too many header lines before step 1, as the handler checks the header lines before the route that runs the limiter", () => {
   // test/validated-task-handler.test.mjs sends more requests answered 431 than
   // the limiter allows and then a request that is accepted.
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const headerLines = handler.indexOf("app.use(limitHeaderLines);");
   const route = handler.indexOf('app.post("/", rateLimit, ');
   assert.ok(headerLines >= 0 && route >= 0, "handler.ts registers limitHeaderLines and a POST / route that runs the limiter");
@@ -115,7 +145,7 @@ test("step 2 puts the 431 for too many header lines before step 1, as the handle
 });
 
 test("the bearer token sentence names every token the handler rejects", () => {
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const rejected = [...handler.matchAll(/token !== "([^"]+)"/g)].map((m) => m[1]);
   assert.ok(rejected.length > 0, "isValidToken rejects at least one literal token");
   const sentence = lines.find((l) => /The example accepts any bearer token/.test(l));
@@ -127,7 +157,7 @@ test("the bearer token sentence names every token the handler rejects", () => {
 
 // The pattern handler.ts matches the Authorization header against.
 function credentialsPattern() {
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const source = handler.match(/authHeader\.match\(\/(.+)\/([a-z]*)\)/);
   assert.ok(source, "handler.ts matches the Authorization header against a pattern");
   return new RegExp(source[1], source[2]);
@@ -135,7 +165,7 @@ function credentialsPattern() {
 
 // The pattern handler.ts reads the Bearer scheme of an Authorization header with.
 function bearerSchemePattern() {
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const source = handler.match(/const bearerScheme = \/(.+)\/([a-z]*);/);
   assert.ok(source, "handler.ts reads the scheme of the Authorization header with a pattern");
   return new RegExp(source[1], source[2]);
@@ -291,7 +321,7 @@ test("step 2 gives 400 for a request with more than one Authorization header, wh
   // req.headers holds the first Authorization line of a request and none of
   // the later ones, so the handler can only see a second line in rawHeaders.
   // test/validated-task-handler.test.mjs sends such requests.
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   assert.match(handler, /req\.rawHeaders/, "handler.ts counts the Authorization header lines of a request");
   const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
   assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once gets 400/, "step 2 gives 400 for a header sent more than once");
@@ -300,7 +330,7 @@ test("step 2 gives 400 for a request with more than one Authorization header, wh
 test("step 2 gives 400 to a header sent more than once whatever scheme it names, as the handler counts the lines before it reads the scheme", () => {
   // A single header that names another scheme gets 401, so step 2 says which
   // answer two such lines get. test/validated-task-handler.test.mjs sends them.
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const counted = handler.indexOf("authorizationLines(req) > 1");
   const read = handler.indexOf("bearerScheme.test(authHeader)");
   assert.ok(counted !== -1 && read !== -1, "handler.ts counts the Authorization header lines and reads the scheme");
@@ -313,7 +343,7 @@ test("step 2 gives 400 to a header sent more than once whatever scheme it names,
 
 test("step 2 names the challenges the handler's 400 and 401 responses carry and the header line count at which it answers 431", () => {
   // test/validated-task-handler.test.mjs sends requests that get these answers.
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
   const challenge = handler.match(/const bearerChallenge = '([^']+)';/);
   assert.ok(challenge, "handler.ts sets the challenge its 401 responses carry");
@@ -374,7 +404,7 @@ test("the bearer token sentence and step 2 name the characters the handler takes
 });
 
 test("the audit sentence names a body that is not a JSON object or array, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
@@ -422,7 +452,7 @@ test("step 3 limits the Invalid JSON reply to a non-empty body sent as applicati
 test("step 3 says a body the parser cannot read gets Invalid request body, not Invalid JSON, whatever it contains", () => {
   // Reading the body comes before parsing it, so a body such as 123 over the
   // size limit or in an unsupported charset never reaches the Invalid JSON reply.
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const step = lines.find((l) => l.startsWith("3. JSON parsing:"));
@@ -661,7 +691,7 @@ function namesImportedFromNodeTest(text) {
 function testFiles() {
   return readdirSync(join(root, "test"))
     .filter((name) => name.endsWith(".mjs"))
-    .map((name) => ({ path: `test/${name}`, text: readFileSync(join(root, "test", name), "utf8") }));
+    .map((name) => ({ path: `test/${name}`, text: readText(`test/${name}`) }));
 }
 
 // The lowest Node.js 18 minor release that has node --test and every name
@@ -1036,7 +1066,7 @@ test("the attack table check fails for a table with an attack the category lacks
 });
 
 test("README and the handler's header name the tests on the linked attack page, and no attack that the page and the scanner's category both lack", () => {
-  const handler = readFileSync(join(root, "examples/validated-task-handler/handler.ts"), "utf8");
+  const handler = readText("examples/validated-task-handler/handler.ts");
   const header = handler.match(/^\/\*\*[\s\S]*?\*\//)?.[0] ?? "";
   const link = "https://agentpwn.com/attacks/a2a-attack";
   const sentence = attackSection(readme).split("\n").find((l) => l.includes(`](${link})`));
@@ -1053,7 +1083,7 @@ test("README and the handler's header name the tests on the linked attack page, 
 });
 
 test("the license section matches the LICENSE file", () => {
-  const license = readFileSync(join(root, "LICENSE"), "utf8");
+  const license = readText("LICENSE");
   assert.match(license, /Apache License\s+Version 2\.0/);
   const section = readme.split(/^## License$/m)[1] ?? "";
   assert.match(section, /Apache 2\.0/, "README names the Apache 2.0 license");
