@@ -193,14 +193,22 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   // part of the value whether or not a comma follows the template.
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a, b}` // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a, b}`, // c")), ["points", "duration", "keyPrefix"]);
-  // Only a slash right after the ) of if (...), for (...), for await (...)
-  // or while (...) may be misread, so a value with another token there is
-  // read.
+  // Of the tokens right after the ) of if (...), for (...), for await (...)
+  // or while (...), only a slash may be misread, so a value with another
+  // token there is read: a name, a string, a template, a number, an opening
+  // bracket or a punctuator other than a slash.
   for (const line of [
     "  keyPrefix: (() => { if (a) return 'x'; return 'k'; })(),",
     "  keyPrefix: (() => { for (const x of a) return x; return 'k'; })(),",
     "  keyPrefix: (async () => { for await (const x of a) return x; return 'k'; })(),",
     "  keyPrefix: (() => { while (a) return 'x'; return 'k'; })(),",
+    "  keyPrefix: (() => { if (a) 'x'.trim(); return 'k'; })(),",
+    "  keyPrefix: (() => { if (a) `x`.trim(); return 'k'; })(),",
+    "  keyPrefix: (() => { while (a) 1; return 'k'; })(),",
+    "  keyPrefix: (() => { if (a) { return 'x'; } return 'k'; })(),",
+    "  keyPrefix: (() => { while (a) (b)(); return 'k'; })(),",
+    "  keyPrefix: (() => { for (const x of a) [x].pop(); return 'k'; })(),",
+    "  keyPrefix: (async () => { for await (const x of a) -x; return 'k'; })(),",
   ]) {
     assert.deepEqual(limiterOptionKeys(add(line)), ["points", "duration", "keyPrefix"], `${line.trim()} is read as one key: value pair`);
   }
