@@ -449,6 +449,12 @@ test("the limiter options reader reads a last value that ends with a TypeScript 
     ["  keyPrefix: x ? a as A >", "  duration: 60, // per minute"],
     ["  keyPrefix: x ? a as A<1> >", "  duration: 60, // per minute"],
     "  keyPrefix: a as F<() =>",
+    // TypeScript reads a < right after one of these names as a comparison
+    // when the name is the one after an as or satisfies, so the > after it is
+    // an operator that the next line continues too, and a ! right after that >
+    // follows no operand.
+    ...["any", "bigint", "boolean", "false", "function", "never", "null", "number", "object", "string", "symbol", "this", "true", "undefined", "unknown", "void"].flatMap((type) => ["as", "satisfies"].map((operator) => [`  keyPrefix: x ? a ${operator} ${type} < b >`, "  duration: 60, // per minute"])),
+    ["  keyPrefix: x ? a as number < b > !", "  duration: 60, // per minute"],
   ]) {
     const added = [line].flat();
     assert.equal(limiterOptionKeys(options(...added)), null, `${added.map((l) => l.trim()).join(" then ")} is read as neither a comment nor one key: value pair`);
@@ -874,6 +880,7 @@ const nodeTestAddedIn = { test: 0, before: 8, after: 8 };
 
 const identifier = /(?:[\p{ID_Start}$_]|\\u[\da-fA-F]{4}|\\u\{[\da-fA-F]+\})(?:[\p{ID_Continue}$\u{200C}\u{200D}]|\\u[\da-fA-F]{4}|\\u\{[\da-fA-F]+\})*/uy;
 const keywordsBeforeExpression = new Set(["await", "case", "default", "delete", "do", "else", "extends", "in", "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield"]);
+const typesWithoutTypeArguments = new Set(["any", "bigint", "boolean", "false", "function", "never", "null", "number", "object", "string", "symbol", "this", "true", "undefined", "unknown", "void"]);
 
 // The text of a name or string with its escape sequences replaced by the
 // characters they stand for.
@@ -962,9 +969,13 @@ function slashDivides(token) {
 // satisfies and goes on with a name after a . that follows that one. A < right
 // after one of these names on that name's line, or a < inside type arguments,
 // starts type arguments, and a > inside them that is not the > of a => ends
-// them. The array has unclosed set to true when the text ends inside a block
-// comment, a string or the text of a template, as a line of a module does
-// when one of these continues on the next line.
+// them. A < right after the name after the as or satisfies starts none,
+// though, when that name is any, bigint, boolean, false, function, never,
+// null, number, object, string, symbol, this, true, undefined, unknown or
+// void: TypeScript reads that < as a comparison, as in a as number < b. The
+// array has unclosed set to true when the text ends inside a block comment, a
+// string or the text of a template, as a line of a module does when one of
+// these continues on the next line.
 function moduleTokens(text) {
   const source = text.replace(/^\u{FEFF}/u, "");
   const tokens = [];
@@ -1067,9 +1078,12 @@ function moduleTokens(text) {
       if (substitutions.length > 0 && c === "}") substitutions[substitutions.length - 1]--;
       if ("([{".includes(c)) brackets.push(c === "(" && (keywordFor(previous) || (previous?.raw === "await" && keywordFor(tokens.at(-2)))));
       if (")]}".includes(c)) brackets.pop();
-      // A > right after a = with nothing between them is the > of a =>.
+      // A > right after a = with nothing between them is the > of a =>. A <
+      // right after one of typesWithoutTypeArguments compares when that name
+      // is the one after the as or satisfies.
       let endsTypeArguments = false;
-      if (c === "<" && (typeArguments > 0 || (previous?.typeName && !lineBreakBefore()))) typeArguments++;
+      const compares = tokens.at(-2)?.typeOperator === true && typesWithoutTypeArguments.has(previous?.raw);
+      if (c === "<" && !compares && (typeArguments > 0 || (previous?.typeName && !lineBreakBefore()))) typeArguments++;
       else if (c === ">" && typeArguments > 0 && !(previous.type === "punct" && previous.value === "=" && previousEnd === i)) endsTypeArguments = --typeArguments === 0;
       const nonNull = c === "!" && source[i + 1] !== "=" && endsOperand(previous) && !lineBreakBefore();
       tokens.push({ type: "punct", value: c, nonNull, endsTypeArguments });
@@ -1411,13 +1425,18 @@ test("moduleTokens() marks a TypeScript non-null assertion and the > that ends t
   for (const text of ["a! / b / c", "f(a)[0]! / b / c", "a!! / b / c", "x as A<1>! / b / c"]) {
     assert.equal(beforeRegularExpression(text).nonNull, true, JSON.stringify(text));
   }
-  for (const text of ["x as A<1> / b / c", "x satisfies ns.A<B<1>> / b / c", "x as A<() => void> / b / c", "a! as A<1> / b / c"]) {
+  // Type arguments follow a name after a . even when that name, or the one
+  // before the ., is a name such as number, and a < right after such a name
+  // that follows an as inside type arguments compares, so the next > ends
+  // them.
+  for (const text of ["x as A<1> / b / c", "x satisfies ns.A<B<1>> / b / c", "x as A<() => void> / b / c", "a! as A<1> / b / c", "x as number.A<1> / b / c", "x as ns.number<1> / b / c", "x as A<{ [a as number < b]: 1 }> / b / c"]) {
     assert.equal(beforeRegularExpression(text).endsTypeArguments, true, JSON.stringify(text));
   }
   // A ! after a line break, after no operand or that starts != or !==, a >
   // that ends no type arguments, and the > after a < that follows a line
-  // break or the name after an as with a line break before it, are operators.
-  for (const text of ["a\n!/b/.test(c)", "a /*\n*/ !/b/.test(c)", "x ? !/b/.test(c) : d", "a != /b/.test(c)", "a !== /b/.test(c)", "a < b > /b/.test(c)", "x as A > /b/.test(c)", "x as A<1> > /b/.test(c)", "x as A\n<1> /b/.test(c)", "x\nas A<1> /b/.test(c)"]) {
+  // break, the name after an as with a line break before it or a name such as
+  // number right after an as or satisfies, are operators.
+  for (const text of ["a\n!/b/.test(c)", "a /*\n*/ !/b/.test(c)", "x ? !/b/.test(c) : d", "a != /b/.test(c)", "a !== /b/.test(c)", "a < b > /b/.test(c)", "x as A > /b/.test(c)", "x as A<1> > /b/.test(c)", "x as A\n<1> /b/.test(c)", "x\nas A<1> /b/.test(c)", "x as number < b > /b/.test(c)", "x satisfies void < b > /b/.test(c)"]) {
     const token = beforeRegularExpression(text);
     assert.ok(!token.nonNull && !token.endsTypeArguments, JSON.stringify(text));
   }
