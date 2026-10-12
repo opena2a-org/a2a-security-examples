@@ -45,7 +45,11 @@ function parsePort(value: string): number {
 // and starts again with its first request after those 60 seconds have ended.
 // It keys on req.ip. Behind a reverse proxy, req.ip is the proxy's address
 // unless the deployment sets Express's "trust proxy" to the proxies it runs,
-// and without that every client behind the proxy shares one count.
+// and without that every client behind the proxy shares one count. Name their
+// addresses, as in app.set("trust proxy", "10.0.0.2") for one proxy at
+// 10.0.0.2, and never set it to true: req.ip would then be the leftmost
+// X-Forwarded-For address, which the client chooses, so a client that sends a
+// different one with each request would never be limited.
 const rateLimiter = new RateLimiterMemory({
   points: 30, // requests
   duration: 60, // per minute
