@@ -171,6 +171,10 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a, [//] b/.source, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a\\/\\/b/.source")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  blockDuration: /* seconds */ 300,")), ["points", "duration", "blockDuration"]);
+  // A comma directly inside a substitution, with no bracket around it, is
+  // part of the value whether or not a comma follows the template.
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a, b}` // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a, b}`, // c")), ["points", "duration", "keyPrefix"]);
   for (const line of [
     "  ...{ blockDuration: 300 },",
     "  ...extraOptions,",
