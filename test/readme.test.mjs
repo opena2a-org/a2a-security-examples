@@ -84,6 +84,47 @@ test("the audit sentence names the handler's audit actions, including the one fo
   assert.match(sentence, /`auth_failed` for a request that fails authentication, with the status it gets and a reason but never the header or the token/, "README says what the auth_failed line records and that it leaves out the token");
 });
 
+// The keys of the options object handler.ts creates the limiter with, in
+// order. Null when there is no such object, or when a line of it is neither a
+// comment nor one key: value pair with the key quoted or not, such as a spread
+// or a shorthand property, as the options such a line gives cannot be read
+// from it.
+function limiterOptionKeys(handler) {
+  const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
+  if (!options) return null;
+  const keys = [];
+  for (const line of options[1].split("\n")) {
+    if (/^\s*(\/\/.*|\/\*(?:[^*]|\*(?!\/))*\*\/\s*)?$/.test(line)) continue;
+    const pair = line.match(/^\s*(["']?)(\w+)\1\s*:\s*[^\s,/][^,]*?,?\s*(\/\/.*)?$/);
+    if (!pair) return null;
+    keys.push(pair[2]);
+  }
+  return keys;
+}
+
+test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key nor a pair after another on one line", () => {
+  const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
+  assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
+  assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
+  assert.deepEqual(limiterOptionKeys(add("  'blockDuration' : 300")), ["points", "duration", "blockDuration"]);
+  assert.deepEqual(limiterOptionKeys(add("  // blockDuration: 300,")), ["points", "duration"]);
+  assert.deepEqual(limiterOptionKeys(add("  /* blockDuration: 300, */")), ["points", "duration"]);
+  assert.deepEqual(limiterOptionKeys(add("")), ["points", "duration"]);
+  for (const line of [
+    "  ...{ blockDuration: 300 },",
+    "  ...extraOptions,",
+    "  blockDuration,",
+    "  blockDuration() { return 300; },",
+    '  ["blockDuration"]: 300,',
+    '  keyPrefix: "rl", blockDuration: 300,',
+    "  /* a */ blockDuration: 300, /* b */",
+    "  points: 30 /* , */, blockDuration: 300,",
+  ]) {
+    assert.equal(limiterOptionKeys(add(line)), null, `${line.trim()} is read as neither a comment nor one key: value pair`);
+  }
+  assert.equal(limiterOptionKeys(add().replace("new RateLimiterMemory({", "new RateLimiterMemory(extraOptions, {")), null, "a limiter created without an options object on its own lines has no options read");
+});
+
 test("step 1 is the rate limit, which every request that reaches it counts toward before the handler authenticates it", () => {
   // test/validated-task-handler.test.mjs sends requests that fail
   // authentication until the next request gets 429, and requests answered 431
@@ -95,9 +136,7 @@ test("step 1 is the rate limit, which every request that reaches it counts towar
   assert.ok(points && duration, "handler.ts allows a number of requests per minute");
   // Another option, such as a blockDuration, would change when a client's
   // count starts again from what step 1 says.
-  const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
-  assert.ok(options, "handler.ts creates the limiter with an options object");
-  assert.deepEqual([...options[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]), ["points", "duration"], "handler.ts gives the limiter no option but points and duration");
+  assert.deepEqual(limiterOptionKeys(handler), ["points", "duration"], "handler.ts creates the limiter with an options object of key: value pairs and comments, and gives it no option but points and duration");
   const step = lines.find((l) => l.startsWith("1. "));
   assert.ok(step, "README lists a step 1");
   assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: 429. Every request that reaches the limiter counts, including one that then fails authentication; a request answered 431 for too many header lines (see step 2) is not counted.`), "README lists the rate limit as step 1 and says a request that fails authentication counts and one answered 431 does not");
