@@ -206,9 +206,10 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  duration: 60 }), blockDuration: 300,",
     "  duration: 60, blockDuration: 300 }),",
     // moduleTokens() reads a regular expression right after the ) of
-    // if (...), for (...) or while (...) as division, and a slash that
-    // divides right after a } as a regular expression, so a bracket or
-    // comma it reads there may hide a comma.
+    // if (...), for (...) or while (...) as division, as it does right after
+    // a ) whose ( the line does not hold, and a slash that divides right
+    // after a } as a regular expression, so a bracket or comma it reads
+    // there may hide a comma.
     "  keyPrefix: (() => { if (1) /[(]/.test(''); return 'k'; })(), blockDuration: (() => { if (1) /[)]/.test(''); return 300; })(),",
     "  keyPrefix: (() => { while (0) /[(]/; })(), blockDuration: (() => { while (0) /[)]/; })(),",
     "  keyPrefix: (() => { for (;0;) /[(]/; })(), blockDuration: (() => { for (;0;) /[)]/; })(),",
@@ -216,6 +217,7 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: {} / 2, blockDuration: 300 / 1,",
     // The same holds when the line sets one option.
     "  keyPrefix: (() => { if (1) /x/; return 'k'; })(), // c",
+    "  keyPrefix: a) / 2,",
   ]) {
     assert.equal(limiterOptionKeys(add(line)), null, `${line.trim()} is read as neither a comment nor one key: value pair`);
   }
