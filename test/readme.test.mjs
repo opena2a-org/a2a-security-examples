@@ -97,7 +97,11 @@ test("the audit sentence names the handler's audit actions, including the one fo
 // A comma or a // inside a string, template or regular expression in a value,
 // the regular expression a value starts with among them, does not end the
 // value, nor does a comma inside brackets or a template substitution that the
-// same line closes.
+// same line closes. Null too when a value holds a slash that
+// slashMayBeMisread() finds moduleTokens() may misread, even if the line sets
+// one option: a bracket or comma after that slash may be read outside a
+// regular expression when it is inside one, or inside one when it is outside,
+// so a comma that ends the value can be hidden.
 function limiterOptionKeys(handler) {
   const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
   if (!options) return null;
@@ -116,6 +120,7 @@ function limiterOptionKeys(handler) {
     // a comma, and such a comma before the last token is followed by more
     // than a comment.
     const value = moduleTokens(pair[3]);
+    if (value.some((token, i) => slashMayBeMisread(value, i))) return null;
     const comma = value.findIndex((token, i) => token.type === "punct" && token.value === "," && value.slice(i + 1).every((later) => later.open >= token.open));
     if (value.length === 0 || comma === 0 || (comma >= 0 && comma < value.length - 1)) return null;
     keys.push(pair[2]);
@@ -123,7 +128,28 @@ function limiterOptionKeys(handler) {
   return keys;
 }
 
-test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets", () => {
+// Whether the token at index i of the tokens moduleTokens() gives for a line
+// is a slash it may have misread: one read as division right after a ) that
+// closes the parentheses after if, for, for await or while, where a slash
+// starts a regular expression, or a ) whose ( the line does not hold, and a
+// regular expression right after a }, where a slash divides when the } ends
+// an object literal or a function.
+function slashMayBeMisread(tokens, i) {
+  const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
+  const keyword = (token, ...raw) => is(token, "name") && !token.property && raw.includes(token.raw);
+  if (is(tokens[i], "regex")) return is(tokens[i - 1], "punct", "}");
+  if (!is(tokens[i], "punct", "/") || !is(tokens[i - 1], "punct", ")")) return false;
+  // Every token inside the parentheses has more brackets and substitutions
+  // open than the ) has, so the ( is the token after the last one before the
+  // ) that does not.
+  const close = i - 1;
+  let before = close - 1;
+  while (before >= 0 && tokens[before].open > tokens[close].open) before--;
+  if (!is(tokens[before + 1], "punct", "(")) return true;
+  return keyword(tokens[before], "if", "for", "while") || (keyword(tokens[before], "await") && keyword(tokens[before - 1], "for"));
+}
+
+test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets, nor a value holding a slash that moduleTokens() may misread", () => {
   const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
   assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
@@ -138,6 +164,8 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `a, // b`, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `a, b`, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: x(/a, b/), // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  blockDuration: (a + b) / 2, // c")), ["points", "duration", "blockDuration"]);
+  assert.deepEqual(limiterOptionKeys(add("  blockDuration: f(a, b) / a.if(b) / [c][0] / 2, // d")), ["points", "duration", "blockDuration"]);
   // A value that starts with a regular expression or a comment is read too.
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a/.source, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a, [//] b/.source, // c")), ["points", "duration", "keyPrefix"]);
@@ -172,6 +200,17 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: f(a, [b, blockDuration: 300,",
     "  keyPrefix: `${a, blockDuration: 300,",
     "  duration: 60 }), blockDuration: 300,",
+    // moduleTokens() reads a regular expression right after the ) of
+    // if (...), for (...) or while (...) as division, and a slash that
+    // divides right after a } as a regular expression, so a bracket or
+    // comma it reads there may hide a comma.
+    "  keyPrefix: (() => { if (1) /[(]/.test(''); return 'k'; })(), blockDuration: (() => { if (1) /[)]/.test(''); return 300; })(),",
+    "  keyPrefix: (() => { while (0) /[(]/; })(), blockDuration: (() => { while (0) /[)]/; })(),",
+    "  keyPrefix: (() => { for (;0;) /[(]/; })(), blockDuration: (() => { for (;0;) /[)]/; })(),",
+    "  keyPrefix: (async () => { for await (const x of []) /[(]/; })(), blockDuration: (async () => { for await (const x of []) /[)]/; })(),",
+    "  keyPrefix: {} / 2, blockDuration: 300 / 1,",
+    // The same holds when the line sets one option.
+    "  keyPrefix: (() => { if (1) /x/; return 'k'; })(), // c",
   ]) {
     assert.equal(limiterOptionKeys(add(line)), null, `${line.trim()} is read as neither a comment nor one key: value pair`);
   }
