@@ -140,16 +140,38 @@ function spawnExample(env, cwd = example, args = [tsx, "handler.ts"]) {
   return proc;
 }
 
+// Temporary directories makeTempDir has made and removeTempDir has not removed.
+const tempDirs = new Set();
+
+// Make a temporary directory whose name starts with prefix. The caller removes
+// it with removeTempDir.
+function makeTempDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.add(dir);
+  return dir;
+}
+
+function removeTempDir(dir) {
+  rmSync(dir, { recursive: true, force: true });
+  tempDirs.delete(dir);
+}
+
 // Ctrl-C signals only the terminal's foreground process group, which the
 // servers have left, and an interrupted run never reaches the after() hook or
-// the finally blocks that stop them. So stop every server still running, then
-// let the signal end this process as it would have. On Windows the servers
-// share the console and receive Ctrl-C themselves.
+// the finally blocks that stop them and remove the temporary directories. So
+// stop every server still running and remove every temporary directory not yet
+// removed, then let the signal end this process as it would have, even when a
+// directory cannot be removed. On Windows the servers share the console and
+// receive Ctrl-C themselves.
 if (process.platform !== "win32") {
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
     process.once(signal, () => {
-      for (const proc of started) stopServer(proc);
-      process.kill(process.pid, signal);
+      try {
+        for (const proc of started) stopServer(proc);
+        for (const dir of tempDirs) removeTempDir(dir);
+      } finally {
+        process.kill(process.pid, signal);
+      }
     });
   }
 }
@@ -311,13 +333,13 @@ test("the TypeScript build emits the file npm start runs", () => {
   const main = relative(configuredOutDir, pkg.main);
   assert.ok(!main.startsWith("..") && !isAbsolute(main), `${pkg.main} is inside outDir ${configuredOutDir}`);
   // Build into a temporary directory so the test leaves dist/ untouched.
-  const outDir = mkdtempSync(join(tmpdir(), "a2a-build-"));
+  const outDir = makeTempDir("a2a-build-");
   try {
     const build = spawnSync(process.execPath, [tsc, "-p", example, "--outDir", outDir], { encoding: "utf8" });
     assert.equal(build.status, 0, build.stdout + build.stderr);
     assert.ok(existsSync(join(outDir, main)), `tsc emits ${pkg.main}`);
   } finally {
-    rmSync(outDir, { recursive: true, force: true });
+    removeTempDir(outDir);
   }
 });
 
@@ -383,7 +405,7 @@ test("the compiled handler serves the agent card file from beside the example's 
   // Lay the build out as npm run build does, one directory below the example's
   // directory, with the card beside that directory, in a temporary directory
   // so the test leaves the repository untouched.
-  const dir = mkdtempSync(join(tmpdir(), "a2a-build-"));
+  const dir = makeTempDir("a2a-build-");
   try {
     const outDir = join(dir, "validated-task-handler", "dist");
     const build = spawnSync(process.execPath, [tsc, "-p", example, "--outDir", outDir], { encoding: "utf8" });
@@ -412,7 +434,7 @@ test("the compiled handler serves the agent card file from beside the example's 
       await closedWithin(proc, closed, 10000, "the compiled handler still holds its output pipes 10 seconds after stopServer");
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -612,7 +634,7 @@ http.Server.prototype.listen = function (...args) {
 `;
 
 test("an upload that stalls until the request timeout gets a bare 408 and a request_rejected audit line", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  const dir = makeTempDir("a2a-preload-");
   const file = join(dir, "preload.cjs");
   writeFileSync(file, stallPreload);
   const stallPort = await freePort();
@@ -666,7 +688,7 @@ test("an upload that stalls until the request timeout gets a bare 408 and a requ
       stopServer(stalled);
       await closedWithin(stalled, closed, 10000, `tsx and the server it started did not exit within 10 seconds:\n${log}`);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempDir(dir);
     }
   }
 });
@@ -714,7 +736,7 @@ test("the stalled-upload test loads its preload with --require, not --import", (
 test("the stalled-upload preload sets the connection check interval when the server is created", () => {
   // Some Node.js 18 releases start the check in the server's constructor. An
   // interval set in listen comes too late there: the 408 takes 30 seconds.
-  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  const dir = makeTempDir("a2a-preload-");
   try {
     const file = join(dir, "preload.cjs");
     writeFileSync(file, stallPreload);
@@ -727,12 +749,12 @@ test("the stalled-upload preload sets the connection check interval when the ser
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.equal(run.stdout, "100\n", "a server that is not listening yet has the shortened interval");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
 test("a preload path with a space, a quote, a backslash or a tab reaches Node as one --require option", () => {
-  const dir = mkdtempSync(join(tmpdir(), "a2a preload-"));
+  const dir = makeTempDir("a2a preload-");
   try {
     // Windows file names cannot contain a double quote or a tab, and the
     // backslashes that separate its directories are already in the path.
@@ -746,12 +768,12 @@ test("a preload path with a space, a quote, a backslash or a tab reaches Node as
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.equal(run.stdout, "preloaded\n");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
 test("a preload's NODE_OPTIONS keep the options already in NODE_OPTIONS", () => {
-  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  const dir = makeTempDir("a2a-preload-");
   try {
     const file = join(dir, "preload.cjs");
     writeFileSync(file, 'process.stdout.write("preloaded\\n");\n');
@@ -763,7 +785,7 @@ test("a preload's NODE_OPTIONS keep the options already in NODE_OPTIONS", () => 
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.equal(run.stdout, "preloaded\ntrue\n", "the preload ran and --no-deprecation still applies");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -1060,7 +1082,7 @@ test("a PORT already in use exits with one line naming the port", () => {
 // Start the example with a CommonJS module loaded first that changes how the
 // HTTP server listens, and return the finished run.
 function runWithPreload(preload, env) {
-  const dir = mkdtempSync(join(tmpdir(), "a2a-preload-"));
+  const dir = makeTempDir("a2a-preload-");
   try {
     const file = join(dir, "preload.cjs");
     writeFileSync(file, preload);
@@ -1071,7 +1093,7 @@ function runWithPreload(preload, env) {
       timeout: 30000,
     });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 }
 
@@ -1227,7 +1249,7 @@ readSync(0, Buffer.alloc(1));
 );
 
 test(
-  "interrupting a test run stops the servers it started",
+  "interrupting a test run stops the servers it started and removes the temporary directory it made",
   {
     skip:
       (process.platform === "win32" && "on Windows the servers share the console and receive Ctrl-C themselves") ||
@@ -1237,8 +1259,11 @@ test(
   async () => {
     // Run the stalled-upload test alone in a process group of its own, as a
     // shell runs a job, and once the run has started the main server and the
-    // stalled-upload server, send SIGINT to that group, as Ctrl-C does.
-    const env = { ...process.env };
+    // stalled-upload server, send SIGINT to that group, as Ctrl-C does. The run
+    // makes its temporary directories in a directory of its own, so the only
+    // preload directories there are its own.
+    const runTmp = makeTempDir("a2a-tmp-");
+    const env = { ...process.env, TMPDIR: runTmp };
     // Left set, the nested run reports to this run instead of running on its own.
     delete env.NODE_TEST_CONTEXT;
     const run = spawn(
@@ -1247,6 +1272,7 @@ test(
       { env, stdio: "ignore", detached: true }
     );
     const exited = new Promise((resolve) => run.once("exit", resolve));
+    const preloadDirs = () => readdirSync(runTmp).filter((name) => name.startsWith("a2a-preload-"));
     let groups = new Set();
     try {
       for (let i = 0; i < 600 && groups.size < 2; i++) {
@@ -1262,16 +1288,30 @@ test(
       // A check that cannot see the servers while they run would report them
       // stopped after the interrupt whether or not the run stopped them.
       assert.deepEqual(running(), [...groups], "ps lists both servers as running before the run is interrupted");
+      // Likewise, a check that cannot see the preload directory while the
+      // stalled-upload server runs would report it removed either way.
+      assert.equal(preloadDirs().length, 1, "the run has made the preload directory before it is interrupted");
       process.kill(-run.pid, "SIGINT");
       await within(exited, 10000, "the interrupted run did not exit within 10 seconds");
       for (let i = 0; i < 100 && running().length > 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       assert.deepEqual(running(), [], "no server the interrupted run started is still running");
+      // The process that has exited is the one that starts the test file. The
+      // one that runs the file removes the directory, and can end after it.
+      for (let i = 0; i < 100 && preloadDirs().length > 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.deepEqual(preloadDirs(), [], "no preload directory the interrupted run made is left");
     } finally {
-      // Stop the run and whatever it left running, even when an assertion failed.
-      stopServer(run);
-      for (const pid of groups) stopServer({ pid });
+      // Stop the run and whatever it left running, even when an assertion
+      // failed, and remove its temporary directory even when stopping them fails.
+      try {
+        stopServer(run);
+        for (const pid of groups) stopServer({ pid });
+      } finally {
+        removeTempDir(runTmp);
+      }
     }
   }
 );
@@ -1461,7 +1501,7 @@ test("a request answered 431 for too many header lines does not count toward the
 // dependencies. Return the temporary directory, which the caller removes, and
 // the directory of the copy.
 function exampleCopy(edit) {
-  const top = mkdtempSync(join(tmpdir(), "a2a-copy-"));
+  const top = makeTempDir("a2a-copy-");
   const dir = join(top, "validated-task-handler");
   try {
     mkdirSync(dir);
@@ -1476,7 +1516,7 @@ function exampleCopy(edit) {
     // other platforms ignore the type.
     symlinkSync(join(example, "node_modules"), join(dir, "node_modules"), "junction");
   } catch (err) {
-    rmSync(top, { recursive: true, force: true });
+    removeTempDir(top);
     throw err;
   }
   return { top, dir };
@@ -1524,7 +1564,7 @@ test("with maxHeaderLines raised to 1,500, a request with 1,100 header lines and
       }
     }, dir);
   } finally {
-    rmSync(top, { recursive: true, force: true });
+    removeTempDir(top);
   }
 });
 
