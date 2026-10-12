@@ -204,6 +204,7 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  keyPrefix: f(a, [b, blockDuration: 300,",
     "  keyPrefix: `${a, blockDuration: 300,",
     "  duration: 60 }), blockDuration: 300,",
+    "  duration: 60, blockDuration: 300 }),",
     // moduleTokens() reads a regular expression right after the ) of
     // if (...), for (...) or while (...) as division, and a slash that
     // divides right after a } as a regular expression, so a bracket or
@@ -681,7 +682,8 @@ function regularExpressionEnd(source, start) {
 // has in open the number of (, [ and { not yet closed and of template
 // substitutions not yet ended after it: a ( counts itself, a ) does not count
 // the ( it closes, and a template token does not count the substitution that
-// ends before it. A closing bracket with none open leaves the number at 0.
+// ends before it. A closing bracket with none open leaves the count of
+// brackets at 0.
 // A slash is read as division after a name other than a keyword in
 // keywordsBeforeExpression (a keyword after a . is a property name and one
 // after a # is a private name, while one after ... is a keyword, except of,
