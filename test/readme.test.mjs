@@ -105,11 +105,14 @@ test("step 1 is the rate limit, which every request that reaches it counts towar
   assert.ok(step.includes("The limiter counts a client's requests for 60 seconds from its first one and starts again with its first request after those 60 seconds have ended"), "step 1 says the 60 seconds start with a client's first request and the count starts again after they have ended");
 });
 
-test("step 1 says that clients behind a reverse proxy share one count unless the deployment sets trust proxy to the proxies' addresses, and never to true", () => {
-  // test/validated-task-handler.test.mjs sends requests with a different
-  // X-Forwarded-For value each until the next request gets 429, which fails
-  // when handler.ts sets trust proxy.
+test("step 1 says that clients behind a reverse proxy share one count unless the deployment sets trust proxy to the proxies' addresses, and never to true, and handler.ts sets no trust proxy", () => {
+  // test/validated-task-handler.test.mjs sends requests from 127.0.0.1 with a
+  // different X-Forwarded-For value each until the next request gets 429,
+  // which fails only when trust proxy trusts 127.0.0.1, as true, 1 or
+  // "loopback" do. A setting that names a proxy's address, as step 1 shows,
+  // passes it, so this test checks that handler.ts sets no trust proxy at all.
   const handler = readText("examples/validated-task-handler/handler.ts");
+  assert.deepEqual(trustProxyCalls(handler), [], "handler.ts calls neither set(\"trust proxy\", ...) nor enable(\"trust proxy\"), so req.ip is the address a request came from");
   assert.match(handler, /const clientIp = req\.ip \|\| "unknown";\n  try \{\n    await rateLimiter\.consume\(clientIp\);/, "handler.ts keys the limiter on req.ip");
   const step = lines.find((l) => l.startsWith("1. "));
   assert.ok(step.includes("It keys on the client IP Express gives as `req.ip`, which behind a reverse proxy is the proxy's address, so every client behind the proxy shares one count"), "step 1 says clients behind a reverse proxy share one count");
@@ -686,6 +689,44 @@ function namesImportedFromNodeTest(text) {
   }
   return names;
 }
+
+// The method names of the calls in a module that set or enable Express's trust
+// proxy setting on any object: set("trust proxy", ...) or enable("trust
+// proxy"), with either quote, escape sequences in the setting's name, and line
+// breaks or comments anywhere in the call. A call inside a comment, string or
+// template is not a call. The reader does not handle a setting name written
+// as a template or a method named with brackets, as in app["set"](...).
+function trustProxyCalls(text) {
+  const tokens = moduleTokens(text);
+  const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
+  const calls = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const method = tokens[i + 1];
+    if (is(tokens[i], "punct", ".") && (is(method, "name", "set") || is(method, "name", "enable")) && is(tokens[i + 2], "punct", "(") && is(tokens[i + 3], "string", "trust proxy")) {
+      calls.push(method.value);
+    }
+  }
+  return calls;
+}
+
+test("the trust proxy reader finds set and enable calls in any layout, and none in a comment, string or template or for another setting", () => {
+  assert.deepEqual(trustProxyCalls('app.set("trust proxy", "10.0.0.2");\n'), ["set"]);
+  assert.deepEqual(trustProxyCalls("app.set('trust proxy', 'uniquelocal');\n"), ["set"]);
+  assert.deepEqual(trustProxyCalls('app.enable("trust proxy");\n'), ["enable"]);
+  assert.deepEqual(trustProxyCalls('server\n  .set /* hop */ (\n    "trust\\u0020proxy",\n    1,\n  );\n'), ["set"]);
+  assert.deepEqual(trustProxyCalls('// app.set("trust proxy", "10.0.0.2")\n/* app.enable("trust proxy") */\n'), []);
+  assert.deepEqual(trustProxyCalls('const a = \'app.set("trust proxy", 1)\';\nconst b = `app.enable("trust proxy")`;\n'), []);
+  assert.deepEqual(trustProxyCalls('app.set("x-powered-by", false);\napp.disable("trust proxy");\napp.get("trust proxy");\n'), []);
+  // handler.ts names app.set("trust proxy", "10.0.0.2") in a comment, and a
+  // call of that form added after its app.disable("x-powered-by") is read.
+  const handler = readText("examples/validated-task-handler/handler.ts");
+  assert.ok(handler.includes('app.set("trust proxy", "10.0.0.2")'), "handler.ts names the setting step 1 shows in a comment");
+  assert.ok(handler.includes('app.disable("x-powered-by");\n'), "handler.ts disables the X-Powered-By header");
+  for (const setting of ['"10.0.0.2"', '"uniquelocal"']) {
+    const added = handler.replace('app.disable("x-powered-by");\n', `app.disable("x-powered-by");\napp.set("trust proxy", ${setting});\n`);
+    assert.equal(trustProxyCalls(added).length, trustProxyCalls(handler).length + 1, `app.set("trust proxy", ${setting}) added to handler.ts is read as a call`);
+  }
+});
 
 // The path and text of each test file.
 function testFiles() {
