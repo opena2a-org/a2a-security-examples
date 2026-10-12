@@ -1938,6 +1938,49 @@ test("POST /a2a/message has a body limit of its own, which admits the longest me
   });
 });
 
+// The comment above the /a2a/message route in source, as one line.
+function agentMessageRouteComment(source) {
+  const lines = source.split(/\r?\n/);
+  const route = lines.findIndex((l) => l.startsWith('app.post("/a2a/message"'));
+  assert.notEqual(route, -1, "handler.ts has the /a2a/message route");
+  let first = route;
+  while (first > 0 && lines[first - 1].startsWith("//")) first--;
+  return lines.slice(first, route).map((l) => l.replace(/^\/\/ ?/, "")).join(" ");
+}
+
+// Fail unless comment names the error each route gives a text over the limit,
+// and does not say the route gets the same JSON-RPC errors as POST /.
+function checkAgentMessageRouteComment(comment, agentMessageError, messageSendError) {
+  const errors = { "/a2a/message": agentMessageError, "POST /": messageSendError };
+  for (const [route, { code, message }] of Object.entries(errors)) {
+    assert.ok(comment.includes(`${code} ${message}`), `the comment names ${code} ${message}, which ${route} gives a text over the limit`);
+  }
+  assert.doesNotMatch(comment, /\bsame\b[^.]*\bJSON-RPC errors\b/, "the comment does not say the route gets the same JSON-RPC errors as POST /");
+}
+
+test("the comment above the /a2a/message route names the error a text over the limit gets there and the one it gets in a text part at POST /, and does not say the two routes give the same JSON-RPC errors", async () => {
+  const auth = { Authorization: "Bearer demo-token" };
+  const text = "a".repeat(10001);
+  await withOwnServer(async (serverPort) => {
+    const agentMessage = await (await postAgentMessage(serverPort, auth, { from: "attacker-agent", to: "target-agent", content: text })).json();
+    const messageSend = await (await postTask(auth, JSON.stringify(sendMessage([{ kind: "text", text }])), serverPort)).json();
+    assert.deepEqual([agentMessage.id, agentMessage.error.code, agentMessage.error.message], [null, -32600, "Invalid Request"]);
+    assert.deepEqual([messageSend.id, messageSend.error.code, messageSend.error.message], [1, -32602, "Invalid params"]);
+    const comment = agentMessageRouteComment(handlerSource);
+    checkAgentMessageRouteComment(comment, agentMessage.error, messageSend.error);
+    // The check fails for a comment that gives the route the errors of POST /,
+    // and for one that leaves out the error the route's own schema gives.
+    assert.throws(
+      () => checkAgentMessageRouteComment(`${comment} It gets the same audit lines and JSON-RPC errors as a message sent to POST /.`, agentMessage.error, messageSend.error),
+      /does not say the route gets the same JSON-RPC errors/
+    );
+    assert.throws(
+      () => checkAgentMessageRouteComment(comment.replace("-32600 Invalid Request", "-32602 Invalid params"), agentMessage.error, messageSend.error),
+      /names -32600 Invalid Request, which \/a2a\/message gives/
+    );
+  });
+});
+
 test("requests to /a2a/message and to POST / count toward one rate limit, before authentication reads them", async () => {
   await withOwnServer(async (serverPort, audited) => {
     // Use up the limit on /a2a/message with requests that carry no token.

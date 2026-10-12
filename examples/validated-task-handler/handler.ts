@@ -410,11 +410,16 @@ app.post("/", rateLimit, authenticate, parseJson, (req, res) =>
 
 // HackMyAgent's a2a target (hackmyagent attack <url> --target-type a2a) posts
 // {"from", "to", "content"} to <url>/a2a/message, a route A2A v0.3.0 does not
-// define, in place of a message/send request. The content is read as a user
-// message with one text part, so the message counts toward the same rate
-// limit and gets the same authentication, injection filter, audit lines and
-// JSON-RPC errors as a message sent to POST /. The reply to a message the
-// agent accepts holds the text of the completed task's reply.
+// define, in place of a message/send request. The message counts toward the
+// same rate limit as a message sent to POST / and gets the same
+// authentication. Its schema is the route's own: a from, to
+// or content the schema rejects gets -32600 Invalid Request, where POST /
+// gives -32602 Invalid params for a text part it rejects. The content is then
+// read as a user message with one text part, which gets the injection filter
+// and the processing error of POST /. Each check writes an audit line with
+// the action it has for POST /, and each JSON-RPC error has an id of null.
+// The reply to a message the agent accepts holds the text of the completed
+// task's reply.
 app.post("/a2a/message", rateLimit, authenticate, parseAgentMessageJson, (req, res) =>
   handleMessage(req, res, parseAgentMessage, (_id, result) => ({ content: result.status.message.parts[0].text }))
 );
