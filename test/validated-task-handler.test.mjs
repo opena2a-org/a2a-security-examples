@@ -1522,7 +1522,7 @@ function exampleCopy(edit) {
   return { top, dir };
 }
 
-test("with maxHeaderLines raised to 1,500, a request with 1,100 header lines and two Authorization headers gets 400 and one with 1,500 gets the handler's 431, so server.maxHeadersCount follows maxHeaderLines", async () => {
+test("with maxHeaderLines raised to 1,500, a request with 1,106 header lines, two of them Authorization headers, gets 400 and one with 1,500 gets the handler's 431, so server.maxHeadersCount follows maxHeaderLines", async () => {
   // While maxHeaderLines is 1,000, server.maxHeadersCount changes nothing, so
   // the test runs a copy of the example with a higher limit. If
   // server.maxHeadersCount is not set from maxHeaderLines, Node.js reads no
@@ -1541,6 +1541,8 @@ test("with maxHeaderLines raised to 1,500, a request with 1,100 header lines and
       const valid = "Authorization: Bearer demo-token";
       const invalid = "Authorization: Bearer undefined";
       const filler = (count) => Array(count).fill("a:");
+      // postRaw sends four header lines besides the given ones, so these
+      // requests have 1,106 header lines.
       for (const sent of [[valid, ...filler(1100), invalid], [invalid, ...filler(1100), valid]]) {
         const res = await postRaw(serverPort, sent);
         assert.equal(res.status, 400, `${sent[0]}, 1,100 other lines and ${sent.at(-1)} get 400`);
