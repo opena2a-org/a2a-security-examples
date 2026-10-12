@@ -123,7 +123,7 @@ function limiterOptionKeys(handler) {
   return keys;
 }
 
-test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets", () => {
+test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets", () => {
   const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
   assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
@@ -135,6 +135,9 @@ test("the limiter options reader reads a key in either quote and skips a comment
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${f(a, b)}`, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: f(a, b), // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `${a}, ${[b, { c, d }].length}`, // e")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `a, // b`, // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: `a, b`, // c")), ["points", "duration", "keyPrefix"]);
+  assert.deepEqual(limiterOptionKeys(add("  keyPrefix: x(/a, b/), // c")), ["points", "duration", "keyPrefix"]);
   // A value that starts with a regular expression or a comment is read too.
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a/.source, // c")), ["points", "duration", "keyPrefix"]);
   assert.deepEqual(limiterOptionKeys(add("  keyPrefix: /a, [//] b/.source, // c")), ["points", "duration", "keyPrefix"]);
