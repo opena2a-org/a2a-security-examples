@@ -93,17 +93,19 @@ test("the audit sentence names the handler's audit actions, including the one fo
 // order. Null when there is no such object, or when a line of it is neither a
 // comment nor one key: value pair with the key quoted or not, such as a spread,
 // a shorthand property, a key with no value after it on its line, a value that
-// a block comment, string or template continues on the next line, a value with
-// a closing bracket that the line does not open, as when the options object
-// closes before the }); line, or a second pair after a comma, as the options
-// such a line gives cannot be read from it. A comma or a // inside a string,
-// template or regular expression in a value, the regular expression a value
-// starts with among them, does not end the value, nor does a comma inside
-// brackets or a template substitution that the same line closes. Null too when
-// a value holds a slash that slashMayBeMisread() finds moduleTokens() may
-// misread, even if the line sets one option: a bracket or comma after that
-// slash may be read outside a regular expression when it is inside one, or
-// inside one when it is outside, so a comma that ends the value can be hidden.
+// a block comment, string or template continues on the next line, a value that
+// ends with a token it goes on after, such as the ? of a conditional, so that
+// the next line continues it, a value with a closing bracket that the line does
+// not open, as when the options object closes before the }); line, or a second
+// pair after a comma, as the options such a line gives cannot be read from it.
+// A comma or a // inside a string, template or regular expression in a value,
+// the regular expression a value starts with among them, does not end the
+// value, nor does a comma inside brackets or a template substitution that the
+// same line closes. Null too when a value holds a slash that
+// slashMayBeMisread() finds moduleTokens() may misread, even if the line sets
+// one option: a bracket or comma after that slash may be read outside a
+// regular expression when it is inside one, or inside one when it is outside,
+// so a comma that ends the value can be hidden.
 function limiterOptionKeys(handler) {
   const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
   if (!options) return null;
@@ -125,11 +127,17 @@ function limiterOptionKeys(handler) {
     // before the last token is followed by more than a comment. A closing
     // bracket that no earlier token on the line opens has as many brackets and
     // substitutions open as the token before it, or none as the first token.
+    // A value goes on after its last token unless that is a comma, a } or a
+    // token a slash divides after, as one that ends an operand is, so the next
+    // line continues a value that ends with an operator such as the ? of a
+    // conditional, and the : after a key on that line can be the conditional's.
     const value = moduleTokens(pair[3]);
     if (value.some((token, i) => slashMayBeMisread(value, i))) return null;
     const unopened = value.some((token, i) => token.type === "punct" && [")", "]", "}"].includes(token.value) && token.open === (value[i - 1]?.open ?? 0));
     const comma = value.findIndex((token, i) => token.type === "punct" && token.value === "," && value.slice(i + 1).every((later) => later.open >= token.open));
-    if (value.unclosed || unopened || value.length === 0 || comma === 0 || (comma >= 0 && comma < value.length - 1)) return null;
+    const last = value.at(-1);
+    const goesOn = last !== undefined && !slashDivides(last) && !(last.type === "punct" && ["}", ","].includes(last.value));
+    if (value.unclosed || unopened || goesOn || value.length === 0 || comma === 0 || (comma >= 0 && comma < value.length - 1)) return null;
     keys.push(pair[2]);
   }
   return keys;
@@ -160,7 +168,7 @@ function slashMayBeMisread(tokens, i) {
   return keyword(tokens[before], "if", "for", "while") || (keyword(tokens[before], "await") && keyword(tokens[before - 1], "for"));
 }
 
-test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line, a value that a block comment, string or template continues on the next line, a value with a closing bracket it does not open nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets, nor a value holding a slash that moduleTokens() may misread", () => {
+test("the limiter options reader reads a key in either quote, skips a comment and reads a value holding a comma or a // in a string, template or regular expression, and reads neither a spread, a shorthand property, a method, a computed key, a key with no value on its line, a value that a block comment, string, template or an operator at its end continues on the next line, a value with a closing bracket it does not open nor a pair after another on one line, even after a value holding a // or a comma in a string, a template, a regular expression, a template substitution or brackets, nor a value holding a slash that moduleTokens() may misread", () => {
   const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
   assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
@@ -214,6 +222,10 @@ test("the limiter options reader reads a key in either quote, skips a comment an
   ]) {
     assert.deepEqual(limiterOptionKeys(add(line)), ["points", "duration", "keyPrefix"], `${line.trim()} is read as one key: value pair`);
   }
+  // A value that ends with the end of an operand or with a } ends on its line.
+  for (const line of ["  keyPrefix: f(a)", "  keyPrefix: a[0]", "  keyPrefix: n++", "  keyPrefix: this", "  keyPrefix: () => {}", "  keyPrefix: a ? b : c"]) {
+    assert.deepEqual(limiterOptionKeys(add(line)), ["points", "duration", "keyPrefix"], `${line.trim()} is read as one key: value pair`);
+  }
   for (const line of [
     "  ...{ blockDuration: 300 },",
     "  ...extraOptions,",
@@ -261,10 +273,29 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     // no ( is found for the ) before the slash and the slash may be misread.
     "  blockDuration: (a] ) / 2, // c",
     "  blockDuration: (a} ) / 2, // c",
+    // Here the ) closes the { or [ in its place, so no closing bracket goes
+    // unopened, and only slashMayBeMisread() finding a { or [ where it looks
+    // for the ( of the ) gives null.
+    "  keyPrefix: { a ) / 2,",
+    "  keyPrefix: [ a ) / 2,",
     // A closing bracket the line does not open ends the options object
     // before the }); line, and the limiter gets the object after it.
     "  duration: 60 } && { blockDuration: 300, // per minute",
     "  duration: /* s */ 60 } && { blockDuration: 300, // per minute",
+    // A ), ] or } the line does not open, after another token or as the first
+    // token of the value, closes a bracket that an earlier line opens, if any,
+    // so the line does not set one option.
+    "  duration: 60) && 1,",
+    "  duration: 60] && 1,",
+    "  duration: ) && 1,",
+    "  duration: ] && 1,",
+    "  duration: } && 1,",
+    // A value that ends with a token it goes on after, such as the ? of a
+    // conditional, which the next line continues. Each next line reads as a
+    // key: value pair, and the : in it is the conditional's.
+    ["  keyPrefix: x ?", "  duration: 60, // per minute"],
+    ["  keyPrefix: f(a ?", "  duration: 60), // c"],
+    ["  keyPrefix: [a ?", "  duration: 60], // c"],
     // A value that a block comment, string or template continues on the next
     // line. That line reads as a key: value pair in the first four of these,
     // and as a comment in the last.
@@ -718,23 +749,32 @@ function lineEnd(source, start) {
 
 // A function that gives, for an index start of source, the index after the
 // slash that closes the regular expression literal starting at start, or -1 if
-// the line ends first. A backslash escapes the character after it, and a slash
-// inside a character class does not close the literal. Where a literal that has
-// read up to index k closes depends only on k and on whether a class is open
-// there, so both answers for every k are found in one pass from the end of
-// source, and a line of slashes that never close, as in a run of /[, takes
-// linear time.
+// the line ends first. A backslash escapes the character after it, except a
+// line terminator, which ends the line after a backslash too, as a literal
+// cannot hold one, and a slash inside a character class does not close the
+// literal. Where a literal that has read up to index k closes depends only on k
+// and on whether a class is open there, so both answers for every k are found
+// in one pass from the end of source, and a line of slashes that never close,
+// as in a run of /[, takes linear time.
 function regularExpressionEnds(source) {
   const outside = new Int32Array(source.length + 2).fill(-1);
   const inside = new Int32Array(source.length + 2).fill(-1);
+  const lineTerminator = (k) => k < source.length && "\n\r\u{2028}\u{2029}".includes(source[k]);
   for (let k = source.length - 1; k >= 0; k--) {
     const c = source[k];
-    if ("\n\r\u{2028}\u{2029}".includes(c)) continue;
+    if (lineTerminator(k) || (c === "\\" && lineTerminator(k + 1))) continue;
     const next = c === "\\" ? k + 2 : k + 1;
     outside[k] = c === "/" ? k + 1 : c === "[" ? inside[next] : outside[next];
     inside[k] = c === "]" ? outside[next] : inside[next];
   }
   return (start) => outside[start + 1];
+}
+
+// Whether moduleTokens() reads a slash right after the token as division, as
+// it does after a token that ends an operand. moduleTokens() says which tokens
+// these are.
+function slashDivides(token) {
+  return token !== undefined && (token.type === "name" ? !token.beforeExpression : token.type !== "punct" || token.value === ")" || token.value === "]" || token.postfix);
 }
 
 // The tokens of a module, read in one pass: names and strings with their escape
@@ -768,9 +808,6 @@ function moduleTokens(text) {
   const tokens = [];
   const regularExpressionEnd = regularExpressionEnds(source);
   let unclosed = false;
-  const slashDivides = (token) =>
-    token !== undefined &&
-    (token.type === "name" ? !token.beforeExpression : token.type !== "punct" || token.value === ")" || token.value === "]" || token.postfix);
   // For each template substitution open at this point, the { opened inside it
   // and not yet closed.
   const substitutions = [];
@@ -1173,6 +1210,20 @@ test("moduleTokens() reads a long run of /[ in linear time", () => {
   const ms = performance.now() - start;
   assert.equal(tokens.length, 40000, "each character is one punctuator");
   assert.ok(ms < 1000, `reading 40,000 characters took ${Math.round(ms)} ms`);
+});
+
+test("regularExpressionEnds() reads past an escaped slash and a slash in a character class, and gives -1 when the line ends first, after a backslash too", () => {
+  assert.equal(regularExpressionEnds("x = /a/g")(4), 7);
+  assert.equal(regularExpressionEnds("/a\\/b/")(0), 6);
+  assert.equal(regularExpressionEnds("/[/]/")(0), 5);
+  assert.equal(regularExpressionEnds("/a")(0), -1);
+  assert.equal(regularExpressionEnds("/a\\")(0), -1);
+  // A regular expression literal holds no line terminator, even escaped.
+  for (const lineBreak of ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"]) {
+    for (const source of ["/a" + lineBreak + "b/", "/a\\" + lineBreak + "b/", "/[a\\" + lineBreak + "]/"]) {
+      assert.equal(regularExpressionEnds(source)(0), -1, JSON.stringify(source));
+    }
+  }
 });
 
 test("the lowest release that can run the tests comes from the files it is given, and a name the release table does not list fails", () => {
