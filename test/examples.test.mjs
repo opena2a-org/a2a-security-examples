@@ -13,6 +13,13 @@ import { contentSha256, publishedSha256, schema, schemaErrors, unknownKeywords }
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const typescript = join(root, "examples/validated-task-handler/node_modules/typescript/lib/typescript.js");
 
+// The text of a file in the repository with "\n" line endings, so the checks
+// below hold on a copy with "\r\n" ones. .gitattributes gives a checkout "\n"
+// line endings, but a copy made outside git keeps the ones it was given.
+function readText(path) {
+  return readFileSync(join(root, path), "utf8").replace(/\r\n/g, "\n");
+}
+
 function filesUnder(dir) {
   return readdirSync(dir).flatMap((name) => {
     if (name === "node_modules" || name === "dist") return [];
@@ -30,11 +37,11 @@ const unreachable = [
 ];
 
 test("README and example sources link no private repository or missing page", () => {
-  const files = [join(root, "README.md"), ...filesUnder(join(root, "examples"))];
+  const files = ["README.md", ...filesUnder(join(root, "examples")).map((path) => path.slice(root.length + 1))];
   for (const file of files) {
-    const text = readFileSync(file, "utf8");
+    const text = readText(file);
     for (const url of unreachable) {
-      assert.ok(!text.includes(url), `${file.slice(root.length + 1)} links ${url}`);
+      assert.ok(!text.includes(url), `${file} links ${url}`);
     }
   }
 });
@@ -87,7 +94,7 @@ test("the schema check rejects the agent card and task request the examples used
 });
 
 test("the message/send request in the README and the reply it shows validate against the A2A v0.3.0 schema", () => {
-  const readme = readFileSync(join(root, "README.md"), "utf8");
+  const readme = readText("README.md");
   const blocks = [...readme.matchAll(/^```(\S*)\n([\s\S]*?)^```$/gm)].map((m) => ({ lang: m[1], body: m[2] }));
   const i = blocks.findIndex((b) => b.lang === "bash" && b.body.includes('"method":"message/send"'));
   assert.ok(i >= 0, "a bash block in the README sends message/send");
@@ -99,8 +106,17 @@ test("the message/send request in the README and the reply it shows validate aga
   assert.equal(reply.id, request.id, "the reply answers the request's id");
 });
 
+test("this file reads each text file it checks through readText, so its checks hold on a copy with \"\\r\\n\" line endings", () => {
+  const source = readText("test/examples.test.mjs").replace(/^function readText\(path\) \{\n[\s\S]*?\n\}$/m, "");
+  const reads = [...source.matchAll(/(JSON\.parse\()?readFileSync\(/g)];
+  assert.ok(reads.length > 0, "this file reads package.json files");
+  for (const read of reads) {
+    assert.ok(read[1], `the read at offset ${read.index} parses JSON, which allows "\\r\\n", or goes through readText`);
+  }
+});
+
 test(".gitignore excludes environment, key and secrets files", () => {
-  const patterns = readFileSync(join(root, ".gitignore"), "utf8").split("\n").map((l) => l.trim());
+  const patterns = readText(".gitignore").split("\n").map((l) => l.trim());
   for (const pattern of [".env", ".env.*", "*.key", "*.pem", "secrets.json"]) {
     assert.ok(patterns.includes(pattern), `.gitignore lists ${pattern}`);
   }
@@ -624,7 +640,7 @@ function unusedImports(sources) {
 test("every test file uses each name it imports", () => {
   const sources = {};
   for (const name of readdirSync(join(root, "test")).filter((file) => file.endsWith(".mjs"))) {
-    sources[`test/${name}`] = readFileSync(join(root, "test", name), "utf8");
+    sources[`test/${name}`] = readText(`test/${name}`);
   }
   assert.deepEqual(unusedImports(sources), []);
 });
