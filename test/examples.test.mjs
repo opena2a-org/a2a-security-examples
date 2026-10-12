@@ -13,11 +13,16 @@ import { contentSha256, publishedSha256, schema, schemaErrors, unknownKeywords }
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const typescript = join(root, "examples/validated-task-handler/node_modules/typescript/lib/typescript.js");
 
-// The text of a file in the repository with "\n" line endings, so the checks
-// below hold on a copy with "\r\n" ones. .gitattributes gives a checkout "\n"
-// line endings, but a copy made outside git keeps the ones it was given.
+// The text with "\n" line endings in place of "\r\n" ones, so the checks below
+// hold on a copy with "\r\n" ones. .gitattributes gives a checkout "\n" line
+// endings, but a copy made outside git keeps the ones it was given.
+function lfLineEndings(text) {
+  return text.replace(/\r\n/g, "\n");
+}
+
+// The text of a file in the repository with "\n" line endings.
 function readText(path) {
-  return readFileSync(join(root, path), "utf8").replace(/\r\n/g, "\n");
+  return lfLineEndings(readFileSync(join(root, path), "utf8"));
 }
 
 function filesUnder(dir) {
@@ -106,12 +111,19 @@ test("the message/send request in the README and the reply it shows validate aga
   assert.equal(reply.id, request.id, "the reply answers the request's id");
 });
 
-test("this file reads each text file it checks through readText, so its checks hold on a copy with \"\\r\\n\" line endings", () => {
-  const source = readText("test/examples.test.mjs").replace(/^function readText\(path\) \{\n[\s\S]*?\n\}$/m, "");
+test("this file reads each file it checks through readText, which gives \"\\n\" line endings, or JSON.parse, which allows \"\\r\\n\", so its checks hold on a copy with \"\\r\\n\" line endings", () => {
+  assert.equal(lfLineEndings("a\r\nb\r\n"), "a\nb\n", "lfLineEndings turns \"\\r\\n\" into \"\\n\"");
+  const file = readText("test/examples.test.mjs");
+  const helper = file.match(/^function readText\(path\) \{\n[\s\S]*?\n\}$/m);
+  assert.match(helper?.[0] ?? "", /^function readText\(path\) \{\n  return lfLineEndings\(readFileSync\(join\(root, path\), "utf8"\)\);\n\}$/, "readText gives a file's text through lfLineEndings");
+  // The file with readText blanked by spaces, so that a read is on the same
+  // line as in the file.
+  const source = file.slice(0, helper.index) + helper[0].replace(/[^\n]/g, " ") + file.slice(helper.index + helper[0].length);
   const reads = [...source.matchAll(/(JSON\.parse\()?readFileSync\(/g)];
   assert.ok(reads.length > 0, "this file reads package.json files");
   for (const read of reads) {
-    assert.ok(read[1], `the read at offset ${read.index} parses JSON, which allows "\\r\\n", or goes through readText`);
+    const line = source.slice(0, read.index).split("\n").length;
+    assert.ok(read[1], `the read on line ${line} parses JSON, which allows "\\r\\n", or goes through readText`);
   }
 });
 

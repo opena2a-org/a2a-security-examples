@@ -8,10 +8,15 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// The text of a file in the repository with "\n" line endings, so the checks
-// below hold on a checkout with "\r\n" ones, as core.autocrlf=true gives.
+// The text with "\n" line endings in place of "\r\n" ones, so the checks below
+// hold on a checkout with "\r\n" ones, as core.autocrlf=true gives.
+function lfLineEndings(text) {
+  return text.replace(/\r\n/g, "\n");
+}
+
+// The text of a file in the repository with "\n" line endings.
 function readText(path) {
-  return readFileSync(join(root, path), "utf8").replace(/\r\n/g, "\n");
+  return lfLineEndings(readFileSync(join(root, path), "utf8"));
 }
 
 const readme = readText("README.md");
@@ -86,23 +91,30 @@ test("the audit sentence names the handler's audit actions, including the one fo
 
 // The keys of the options object handler.ts creates the limiter with, in
 // order. Null when there is no such object, or when a line of it is neither a
-// comment nor one key: value pair with the key quoted or not, such as a spread
-// or a shorthand property, as the options such a line gives cannot be read
-// from it.
+// comment nor one key: value pair with the key quoted or not, such as a spread,
+// a shorthand property or a second pair after a comma, as the options such a
+// line gives cannot be read from it. A comma or a // inside a string, template
+// or regular expression in a value does not end the value.
 function limiterOptionKeys(handler) {
   const options = handler.match(/new RateLimiterMemory\(\{\n([\s\S]*?)\n\}\);/);
   if (!options) return null;
   const keys = [];
   for (const line of options[1].split("\n")) {
     if (/^\s*(\/\/.*|\/\*(?:[^*]|\*(?!\/))*\*\/\s*)?$/.test(line)) continue;
-    const pair = line.match(/^\s*(["']?)(\w+)\1\s*:\s*[^\s,/][^,]*?,?\s*(\/\/.*)?$/);
+    const pair = line.match(/^\s*(["']?)(\w+)\1\s*:(\s*[^\s,/].*)$/);
     if (!pair) return null;
+    // moduleTokens() gives no token for a comment and one token for a string,
+    // template or regular expression, so a comma token before the last token
+    // is followed by more than a comment.
+    const value = moduleTokens(pair[3]);
+    const comma = value.findIndex((token) => token.type === "punct" && token.value === ",");
+    if (comma >= 0 && comma < value.length - 1) return null;
     keys.push(pair[2]);
   }
   return keys;
 }
 
-test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key nor a pair after another on one line", () => {
+test("the limiter options reader reads a key in either quote and skips a comment, and reads neither a spread, a shorthand property, a method, a computed key nor a pair after another on one line, even after a value holding a // or a comma in a string or template", () => {
   const add = (...lines) => ["const rateLimiter = new RateLimiterMemory({", "  points: 30, // requests", "  duration: 60, // per minute", ...lines, "});", ""].join("\n");
   assert.deepEqual(limiterOptionKeys(add()), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add('  "blockDuration": 300,')), ["points", "duration", "blockDuration"]);
@@ -110,6 +122,7 @@ test("the limiter options reader reads a key in either quote and skips a comment
   assert.deepEqual(limiterOptionKeys(add("  // blockDuration: 300,")), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add("  /* blockDuration: 300, */")), ["points", "duration"]);
   assert.deepEqual(limiterOptionKeys(add("")), ["points", "duration"]);
+  assert.deepEqual(limiterOptionKeys(add('  keyPrefix: "a, // b", // c')), ["points", "duration", "keyPrefix"]);
   for (const line of [
     "  ...{ blockDuration: 300 },",
     "  ...extraOptions,",
@@ -119,6 +132,9 @@ test("the limiter options reader reads a key in either quote and skips a comment
     '  keyPrefix: "rl", blockDuration: 300,',
     "  /* a */ blockDuration: 300, /* b */",
     "  points: 30 /* , */, blockDuration: 300,",
+    '  duration: "//", blockDuration: 300,',
+    '  duration: "//".length * 30, blockDuration: 300,',
+    "  keyPrefix: `//`, blockDuration: 300,",
   ]) {
     assert.equal(limiterOptionKeys(add(line)), null, `${line.trim()} is read as neither a comment nor one key: value pair`);
   }
@@ -160,16 +176,23 @@ test("step 1 says that clients behind a reverse proxy share one count unless the
   assert.ok(step.includes("never sets it to `true`: Express then gives as `req.ip` the leftmost `X-Forwarded-For` address, which the client chooses"), "step 1 says not to set trust proxy to true, and why");
 });
 
-test("a checkout gets \"\\n\" line endings, and this file reads each text file it checks through readText", () => {
+test("a checkout gets \"\\n\" line endings, and this file reads each file it checks through readText, which gives \"\\n\" line endings, or JSON.parse, which allows \"\\r\\n\"", () => {
   // core.autocrlf=true checks text files out with "\r\n" line endings unless
   // .gitattributes says otherwise, and the line splits and patterns in this
   // file expect "\n".
   assert.ok(readText(".gitattributes").split("\n").includes("* text=auto eol=lf"), ".gitattributes checks text files out with \"\\n\" line endings");
-  const source = readText("test/readme.test.mjs").replace(/^function readText\(path\) \{\n[\s\S]*?\n\}$/m, "");
+  assert.equal(lfLineEndings("a\r\nb\r\n"), "a\nb\n", "lfLineEndings turns \"\\r\\n\" into \"\\n\"");
+  const file = readText("test/readme.test.mjs");
+  const helper = file.match(/^function readText\(path\) \{\n[\s\S]*?\n\}$/m);
+  assert.match(helper?.[0] ?? "", /^function readText\(path\) \{\n  return lfLineEndings\(readFileSync\(join\(root, path\), "utf8"\)\);\n\}$/, "readText gives a file's text through lfLineEndings");
+  // The file with readText blanked by spaces, so that a read is on the same
+  // line as in the file.
+  const source = file.slice(0, helper.index) + helper[0].replace(/[^\n]/g, " ") + file.slice(helper.index + helper[0].length);
   const reads = [...source.matchAll(/(JSON\.parse\()?readFileSync\(/g)];
   assert.ok(reads.length > 0, "this file reads package.json files");
   for (const read of reads) {
-    assert.ok(read[1], `the read at offset ${read.index} parses JSON, which allows "\\r\\n", or goes through readText`);
+    const line = source.slice(0, read.index).split("\n").length;
+    assert.ok(read[1], `the read on line ${line} parses JSON, which allows "\\r\\n", or goes through readText`);
   }
 });
 
@@ -733,8 +756,11 @@ function namesImportedFromNodeTest(text) {
 // proxy setting on any object: set("trust proxy", ...) or enable("trust
 // proxy"), with either quote, escape sequences in the setting's name, and line
 // breaks or comments anywhere in the call. A call inside a comment, string or
-// template is not a call. The reader does not handle a setting name written
-// as a template or a method named with brackets, as in app["set"](...).
+// template is not a call, nor is a call of a function named set or enable that
+// is not a method. The reader does not handle a setting name written as a
+// template or held in a variable, as in app.set(setting, 1), a method named
+// with brackets, as in app["set"](...), or a method called through call() or
+// apply(), as in app.set.call(app, "trust proxy", 1).
 function trustProxyCalls(text) {
   const tokens = moduleTokens(text);
   const is = (token, type, value) => token?.type === type && (value === undefined || token.value === value);
@@ -748,7 +774,7 @@ function trustProxyCalls(text) {
   return calls;
 }
 
-test("the trust proxy reader finds set and enable calls in any layout, and none in a comment, string or template or for another setting", () => {
+test("the trust proxy reader finds set and enable calls in any layout, and none in a comment, string or template, for another setting or of a function that is not a method", () => {
   assert.deepEqual(trustProxyCalls('app.set("trust proxy", "10.0.0.2");\n'), ["set"]);
   assert.deepEqual(trustProxyCalls("app.set('trust proxy', 'uniquelocal');\n"), ["set"]);
   assert.deepEqual(trustProxyCalls('app.enable("trust proxy");\n'), ["enable"]);
@@ -756,6 +782,7 @@ test("the trust proxy reader finds set and enable calls in any layout, and none 
   assert.deepEqual(trustProxyCalls('// app.set("trust proxy", "10.0.0.2")\n/* app.enable("trust proxy") */\n'), []);
   assert.deepEqual(trustProxyCalls('const a = \'app.set("trust proxy", 1)\';\nconst b = `app.enable("trust proxy")`;\n'), []);
   assert.deepEqual(trustProxyCalls('app.set("x-powered-by", false);\napp.disable("trust proxy");\napp.get("trust proxy");\n'), []);
+  assert.deepEqual(trustProxyCalls('set("trust proxy", 1);\nenable("trust proxy");\n'), []);
   // handler.ts names app.set("trust proxy", "10.0.0.2") in a comment, and a
   // call of that form added after its app.disable("x-powered-by") is read.
   const handler = readText("examples/validated-task-handler/handler.ts");
