@@ -123,15 +123,43 @@ function stopServer(proc, signal = "SIGTERM") {
 // close only once tsx and the server it started have both exited.
 const started = new Set();
 
-// The process ids of the tsx processes spawnExample has started whose output
-// pipes have closed.
-const closedTsx = [];
+// The process ids of the tsx processes that have exited: those spawnExample
+// has started, once their output pipes have closed, and those the test run of
+// the interrupted-run test has started, once that test has waited for them to
+// exit.
+const exitedTsx = [];
 
 // The socket a tsx process binds under the temporary directory, which it takes
 // from the TMPDIR it inherits from this process, and removes when it exits. On
 // Windows tsx binds a named pipe, which leaves no file, and there is no path.
 function tsxSocket(pid) {
   return process.platform === "win32" ? undefined : join(tmpdir(), `tsx-${process.geteuid()}`, `${pid}.pipe`);
+}
+
+// Remove the socket a tsx process that has exited has left, if it left one.
+// tsx removes its socket when SIGINT or SIGTERM ends it, but not when SIGKILL
+// does, and not when the signal reaches it after it has bound the socket and
+// before it handles signals.
+function removeTsxSocket(pid) {
+  const socket = tsxSocket(pid);
+  if (socket) rmSync(socket, { force: true });
+}
+
+// The longest path a Unix socket binds at, in bytes: the size of sun_path in
+// the socket address of macOS and of Linux. The tests do not check the length
+// of a socket path on another platform.
+const socketPathLimit = { darwin: 104, linux: 108 }[process.platform];
+
+// Why the tsx process pid cannot bind its socket, in one line that says what
+// to change, or undefined when the socket's path is no longer than a Unix
+// socket path may be here. Where Node.js refuses a longer path, tsx exits with
+// listen EINVAL and a stack trace.
+function socketPathTooLong(pid) {
+  const socket = tsxSocket(pid);
+  if (socket === undefined || socketPathLimit === undefined) return undefined;
+  const bytes = Buffer.byteLength(socket);
+  if (bytes <= socketPathLimit) return undefined;
+  return `The temporary directory ${tmpdir()} is too long: tsx binds its socket at ${socket}, a path of ${bytes} bytes, and a Unix socket path holds at most ${socketPathLimit} bytes here. Set TMPDIR to a shorter directory.`;
 }
 
 // Start tsx and the example, or Node with args instead. On POSIX the process
@@ -148,7 +176,7 @@ function spawnExample(env, cwd = example, args = [tsx, "handler.ts"]) {
     started.add(proc);
     proc.once("close", () => {
       started.delete(proc);
-      if (args[0] === tsx) closedTsx.push(proc.pid);
+      if (args[0] === tsx) exitedTsx.push(proc.pid);
     });
   }
   return proc;
@@ -237,6 +265,17 @@ async function startServer(serverPort, onOutput = () => {}, cwd = example) {
   };
   proc.stdout.on("data", record);
   proc.stderr.on("data", record);
+  // The socket's path has the process id of tsx in it, so its length is known
+  // only now that tsx has started. With a path that is too long, stop tsx,
+  // wait until it has exited, and fail with the line that names TMPDIR, not
+  // with the output of tsx.
+  const tooLong = proc.pid === undefined ? undefined : socketPathTooLong(proc.pid);
+  if (tooLong) {
+    const closed = new Promise((resolve) => proc.once("close", resolve));
+    stopServer(proc);
+    await closedWithin(proc, closed, 10000, `${tooLong} tsx did not exit within 10 seconds of being stopped.`);
+    throw new Error(tooLong);
+  }
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       stopServer(proc);
@@ -727,21 +766,52 @@ test("a process that has not closed when the wait fails no longer keeps the test
   }
 });
 
+// Start a server, then stop tsx and the server with SIGKILL and wait until
+// both have exited. SIGKILL gives tsx no chance to remove its socket, so remove
+// it here once tsx has exited. A check that looks for the socket in the wrong
+// place would find it removed whether or not it was, so look for it first, at
+// the path socketOf gives for the process id of tsx. The server is stopped
+// when that check fails too: startServer unrefs it, so the test run would
+// otherwise end and leave tsx and the server running.
+async function stopWithSigkill(socketOf = tsxSocket) {
+  const proc = await startServer(await freePort());
+  const closed = new Promise((resolve) => proc.once("close", resolve));
+  const socket = socketOf(proc.pid);
+  try {
+    if (socket) assert.ok(existsSync(socket), `tsx has bound its socket at ${socket}`);
+  } finally {
+    stopServer(proc, "SIGKILL");
+    await within(closed, 10000, "tsx and the server it started still hold the output pipes 10 seconds after stopServer");
+    removeTsxSocket(proc.pid);
+  }
+}
+
 test("stopping a server ends tsx and the server it started even when tsx cannot pass the signal on", async () => {
   // SIGKILL ends tsx at once, as ChildProcess.kill() ends it on Windows, so tsx
   // passes nothing on. A server left running keeps tsx's stdout and stderr
   // open, the close event never comes, and a test that waits for it never
   // ends. Windows has no signals; there stopServer ends the process tree.
-  const proc = await startServer(await freePort());
-  const closed = new Promise((resolve) => proc.once("close", resolve));
-  // SIGKILL gives tsx no chance to remove its socket, so remove it here once
-  // tsx has exited. A check that looks for the socket in the wrong place would
-  // find it removed whether or not it was, so look for it first.
-  const socket = tsxSocket(proc.pid);
-  if (socket) assert.ok(existsSync(socket), `tsx has bound its socket at ${socket}`);
-  stopServer(proc, "SIGKILL");
-  await within(closed, 10000, "tsx and the server it started still hold the output pipes 10 seconds after stopServer");
-  if (socket) rmSync(socket, { force: true });
+  await stopWithSigkill();
+});
+
+test("the SIGKILL test stops tsx and the server it started when its check that tsx has bound its socket fails", async () => {
+  // startServer unrefs the server, so a test that fails without stopping it
+  // lets the test run end while tsx and the server keep running. A server
+  // whose output pipes have closed is no longer in the set of started servers.
+  const before = new Set(started);
+  await assert.rejects(stopWithSigkill(() => join(example, "no-socket.pipe")), /tsx has bound its socket at .*no-socket\.pipe$/);
+  const left = [...started].filter((proc) => !before.has(proc));
+  try {
+    assert.deepEqual(left.map((proc) => proc.pid), [], "tsx and the server the failed test started have exited");
+  } finally {
+    // Stop a server the failed test left, so that this test leaves none.
+    for (const proc of left) {
+      const closed = new Promise((resolve) => proc.once("close", resolve));
+      stopServer(proc, "SIGKILL");
+      await within(closed, 10000, "tsx and the server it started still hold the output pipes 10 seconds after stopServer");
+      removeTsxSocket(proc.pid);
+    }
+  }
 });
 
 test("the stalled-upload test loads its preload with --require, not --import", () => {
@@ -754,14 +824,19 @@ test("the stalled-upload test loads its preload with --require, not --import", (
   assert.match(stalledTest, /NODE_OPTIONS: requireOptions\(file\)/, "the stalled-upload test loads its preload with --require");
 });
 
-test("the interrupted-run test reads the output of the test run it starts and gives it in each of its failure messages", () => {
-  // Without that output, a run that cannot start a server fails with no cause.
-  // The line break after test( keeps the search from finding this test's own
-  // string, which comes first in the file.
+// The source of this file and, in it, of the interrupted-run test. The line
+// break after test( keeps the search from finding this function's own string,
+// which comes first in the file.
+function interruptedRunTest() {
   const source = readFileSync(fileURLToPath(import.meta.url), "utf8").replace(/\r\n/g, "\n");
   const start = source.indexOf('test(\n  "interrupting a test run stops the servers it started');
   assert.ok(start >= 0, "this file has the interrupted-run test");
-  const interruptedTest = source.slice(start, source.indexOf("\ntest(", start));
+  return { source, interruptedTest: source.slice(start, source.indexOf("\ntest(", start)) };
+}
+
+test("the interrupted-run test reads the output of the test run it starts and gives it in each of its failure messages", () => {
+  // Without that output, a run that cannot start a server fails with no cause.
+  const { interruptedTest } = interruptedRunTest();
   assert.match(interruptedTest, /\{ env, stdio: \["ignore", "pipe", "pipe"\], detached: true \}/, "the run's stdout and stderr are piped to the test");
   assert.match(interruptedTest, /run\.stdout\.on\("data", \(chunk\) => \(log \+= chunk\)\)/, "the test reads the run's stdout");
   assert.match(interruptedTest, /run\.stderr\.on\("data", \(chunk\) => \(log \+= chunk\)\)/, "the test reads the run's stderr");
@@ -769,6 +844,22 @@ test("the interrupted-run test reads the output of the test run it starts and gi
   const withOutput = interruptedTest.match(/:\\n\$\{log\}`/g) ?? [];
   assert.ok(messages.length > 0, "the interrupted-run test makes assertions");
   assert.equal(withOutput.length, messages.length, "each assertion message in the interrupted-run test ends with the run's output");
+});
+
+test("the interrupted-run test removes the socket of each server the run started, and the last test looks for those sockets", () => {
+  // The SIGTERM of the interrupted run can reach the tsx of the stalled-upload
+  // server after it has bound its socket and before it handles signals, and
+  // tsx then leaves the socket. spawnExample of this run did not start that
+  // tsx, so the last test looks for its socket only once the interrupted-run
+  // test has added its process id to exitedTsx.
+  const { source, interruptedTest } = interruptedRunTest();
+  assert.match(
+    interruptedTest,
+    /for \(const pid of groups\) \{\n\s*removeTsxSocket\(pid\);\n\s*exitedTsx\.push\(pid\);\n\s*\}/,
+    "the test removes the socket of each server the run started and adds its process id to exitedTsx"
+  );
+  const lastTest = source.slice(source.lastIndexOf("\ntest("));
+  assert.match(lastTest, /exitedTsx\.map\(tsxSocket\)\.filter\(\(socket\) => existsSync\(socket\)\)/, "the last test looks for the socket of each process id in exitedTsx");
 });
 
 test("the stalled-upload preload sets the connection check interval when the server is created", () => {
@@ -1345,17 +1436,17 @@ test(
     run.once("close", () => (ended = true));
     const preloadDirs = () => readdirSync(runTmp).filter((name) => name.startsWith("a2a-preload-"));
     let groups = new Set();
+    // A server that has exited counts as stopped while it waits to be reaped.
+    const running = () => {
+      const live = liveGroups();
+      return [...groups].filter((pid) => live.has(pid));
+    };
     try {
       // A run that has ended has started all the servers it will start.
       for (let i = 0; i < 600 && groups.size < 2 && !ended; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
         groups = descendantGroups(run.pid);
       }
-      // A server that has exited counts as stopped while it waits to be reaped.
-      const running = () => {
-        const live = liveGroups();
-        return [...groups].filter((pid) => live.has(pid));
-      };
       const runningBefore = running();
       // When a server has not started or has already stopped, a test in the
       // run fails, and the run reports the server's output only once that test
@@ -1398,9 +1489,94 @@ test(
       try {
         stopServer(run);
         for (const pid of groups) stopServer({ pid });
+        // Each group is led by the tsx of a server. tsx removes its socket
+        // when the SIGTERM of the interrupted run ends it, but not when that
+        // signal reaches it after it has bound the socket and before it
+        // handles signals, as it can reach the tsx of the stalled-upload
+        // server. So once the servers have exited, remove the sockets they
+        // left, and add their process ids to those the last test looks for
+        // sockets of.
+        for (let i = 0; i < 100 && running().length > 0; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        for (const pid of groups) {
+          removeTsxSocket(pid);
+          exitedTsx.push(pid);
+        }
       } finally {
         removeTempDir(runTmp);
       }
+    }
+  }
+);
+
+// Listen on a Unix socket at path and close it again. Resolves with whether the
+// socket was at that path while the server listened and, when the server could
+// not listen, with the error's code.
+function bindSocket(path) {
+  return new Promise((resolve) => {
+    const probe = createServer();
+    probe.once("error", (err) => resolve({ bound: false, code: err.code }));
+    probe.listen(path, () => {
+      const bound = existsSync(path);
+      probe.close(() => resolve({ bound }));
+    });
+  });
+}
+
+test(
+  "a Unix socket does not bind at a path one byte longer than the tests take as the longest, and binds at one of that length where Node.js refuses the longer one with EINVAL",
+  { skip: socketPathLimit === undefined && "the tests do not check the length of a socket path on this platform" },
+  async () => {
+    const dir = makeTempDir("a2a-");
+    try {
+      assert.ok(Buffer.byteLength(dir) + 2 <= socketPathLimit, `a path of ${socketPathLimit} bytes fits in ${dir}`);
+      const pathOf = (bytes) => join(dir, "s".repeat(bytes - Buffer.byteLength(dir) - 1));
+      // A Node.js release that binds a path as given refuses a longer one with
+      // EINVAL. One whose libuv shortens the path instead, as libuv documents
+      // for uv_pipe_bind, binds a shorter path and gives no error.
+      const longer = await bindSocket(pathOf(socketPathLimit + 1));
+      assert.equal(longer.bound, false, `no socket binds at a path of ${socketPathLimit + 1} bytes`);
+      if (longer.code === "EINVAL") {
+        assert.deepEqual(await bindSocket(pathOf(socketPathLimit)), { bound: true }, `a socket binds at a path of ${socketPathLimit} bytes`);
+      }
+    } finally {
+      removeTempDir(dir);
+    }
+  }
+);
+
+test(
+  "a test run whose temporary directory is too long for the socket tsx binds fails with one line that names TMPDIR, not with the listen error of tsx",
+  { skip: socketPathLimit === undefined && "the tests do not check the length of a socket path on this platform" },
+  () => {
+    const dir = makeTempDir("a2a-long-");
+    try {
+      // A directory whose own path is at least as long as a socket path may be,
+      // so the path of a socket in it is longer whatever the user id and the
+      // process id in its name. The run makes what it makes inside dir.
+      const long = join(dir, "t".repeat(Math.max(1, socketPathLimit - Buffer.byteLength(dir) - 1)));
+      mkdirSync(long);
+      const env = { ...process.env, TMPDIR: long };
+      // Left set, the nested run reports to this run instead of running on its own.
+      delete env.NODE_TEST_CONTEXT;
+      const run = spawnSync(process.execPath, ["--test", "--test-name-pattern=^package-lock.json pins", fileURLToPath(import.meta.url)], {
+        env,
+        encoding: "utf8",
+        timeout: 60000,
+      });
+      const log = run.stdout + run.stderr;
+      assert.equal(run.status, 1, `the run fails:\n${log}`);
+      const line = log.split("\n").find((l) => l.includes("Set TMPDIR to a shorter directory."));
+      assert.ok(line, `the run's output has a line that says to set TMPDIR to a shorter directory:\n${log}`);
+      const socketDir = join(long, `tsx-${process.geteuid()}`);
+      assert.ok(
+        line.includes(`The temporary directory ${long} is too long: tsx binds its socket at ${socketDir}`),
+        `that line names the temporary directory and the socket tsx binds:\n${log}`
+      );
+      assert.doesNotMatch(log, /listen EINVAL/, `the run's output does not have the listen error of tsx:\n${log}`);
+    } finally {
+      removeTempDir(dir);
     }
   }
 );
@@ -2143,7 +2319,7 @@ test("the tests leave no temporary directory in the set an interrupted run remov
   // takes each out of the set as well, so the set is empty here.
   assert.deepEqual([...tempDirs], [], "removeTempDir has removed every temporary directory makeTempDir made");
   if (process.platform !== "win32") {
-    const left = closedTsx.map(tsxSocket).filter((socket) => existsSync(socket));
+    const left = exitedTsx.map(tsxSocket).filter((socket) => existsSync(socket));
     assert.deepEqual(left, [], "no tsx process that has exited has left its socket behind");
   }
 });
