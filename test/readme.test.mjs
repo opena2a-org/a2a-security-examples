@@ -952,6 +952,26 @@ test("step 3 says a body the parser cannot read gets Invalid request body, not I
   assert.match(step, /bare HTTP 408 with no body when the upload stalls until Node's request timeout/, "step 3 names the bare 408 for a stalled upload");
 });
 
+test("step 3 says the body limit leaves room for the file parts step 4 allows when their bytes are written without JSON escapes", () => {
+  // JSON can write a base64 character as a six-byte \uXXXX escape, and a
+  // message the schema accepts whose file bytes are written that way can be
+  // over the limit.
+  const handler = readText("examples/validated-task-handler/handler.ts");
+  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const parts = handler.match(/parts: z\.array\(PartSchema\)\.min\(1\)\.max\((\d+)\)/);
+  const bytes = handler.match(/bytes: z\.string\(\)\.max\((\d+)\)/);
+  assert.ok(limit && parts && bytes, "handler.ts sets the JSON body limit, the most parts and the longest bytes");
+  const [limitBytes, mostParts, longest] = [Number(limit[1]) * 1024 * 1024, Number(parts[1]), Number(bytes[1])];
+  assert.ok(mostParts * longest < limitBytes, "the bytes of the most file parts are under the limit with one byte for each character");
+  assert.ok(mostParts * longest * 6 > limitBytes, "they are over the limit with each character written as a six-byte escape");
+  const step = lines.find((l) => l.startsWith("3. JSON parsing:"));
+  assert.ok(step, "README lists JSON parsing as step 3");
+  assert.ok(
+    step.includes(`over ${limit[1]} MB (room for ${mostParts} file parts of ${longest.toLocaleString("en-US")} base64 characters written without JSON escapes, the most step 4 allows)`),
+    "step 3 says the limit leaves room for the file parts when their bytes are written without JSON escapes"
+  );
+});
+
 test("the audit sentence and the attack section give the body limit of POST /a2a/message as handler.ts sets it, with the characters the route reads and the bytes they take", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
@@ -998,24 +1018,109 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
   }
 });
 
-test("each name of handler.ts the schema excerpt uses is declared in the excerpt, or the Input validation section says handler.ts declares it", () => {
-  // A reader who pastes the excerpt into a file of their own otherwise meets a
-  // name the excerpt never declares and nothing says where it is.
-  const handler = readText("examples/validated-task-handler/handler.ts");
-  const section = (readme.split(/^## Input validation$/m)[1] ?? "").split(/^## /m)[0];
+// The names a TypeScript source declares at its top level, exported or not:
+// constants, variables, functions, async functions, classes, types, interfaces
+// and enums. A declaration that does not start with its name, such as
+// const { a } = b, fails the check, so that none is passed over.
+function topLevelDeclarations(source) {
+  const keyword = /^(?:export (?:default )?)?(?:const|let|var|async function|function|class|type|interface|enum)\b/;
+  return source.split("\n").filter((line) => keyword.test(line)).map((line) => {
+    const name = line.slice(line.match(keyword)[0].length).match(/^\*? (\w+)/);
+    assert.ok(name, `the check reads the name this declaration starts with: ${line}`);
+    return name[1];
+  });
+}
+
+// The names a TypeScript source imports, each with the module it comes from.
+// An import declaration that is not on one line with its module in double
+// quotes fails the check, so that none is passed over.
+function importedNames(source) {
+  return source.split("\n").filter((line) => line.startsWith("import ") && !/^import "[^"]+";$/.test(line)).flatMap((line) => {
+    const declaration = line.match(/^import (?:type )?(.+) from "([^"]+)";$/);
+    assert.ok(declaration, `the check reads this import declaration: ${line}`);
+    const [, clause, module] = declaration;
+    // The name a module's code uses is the last word of each item: b in a as b,
+    // ns in * as ns, and X in type X.
+    const items = clause.replace(/[{}]/g, "").split(",").map((item) => item.trim()).filter((item) => item !== "");
+    return items.map((item) => ({ name: item.split(/\s+/).pop(), module }));
+  });
+}
+
+// Check that each name handler declares at its top level or imports, and the
+// TypeScript excerpt of section uses without declaring it, is one the prose of
+// section says handler.ts declares, or imports from the module it comes from.
+function checkExcerptNames(handler, section) {
   const excerpt = codeBlocks(section).find((b) => b.lang === "typescript");
   assert.ok(excerpt, "the Input validation section has a TypeScript excerpt");
-  const declared = (source) => [...source.matchAll(/^(?:const|function) (\w+)/gm)].map((m) => m[1]);
-  const own = declared(excerpt.body);
+  const own = topLevelDeclarations(excerpt.body);
   const prose = section.replace(/^```[\s\S]*?^```$/gm, "").split("\n");
-  const used = declared(handler).filter((name) => !own.includes(name) && new RegExp(`\\b${name}\\b`).test(excerpt.body));
-  assert.ok(declared(handler).includes("FilePartSchema") && own.includes("FilePartSchema"), "the check reads the declarations of handler.ts and of the excerpt");
-  for (const name of used) {
+  const used = (name) => !own.includes(name) && new RegExp(`\\b${name.replace(/\$/g, "\\$")}\\b`).test(excerpt.body);
+  const declared = topLevelDeclarations(handler);
+  const imported = importedNames(handler);
+  assert.ok(declared.includes("FilePartSchema") && own.includes("FilePartSchema"), "the check reads the declarations of handler.ts and of the excerpt");
+  assert.ok(imported.some(({ name, module }) => name === "z" && module === "zod"), "the check reads the imports of handler.ts");
+  for (const name of declared.filter(used)) {
     assert.ok(
       prose.some((line) => line.includes(`\`${name}\``) && line.includes("handler.ts declares")),
       `the excerpt uses ${name}, which handler.ts declares, and the section does not say so`
     );
   }
+  for (const { name, module } of imported.filter(({ name }) => used(name))) {
+    assert.ok(
+      prose.some((line) => line.includes(`\`${name}\`, which handler.ts imports from \`${module}\``)),
+      `the excerpt uses ${name}, which handler.ts imports from ${module}, and the section does not say so`
+    );
+  }
+}
+
+test("each name handler.ts declares at its top level or imports that the schema excerpt uses is declared in the excerpt, or the Input validation section says handler.ts declares it or imports it from its module", () => {
+  // A reader who pastes the excerpt into a file of their own otherwise meets a
+  // name the excerpt never declares and nothing says where it is.
+  const handler = readText("examples/validated-task-handler/handler.ts");
+  const section = (readme.split(/^## Input validation$/m)[1] ?? "").split(/^## /m)[0];
+  checkExcerptNames(handler, section);
+  // The check fails for a section that names z and not the module handler.ts
+  // imports it from.
+  assert.throws(
+    () => checkExcerptNames(handler, section.replace("`z`, which handler.ts imports from `zod`", "`z`")),
+    /the excerpt uses z, which handler\.ts imports from zod, and the section does not say so/
+  );
+});
+
+test("the excerpt check reads the top-level declarations and the imports of a TypeScript source, and fails for one it cannot read", () => {
+  const declarations = [
+    "const a = 1;",
+    "export const b = 2;",
+    "function c() {",
+    "  const nested = 3;",
+    "}",
+    "async function d() {}",
+    "function* e() {}",
+    "type F = string;",
+    "interface G {}",
+    "export default class H {}",
+    "export { a };",
+  ];
+  assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "b", "c", "d", "e", "F", "G", "H"]);
+  assert.throws(() => topLevelDeclarations("const { a } = b;"), /the check reads the name this declaration starts with: const \{ a \} = b;/);
+  const imports = [
+    'import express from "express";',
+    'import { z, ZodIssue as Issue } from "zod";',
+    'import * as path from "path";',
+    'import fs, { type Stats } from "fs";',
+    'import type { Server } from "http";',
+    'import "./setup";',
+  ];
+  assert.deepEqual(importedNames(imports.join("\n")), [
+    { name: "express", module: "express" },
+    { name: "z", module: "zod" },
+    { name: "Issue", module: "zod" },
+    { name: "path", module: "path" },
+    { name: "fs", module: "fs" },
+    { name: "Stats", module: "fs" },
+    { name: "Server", module: "http" },
+  ]);
+  assert.throws(() => importedNames('import {\n  z,\n} from "zod";'), /the check reads this import declaration: import \{/);
 });
 
 test("README names the command that runs the tests", () => {
