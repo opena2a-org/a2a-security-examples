@@ -82,10 +82,24 @@ const TextPartSchema = z.object({
   text: z.string().min(1).max(10000),
 });
 
+// Whether text is base64 as RFC 4648, section 4, defines it: characters of
+// the standard alphabet in groups of four, the last group padded with = or ==.
+// It looks for one character outside the alphabet instead of matching a
+// repeated group of four, as zod's own base64() check does: that pattern ends
+// with a RangeError on a long string, from about 3.7 million characters on
+// Node.js 26.7.0, and no route here catches it. This check has no such length.
+function isBase64(text: string): boolean {
+  if (text.length % 4 !== 0) return false;
+  const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0;
+  return !/[^A-Za-z0-9+\/]/.test(text.slice(0, text.length - padding));
+}
+
+// pipe() runs the base64 check only on bytes that pass the length check, so
+// bytes over the limit are rejected for their length alone and never scanned.
 const FilePartSchema = z.object({
   kind: z.literal("file"),
   file: z.object({
-    bytes: z.string().max(1048576), // 1MB base64
+    bytes: z.string().max(1048576).pipe(z.string().refine(isBase64, "Invalid base64")), // 1MB base64
     mimeType: z.enum(MEDIA_TYPES),
     name: z.string().max(255).optional(),
   }),
@@ -379,6 +393,12 @@ function parseAgentMessage(body: unknown): ParsedRequest {
 // with 413 before the schema runs.
 const parseJson = express.json({ limit: "11mb" });
 
+// POST /a2a/message reads far less than POST /, so it has a parser with a
+// limit of its own. The 200, 200 and 10,000 characters AgentMessageSchema
+// allows take at most 62,400 bytes, when each is written as a six-byte \uXXXX
+// escape, and the rest of the 64 KB is room for the rest of the message.
+const parseAgentMessageJson = express.json({ limit: "64kb" });
+
 // Every request that reaches the limiter counts toward the rate limit before
 // authentication reads it, so a client that guesses tokens gets 429, not a 401
 // for each guess, once it has used up the requests the limiter allows it in
@@ -395,7 +415,7 @@ app.post("/", rateLimit, authenticate, parseJson, (req, res) =>
 // limit and gets the same authentication, injection filter, audit lines and
 // JSON-RPC errors as a message sent to POST /. The reply to a message the
 // agent accepts holds the text of the completed task's reply.
-app.post("/a2a/message", rateLimit, authenticate, parseJson, (req, res) =>
+app.post("/a2a/message", rateLimit, authenticate, parseAgentMessageJson, (req, res) =>
   handleMessage(req, res, parseAgentMessage, (_id, result) => ({ content: result.status.message.parts[0].text }))
 );
 
@@ -494,9 +514,25 @@ async function handleMessage(
 // credential. The example's directory is this file's directory when tsx runs
 // handler.ts, and its parent when node runs the compiled dist/handler.js.
 const exampleDir = __filename.endsWith(".ts") ? __dirname : dirname(__dirname);
-const agentCard = JSON.parse(
-  readFileSync(join(exampleDir, "..", "secure-agent-card", "agent-card.json"), "utf8")
-);
+const agentCard = readAgentCard(join(exampleDir, "..", "secure-agent-card", "agent-card.json"));
+
+// Exit with one line naming the file instead of the stack trace that
+// readFileSync throws for a card that is not there, as when handler.ts is
+// copied without the secure-agent-card directory or the build writes
+// handler.js somewhere other than dist/, or that JSON.parse throws for a card
+// that is not JSON.
+function readAgentCard(path: string) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      console.error(`No agent card at ${path}; keep the secure-agent-card directory beside the example's directory`);
+    } else {
+      console.error(`Cannot read the agent card at ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    process.exit(1);
+  }
+}
 
 // Specification v0.3.0 names /.well-known/agent-card.json. Earlier versions
 // named /.well-known/agent.json, which still serves the same card.
@@ -594,10 +630,12 @@ async function processTask(
     .filter((p): p is z.infer<typeof TextPartSchema> => p.kind === "text")
     .map((p) => p.text);
 
-  const inputText = textParts.join("\n");
+  // The characters of the parts themselves: joining the parts with a
+  // separator first would count each separator too.
+  const charCount = textParts.reduce((total, text) => total + text.length, 0);
 
   // Your actual task processing logic here
-  const responseText = `Processed task ${taskId}: received ${textParts.length} text parts (${inputText.length} chars total)`;
+  const responseText = `Processed task ${taskId}: received ${textParts.length} text parts (${charCount} chars total)`;
 
   return {
     kind: "task",
