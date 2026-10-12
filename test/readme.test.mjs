@@ -1023,8 +1023,10 @@ function regularExpressionEnds(source) {
 }
 
 // Whether moduleTokens() reads a slash right after the token as division, as
-// it does after a token that ends an operand. moduleTokens() says which tokens
-// these are, and which of them a slash on a later line does not divide after.
+// it does after a token that ends an operand other than a } that closes an
+// object literal, a TypeScript non-null ! or the > that ends type arguments.
+// moduleTokens() says which tokens these are, and which of them a slash on a
+// later line does not divide after.
 function slashDivides(token) {
   return token !== undefined && (token.type === "name" ? !token.beforeExpression : token.type !== "punct" || token.value === ")" || token.value === "]" || token.postfix);
 }
