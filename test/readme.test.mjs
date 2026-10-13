@@ -1021,15 +1021,19 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
 // The names a TypeScript source declares at its top level, exported or not:
 // constants, variables, functions, async functions, classes, types,
 // interfaces, enums, const enums and namespaces, each also after declare or
-// abstract. A declaration that does not start with its name, such as
-// const { a } = b or declare global {}, fails the check, so that none is
-// passed over.
+// abstract, and the names of using and await using declarations. A
+// declaration that does not start with its name, such as const { a } = b or
+// declare global {}, fails the check, so that none is passed over.
 function topLevelDeclarations(source) {
   const exported = "(?:export (?:default )?)?";
   const keywords = "const|let|var|async function|function|class|type|interface|enum|namespace";
-  const declaration = new RegExp(`^${exported}(?:(?:declare|abstract) |(?:${keywords})\\b)`);
+  // using is a declaration only when a name follows it, as in using u = f():
+  // it is otherwise an identifier, as in using(x), using = 1, await using; or
+  // using in x.
+  const using = "(?:await )?using (?!(?:in|instanceof)\\b)(?=[\\w$]|[^\\x00-\\x7f])";
+  const declaration = new RegExp(`^${exported}(?:(?:declare|abstract) |(?:${keywords})\\b|${using})`);
   // const enum comes before const, which would read enum as the name.
-  const named = new RegExp(`^${exported}(?:declare )?(?:abstract )?(?:const enum|${keywords})\\b\\*? (\\w+)`);
+  const named = new RegExp(`^${exported}(?:declare )?(?:abstract )?(?:const enum|(?:await )?using|${keywords})\\b\\*? (\\w+)`);
   return source.split("\n").filter((line) => declaration.test(line)).map((line) => {
     const name = line.match(named);
     assert.ok(name, `the check reads the name this declaration starts with: ${line}`);
@@ -1116,11 +1120,21 @@ test("the excerpt check reads the top-level declarations and the imports of a Ty
     "export declare abstract class P {}",
     "declare const enum Q { X }",
     "namespace R {}",
+    "using s = f();",
+    "await using t = g();",
+    // using with no name after it is an identifier, not a declaration.
+    "using(s);",
+    "using[0] = 1;",
+    "using = 2;",
+    "await using;",
+    "using in x;",
+    "using instanceof X;",
     "export { a };",
   ];
-  assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "b", "c", "d", "e", "F", "G", "H", "i", "j", "K", "L", "M", "n", "O", "P", "Q", "R"]);
+  assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "b", "c", "d", "e", "F", "G", "H", "i", "j", "K", "L", "M", "n", "O", "P", "Q", "R", "s", "t"]);
   assert.throws(() => topLevelDeclarations("const { a } = b;"), /the check reads the name this declaration starts with: const \{ a \} = b;/);
   assert.throws(() => topLevelDeclarations("declare global {}"), /the check reads the name this declaration starts with: declare global \{\}/);
+  assert.throws(() => topLevelDeclarations("await using $s = f();"), /the check reads the name this declaration starts with: await using \$s = f\(\);/);
   const imports = [
     'import express from "express";',
     'import { z, ZodIssue as Issue } from "zod";',
