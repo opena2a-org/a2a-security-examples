@@ -38,12 +38,12 @@ function listenOnce(port) {
 
 // A port the example can listen on. A port that is free on 127.0.0.1 can be
 // held on another address, and handler.ts then exits with "already in use", so
-// the probe listens on every interface as handler.ts does. The port the system
-// gives a listen on port 0 is not always one that a listen asking for it by
-// number can take: macOS gives out a port a process of another user holds, and
-// refuses that port by number with EADDRINUSE. So listen on the port by number
-// as well, and pick another when that is refused, 10 ports at most. pick gives
-// the port to try.
+// the probe listens on every interface as handler.ts does. The probe that
+// found the port pick gives has closed, so nothing holds that port for the
+// test, and a listen asking by number for a port another socket holds on every
+// interface is refused with EADDRINUSE. So listen on the port by number as
+// well, as handler.ts will, and pick another when that is refused, 10 ports at
+// most. pick gives the port to try.
 async function freePort(pick = () => listenOnce(0)) {
   for (let picks = 1; ; picks++) {
     const port = await pick();
