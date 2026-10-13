@@ -1019,13 +1019,19 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
 });
 
 // The names a TypeScript source declares at its top level, exported or not:
-// constants, variables, functions, async functions, classes, types, interfaces
-// and enums. A declaration that does not start with its name, such as
-// const { a } = b, fails the check, so that none is passed over.
+// constants, variables, functions, async functions, classes, types,
+// interfaces, enums, const enums and namespaces, each also after declare or
+// abstract. A declaration that does not start with its name, such as
+// const { a } = b or declare global {}, fails the check, so that none is
+// passed over.
 function topLevelDeclarations(source) {
-  const keyword = /^(?:export (?:default )?)?(?:const|let|var|async function|function|class|type|interface|enum)\b/;
-  return source.split("\n").filter((line) => keyword.test(line)).map((line) => {
-    const name = line.slice(line.match(keyword)[0].length).match(/^\*? (\w+)/);
+  const exported = "(?:export (?:default )?)?";
+  const keywords = "const|let|var|async function|function|class|type|interface|enum|namespace";
+  const declaration = new RegExp(`^${exported}(?:(?:declare|abstract) |(?:${keywords})\\b)`);
+  // const enum comes before const, which would read enum as the name.
+  const named = new RegExp(`^${exported}(?:declare )?(?:abstract )?(?:const enum|${keywords})\\b\\*? (\\w+)`);
+  return source.split("\n").filter((line) => declaration.test(line)).map((line) => {
+    const name = line.match(named);
     assert.ok(name, `the check reads the name this declaration starts with: ${line}`);
     return name[1];
   });
@@ -1036,11 +1042,12 @@ function topLevelDeclarations(source) {
 // quotes fails the check, so that none is passed over.
 function importedNames(source) {
   return source.split("\n").filter((line) => line.startsWith("import ") && !/^import "[^"]+";$/.test(line)).flatMap((line) => {
-    const declaration = line.match(/^import (?:type )?(.+) from "([^"]+)";$/);
+    const declaration = line.match(/^import (.+) from "([^"]+)";$/);
     assert.ok(declaration, `the check reads this import declaration: ${line}`);
     const [, clause, module] = declaration;
     // The name a module's code uses is the last word of each item: b in a as b,
-    // ns in * as ns, and X in type X.
+    // ns in * as ns, and X in type X, whether type comes before one item or,
+    // as in import type X, before all of them.
     const items = clause.replace(/[{}]/g, "").split(",").map((item) => item.trim()).filter((item) => item !== "");
     return items.map((item) => ({ name: item.split(/\s+/).pop(), module }));
   });
@@ -1099,16 +1106,29 @@ test("the excerpt check reads the top-level declarations and the imports of a Ty
     "type F = string;",
     "interface G {}",
     "export default class H {}",
+    "let i = 4;",
+    "var j = 5;",
+    "enum K { X }",
+    "class L {}",
+    "const enum M { X }",
+    "declare const n: number;",
+    "abstract class O {}",
+    "export declare abstract class P {}",
+    "declare const enum Q { X }",
+    "namespace R {}",
     "export { a };",
   ];
-  assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "b", "c", "d", "e", "F", "G", "H"]);
+  assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "b", "c", "d", "e", "F", "G", "H", "i", "j", "K", "L", "M", "n", "O", "P", "Q", "R"]);
   assert.throws(() => topLevelDeclarations("const { a } = b;"), /the check reads the name this declaration starts with: const \{ a \} = b;/);
+  assert.throws(() => topLevelDeclarations("declare global {}"), /the check reads the name this declaration starts with: declare global \{\}/);
   const imports = [
     'import express from "express";',
     'import { z, ZodIssue as Issue } from "zod";',
     'import * as path from "path";',
     'import fs, { type Stats } from "fs";',
+    'import os, * as ns from "os";',
     'import type { Server } from "http";',
+    'import type Config from "./config";',
     'import "./setup";',
   ];
   assert.deepEqual(importedNames(imports.join("\n")), [
@@ -1118,7 +1138,10 @@ test("the excerpt check reads the top-level declarations and the imports of a Ty
     { name: "path", module: "path" },
     { name: "fs", module: "fs" },
     { name: "Stats", module: "fs" },
+    { name: "os", module: "os" },
+    { name: "ns", module: "os" },
     { name: "Server", module: "http" },
+    { name: "Config", module: "./config" },
   ]);
   assert.throws(() => importedNames('import {\n  z,\n} from "zod";'), /the check reads this import declaration: import \{/);
 });

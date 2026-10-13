@@ -23,15 +23,36 @@ const cardFile = join(root, "examples/secure-agent-card/agent-card.json");
 // minute per client IP.
 const rateLimitPoints = Number(readFileSync(join(example, "handler.ts"), "utf8").match(/points: (\d+), \/\/ requests/)[1]);
 
-function freePort() {
+// Listen on port on every interface, as handler.ts does, stop listening, and
+// resolve with the port: for port 0, the one the system gave.
+function listenOnce(port) {
   return new Promise((resolve, reject) => {
     const probe = createServer();
     probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
+    probe.listen(port, () => {
+      const bound = probe.address().port;
+      probe.close(() => resolve(bound));
     });
   });
+}
+
+// A port the example can listen on. A port that is free on 127.0.0.1 can be
+// held on another address, and handler.ts then exits with "already in use", so
+// the probe listens on every interface as handler.ts does. The port the system
+// gives a listen on port 0 is not always one that a listen asking for it by
+// number can take: macOS gives out a port a process of another user holds, and
+// refuses that port by number with EADDRINUSE. So listen on the port by number
+// as well, and pick another when that is refused, 10 ports at most. pick gives
+// the port to try.
+async function freePort(pick = () => listenOnce(0)) {
+  for (let picks = 1; ; picks++) {
+    const port = await pick();
+    try {
+      return await listenOnce(port);
+    } catch (err) {
+      if (err.code !== "EADDRINUSE" || picks === 10) throw err;
+    }
+  }
 }
 
 let server;
@@ -766,24 +787,52 @@ test("a process that has not closed when the wait fails no longer keeps the test
   }
 });
 
+// Run body, then cleanup whether or not body failed, as try and finally do.
+// When both fail, try and finally throw the error of cleanup alone; this
+// throws one error that carries both, with the message of each on its own
+// line.
+async function thenAlways(body, cleanup) {
+  const errors = [];
+  for (const step of [body, cleanup]) {
+    try {
+      await step();
+    } catch (err) {
+      errors.push(err);
+    }
+  }
+  if (errors.length === 2) throw new AggregateError(errors, errors.map((err) => err.message).join("\n"));
+  if (errors.length === 1) throw errors[0];
+}
+
+// Stop proc, a tsx process, and the server it started with SIGKILL, and wait
+// ms for closed, the close event of proc. SIGKILL gives tsx no chance to
+// remove its socket, so remove it here, when the wait fails too: the last test
+// looks for the socket only of a process whose close event has come.
+async function killServer(proc, closed, ms = 10000) {
+  stopServer(proc, "SIGKILL");
+  try {
+    await within(closed, ms, `tsx and the server it started still hold the output pipes ${ms / 1000} seconds after stopServer`);
+  } finally {
+    removeTsxSocket(proc.pid);
+  }
+}
+
 // Start a server, then stop tsx and the server with SIGKILL and wait until
-// both have exited. SIGKILL gives tsx no chance to remove its socket, so remove
-// it here once tsx has exited. A check that looks for the socket in the wrong
-// place would find it removed whether or not it was, so look for it first, at
-// the path socketOf gives for the process id of tsx. The server is stopped
-// when that check fails too: startServer unrefs it, so the test run would
-// otherwise end and leave tsx and the server running.
+// both have exited. A check that looks for the socket SIGKILL leaves in the
+// wrong place would find it removed whether or not it was, so look for it
+// first, at the path socketOf gives for the process id of tsx. The server is
+// stopped when that check fails too: startServer unrefs it, so the test run
+// would otherwise end and leave tsx and the server running.
 async function stopWithSigkill(socketOf = tsxSocket) {
   const proc = await startServer(await freePort());
   const closed = new Promise((resolve) => proc.once("close", resolve));
   const socket = socketOf(proc.pid);
-  try {
-    if (socket) assert.ok(existsSync(socket), `tsx has bound its socket at ${socket}`);
-  } finally {
-    stopServer(proc, "SIGKILL");
-    await within(closed, 10000, "tsx and the server it started still hold the output pipes 10 seconds after stopServer");
-    removeTsxSocket(proc.pid);
-  }
+  await thenAlways(
+    () => {
+      if (socket) assert.ok(existsSync(socket), `tsx has bound its socket at ${socket}`);
+    },
+    () => killServer(proc, closed)
+  );
 }
 
 test("stopping a server ends tsx and the server it started even when tsx cannot pass the signal on", async () => {
@@ -801,17 +850,67 @@ test("the SIGKILL test stops tsx and the server it started when its check that t
   const before = new Set(started);
   await assert.rejects(stopWithSigkill(() => join(example, "no-socket.pipe")), /tsx has bound its socket at .*no-socket\.pipe$/);
   const left = [...started].filter((proc) => !before.has(proc));
-  try {
-    assert.deepEqual(left.map((proc) => proc.pid), [], "tsx and the server the failed test started have exited");
-  } finally {
+  await thenAlways(
+    () => assert.deepEqual(left.map((proc) => proc.pid), [], "tsx and the server the failed test started have exited"),
     // Stop a server the failed test left, so that this test leaves none.
-    for (const proc of left) {
-      const closed = new Promise((resolve) => proc.once("close", resolve));
+    async () => {
+      for (const proc of left) {
+        await killServer(proc, new Promise((resolve) => proc.once("close", resolve)));
+      }
+    }
+  );
+});
+
+test(
+  "stopping a server with SIGKILL removes the socket of tsx when the wait for the close event fails",
+  { skip: process.platform === "win32" && "on Windows tsx binds a named pipe, which leaves no file" },
+  async () => {
+    // A process in a group of its own stands for tsx, a file at the path of its
+    // socket for the socket SIGKILL leaves, and a close event that never comes
+    // for a server that still holds the output pipes.
+    const proc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    const closed = new Promise((resolve) => proc.once("close", resolve));
+    const socket = tsxSocket(proc.pid);
+    try {
+      mkdirSync(dirname(socket), { recursive: true });
+      writeFileSync(socket, "");
+      await assert.rejects(
+        killServer(proc, new Promise(() => {}), 200),
+        /^Error: tsx and the server it started still hold the output pipes 0\.2 seconds after stopServer$/
+      );
+      assert.equal(existsSync(socket), false, "the socket is removed when the wait fails");
+    } finally {
+      rmSync(socket, { force: true });
       stopServer(proc, "SIGKILL");
-      await within(closed, 10000, "tsx and the server it started still hold the output pipes 10 seconds after stopServer");
-      removeTsxSocket(proc.pid);
+      await within(closed, 10000, "the process did not exit within 10 seconds of SIGKILL");
     }
   }
+);
+
+test("a check that fails and a cleanup after it that fails are both in the error thrown", async () => {
+  // try and finally throw the error of the finally block alone, so a server
+  // that does not exit in time would hide the check that failed before it.
+  const check = () => {
+    throw new Error("the check failed");
+  };
+  const cleanup = async () => {
+    throw new Error("the cleanup failed");
+  };
+  let cleaned = 0;
+  await assert.rejects(thenAlways(check, () => cleaned++), /^Error: the check failed$/);
+  assert.equal(cleaned, 1, "the cleanup runs after a check that fails");
+  await assert.rejects(thenAlways(() => {}, cleanup), /^Error: the cleanup failed$/);
+  await assert.rejects(thenAlways(check, cleanup), (err) => {
+    assert.ok(err instanceof AggregateError, "one error carries both");
+    assert.equal(err.message, "the check failed\nthe cleanup failed");
+    assert.deepEqual(err.errors.map((each) => each.message), ["the check failed", "the cleanup failed"]);
+    return true;
+  });
+  await thenAlways(() => {}, () => cleaned++);
+  assert.equal(cleaned, 2, "the cleanup runs after a check that passes");
 });
 
 test("the stalled-upload test loads its preload with --require, not --import", () => {
@@ -1229,6 +1328,39 @@ test("a PORT already in use exits with one line naming the port", () => {
   assert.equal(run.status, 1, `PORT=${port}:\n${run.stdout}${run.stderr}`);
   assert.equal(run.stdout, "", "no listening message for a port the server could not bind");
   assert.deepEqual(run.stderr.trim().split("\n"), [`Port ${port} is already in use; set PORT to a free port`]);
+});
+
+test("the port the tests give a server is one that a listen on every interface, as handler.ts listens, has taken by number", async () => {
+  // handler.ts gets EADDRINUSE for a port that is free on 127.0.0.1 and held
+  // on another address. macOS lets a probe listen on 127.0.0.1 at a port a
+  // server holds on every interface, so a probe of 127.0.0.1 would take the
+  // port held below for a free one.
+  assert.match(handlerSource, /^const server = app\.listen\(port, \(\) => \{$/m, "handler.ts listens on every interface");
+  const holder = createServer();
+  await new Promise((resolve, reject) => {
+    holder.once("error", reject);
+    holder.listen(0, resolve);
+  });
+  const held = holder.address().port;
+  try {
+    let picks = 0;
+    const port = await freePort(() => (picks++ === 0 ? held : listenOnce(0)));
+    assert.equal(picks, 2, "freePort picks another port when the first is held");
+    assert.notEqual(port, held, "freePort does not give the held port");
+    // With every pick held, freePort fails with the error of the last one
+    // instead of picking forever.
+    picks = 0;
+    await assert.rejects(
+      freePort(() => {
+        picks++;
+        return held;
+      }),
+      { code: "EADDRINUSE" }
+    );
+    assert.equal(picks, 10, "freePort picks 10 ports before it fails");
+  } finally {
+    await new Promise((resolve) => holder.close(resolve));
+  }
 });
 
 // Start the example with a CommonJS module loaded first that changes how the
