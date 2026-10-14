@@ -2163,10 +2163,10 @@ test("requests that fail authentication count toward the rate limit, so a client
 });
 
 test("requests from one address share one count whatever X-Forwarded-For value each sends, as the handler leaves trust proxy unset", async () => {
-  // README step 1: req.ip is the address the request came from. With trust
-  // proxy set to true, req.ip would be the leftmost X-Forwarded-For address,
-  // which the client chooses, and a client that sends a different one with
-  // each request would never get 429.
+  // Step 1 of docs/input-validation.md: req.ip is the address the request came
+  // from. With trust proxy set to true, req.ip would be the leftmost
+  // X-Forwarded-For address, which the client chooses, and a client that sends
+  // a different one with each request would never get 429.
   await withOwnServer(async (serverPort, audited) => {
     for (let i = 1; i <= rateLimitPoints; i++) {
       const res = await postRaw(serverPort, [`X-Forwarded-For: 198.51.100.${i}`]);
