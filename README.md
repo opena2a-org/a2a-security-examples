@@ -2,9 +2,11 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> **[OpenA2A](https://github.com/opena2a-org/opena2a)**: [CLI](https://github.com/opena2a-org/opena2a) · [HackMyAgent](https://github.com/opena2a-org/hackmyagent) · [Secretless](https://github.com/opena2a-org/secretless-ai) · [AIM](https://github.com/opena2a-org/agent-identity-management) · [Browser Guard](https://github.com/opena2a-org/AI-BrowserGuard) · [DVAA](https://github.com/opena2a-org/damn-vulnerable-ai-agent)
+> **[OpenA2A](https://github.com/opena2a-org)**: [CLI](https://github.com/opena2a-org/opena2a) · [HackMyAgent](https://github.com/opena2a-org/hackmyagent) · [Secretless](https://github.com/opena2a-org/secretless-ai) · [AIM](https://github.com/opena2a-org/agent-identity-management) · [Browser Guard](https://github.com/opena2a-org/ai-browserguard) · [DVAA](https://github.com/opena2a-org/damn-vulnerable-ai-agent)
 
-Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in: a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. The examples follow [A2A specification v0.3.0](https://github.com/a2aproject/A2A/blob/v0.3.0/docs/specification.md): the handler answers the JSON-RPC method `message/send` and serves its agent card at `/.well-known/agent-card.json`. Apache 2.0.
+[Website](https://opena2a.org) · [Discord](https://discord.gg/uRZa3KXgEn)
+
+Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in: a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. The examples follow the A2A specification version that their [agent card](./examples/secure-agent-card/agent-card.json) declares in `protocolVersion`, which is older than the [current A2A release](https://github.com/a2aproject/A2A/releases/latest): the handler answers the JSON-RPC method `message/send` and serves its agent card at `/.well-known/agent-card.json`.
 
 ## Quick start
 

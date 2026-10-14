@@ -47,7 +47,7 @@ test("README stays under the 200-line budget", () => {
 test("lines 1-6 carry the title, a badge, and the OpenA2A family line", () => {
   assert.match(lines[0], /^# \S/, "line 1 is the title");
   assert.match(lines[2], /^\[!\[/, "line 3 is a badge");
-  assert.match(lines[4], /^> \*\*\[OpenA2A\]\(https:\/\/github\.com\/opena2a-org\/opena2a\)\*\*:/, "line 5 is the family line");
+  assert.match(lines[4], /^> \*\*\[OpenA2A\]\(https:\/\/github\.com\/opena2a-org\)\*\*:/, "line 5 is the family line");
   assert.equal(lines[1] + lines[3] + lines[5], "", "lines 2, 4 and 6 are blank");
 });
 
