@@ -22,6 +22,15 @@ function readText(path) {
 const readme = readText("README.md");
 const lines = readme.split("\n");
 
+// The pages under docs/ that hold what the README links instead of saying.
+const docsPages = ["docs/validated-task-handler.md", "docs/input-validation.md", "docs/secure-agent-card.md", "docs/testing-against-real-attacks.md"];
+const handlerPage = readText("docs/validated-task-handler.md");
+const handlerPageLines = handlerPage.split("\n");
+const inputValidation = readText("docs/input-validation.md");
+const inputValidationLines = inputValidation.split("\n");
+const cardPage = readText("docs/secure-agent-card.md");
+const attackPage = readText("docs/testing-against-real-attacks.md");
+
 // Fenced code blocks in document order, with their info string.
 function codeBlocks(text) {
   const blocks = [];
@@ -72,6 +81,13 @@ test("every relative link points to a file in the repository", () => {
   for (const href of relative) {
     assert.ok(existsSync(join(root, href.split("#")[0])), `${href} exists`);
   }
+  for (const page of docsPages) {
+    assert.ok(readme.includes(`](${page})`), `README links ${page}`);
+    const pageLinks = [...readText(page).matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]);
+    for (const href of pageLinks.filter((h) => !/^(https?:|mailto:|#)/.test(h))) {
+      assert.ok(existsSync(join(root, dirname(page), href.split("#")[0])), `${href} in ${page} exists`);
+    }
+  }
 });
 
 test("the agent card excerpt matches agent-card.json", () => {
@@ -85,6 +101,14 @@ test("the agent card excerpt matches agent-card.json", () => {
   for (const [key, value] of Object.entries(excerpt)) {
     assert.deepEqual(value, card[key], `the excerpt's ${key} is the file's`);
   }
+  // docs/secure-agent-card.md shows the excerpt with the card's version fields.
+  const [full] = codeBlocks(cardPage);
+  assert.equal(full?.lang, "json", "the first code block of docs/secure-agent-card.md is the JSON excerpt");
+  const fullExcerpt = JSON.parse(full.body);
+  assert.ok("protocolVersion" in fullExcerpt && "version" in fullExcerpt, "the excerpt in docs/secure-agent-card.md has the card's version fields");
+  for (const [key, value] of Object.entries(fullExcerpt)) {
+    assert.deepEqual(value, card[key], `the excerpt's ${key} in docs/secure-agent-card.md is the file's`);
+  }
 });
 
 test("the audit sentence names the handler's audit actions, including the one for a request that fails authentication", () => {
@@ -92,14 +116,14 @@ test("the audit sentence names the handler's audit actions, including the one fo
   const actions = [...handler.matchAll(/action: "(\w+)"/g)].map((m) => m[1]);
   assert.ok(actions.length > 0, "handler.ts writes audit entries with an action");
   assert.ok(actions.includes("auth_failed"), "handler.ts writes an audit entry for a request that fails authentication");
-  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
-  assert.ok(sentence, "README describes the audit lines");
+  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  assert.ok(sentence, "docs/validated-task-handler.md describes the audit lines");
   for (const action of actions) {
-    assert.ok(sentence.includes(`\`${action}\``), `README names the ${action} audit action`);
+    assert.ok(sentence.includes(`\`${action}\``), `docs/validated-task-handler.md names the ${action} audit action`);
   }
   assert.doesNotMatch(sentence, /^Every request/, "a 431 and a request for the agent card write no audit line");
   assert.doesNotMatch(sentence, /pass authentication/, "a request that fails authentication writes an audit line too");
-  assert.match(sentence, /`auth_failed` for a request that fails authentication, with the status it gets and a reason but never the header or the token/, "README says what the auth_failed line records and that it leaves out the token");
+  assert.match(sentence, /`auth_failed` for a request that fails authentication, with the status it gets and a reason but never the header or the token/, "docs/validated-task-handler.md says what the auth_failed line records and that it leaves out the token");
 });
 
 // The keys of the options object handler.ts creates the limiter with, in
@@ -573,8 +597,8 @@ test("step 1 is the rate limit, which every request that reaches it counts towar
   // Another option, such as a blockDuration, would change when a client's
   // count starts again from what step 1 says.
   assert.deepEqual(limiterOptionKeys(handler), ["points", "duration"], "handler.ts creates the limiter with an options object of key: value pairs and comments, and gives it no option but points and duration");
-  const step = lines.find((l) => l.startsWith("1. "));
-  assert.ok(step, "README lists a step 1");
+  const step = inputValidationLines.find((l) => l.startsWith("1. "));
+  assert.ok(step, "docs/input-validation.md lists a step 1");
   assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: 429. Every request that reaches the limiter counts, including one that then fails authentication; a request answered 431 for too many header lines (see step 2) is not counted.`), "README lists the rate limit as step 1 and says a request that fails authentication counts and one answered 431 does not");
   assert.doesNotMatch(step, /Every request counts/, "step 1 does not say that every request counts, as one answered 431 never reaches the limiter");
   assert.ok(step.includes("The limiter counts a client's requests for 60 seconds from its first one and starts again with its first request after those 60 seconds have ended"), "step 1 says the 60 seconds start with a client's first request and the count starts again after they have ended");
@@ -589,7 +613,7 @@ test("step 1 says that clients behind a reverse proxy share one count unless the
   const handler = readText("examples/validated-task-handler/handler.ts");
   assert.deepEqual(trustProxyCalls(handler), [], "handler.ts calls neither set(\"trust proxy\", ...) nor enable(\"trust proxy\"), so req.ip is the address a request came from");
   assert.match(handler, /const clientIp = req\.ip \|\| "unknown";\n  try \{\n    await rateLimiter\.consume\(clientIp\);/, "handler.ts keys the limiter on req.ip");
-  const step = lines.find((l) => l.startsWith("1. "));
+  const step = inputValidationLines.find((l) => l.startsWith("1. "));
   assert.ok(step.includes("It keys on the client IP Express gives as `req.ip`, which behind a reverse proxy is the proxy's address, so every client behind the proxy shares one count"), "step 1 says clients behind a reverse proxy share one count");
   assert.ok(step.includes("A deployment behind a proxy sets Express's `trust proxy` to the proxies it runs, so that `req.ip` is the client's address."), "step 1 says a deployment behind a proxy sets trust proxy");
   assert.ok(step.includes('as in `app.set("trust proxy", "10.0.0.2")` for one proxy at 10.0.0.2'), "step 1 shows the setting with a proxy's address");
@@ -624,7 +648,7 @@ test("step 2 puts the 431 for too many header lines before step 1, as the handle
   const route = handler.indexOf('app.post("/", rateLimit, ');
   assert.ok(headerLines >= 0 && route >= 0, "handler.ts registers limitHeaderLines and a POST / route that runs the limiter");
   assert.ok(headerLines < route, "handler.ts registers limitHeaderLines before the POST / route that runs the limiter");
-  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
+  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   const limit = Number(handler.match(/const maxHeaderLines = (\d+);/)[1]).toLocaleString("en-US");
   assert.ok(step.includes(`Before step 1, a request with ${limit} or more header lines gets 431`), "step 2 says a request with too many header lines gets 431 before step 1");
 });
@@ -633,10 +657,12 @@ test("the bearer token sentence names every token the handler rejects", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
   const rejected = [...handler.matchAll(/token !== "([^"]+)"/g)].map((m) => m[1]);
   assert.ok(rejected.length > 0, "isValidToken rejects at least one literal token");
-  const sentence = lines.find((l) => /The example accepts any bearer token/.test(l));
-  assert.ok(sentence, "README describes which bearer tokens the example accepts");
-  for (const token of rejected) {
-    assert.ok(sentence.includes(`\`${token}\``), `README says the token ${token} is rejected`);
+  for (const [where, text] of [["README.md", lines], ["docs/validated-task-handler.md", handlerPageLines]]) {
+    const sentence = text.find((l) => /The example accepts any bearer token/.test(l));
+    assert.ok(sentence, `${where} describes which bearer tokens the example accepts`);
+    for (const token of rejected) {
+      assert.ok(sentence.includes(`\`${token}\``), `${where} says the token ${token} is rejected`);
+    }
   }
 });
 
@@ -680,8 +706,8 @@ test("step 2 gives 401 for a missing header or another scheme, and 400 for a Bea
   // demo token, which names the Bearer scheme but holds two tokens.
   const scheme = bearerSchemePattern();
   const credentials = credentialsPattern();
-  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
-  assert.ok(step, "README lists bearer authentication as step 2");
+  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
+  assert.ok(step, "docs/input-validation.md lists bearer authentication as step 2");
   assert.doesNotMatch(step, /401 without a token/, "a header with a token in it can get 401 too");
   const [rejected, invalid = ""] = step.split("; an invalid token ");
   assert.match(rejected, /one or more spaces and one token/, "step 2 says what follows Bearer in a header that passes");
@@ -711,7 +737,7 @@ test("step 2 names each form of a Bearer header that gets 400, with a header of 
   const scheme = bearerSchemePattern();
   const credentials = credentialsPattern();
   const { made, ending } = tokenCharacters(credentials);
-  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
+  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   const [rejected] = step.split("; an invalid token ");
   const forms = rejected.match(/names the `Bearer` scheme in any other form: (.+)$/);
   assert.ok(forms, "step 2 gives 400 for a header that names the Bearer scheme in any form but Bearer, one or more spaces and one token");
@@ -794,7 +820,7 @@ test("the 401 examples of step 2 are only backticked headers joined by \", \" or
 
 test("step 2 says Bearer in any letter case and one or more spaces, and the handler's pattern takes both", () => {
   const credentials = credentialsPattern();
-  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
+  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   assert.match(step, /`Bearer` \(in any letter case\) followed by one or more spaces and one token/, "step 2 says the scheme is read in any letter case and followed by one or more spaces");
   for (const header of ["bearer demo-token", "BEARER demo-token"]) {
     assert.match(header, credentials, `handler.ts reads a token from ${header}, so the scheme is read in any letter case`);
@@ -809,7 +835,7 @@ test("step 2 gives 400 for a request with more than one Authorization header, wh
   // test/validated-task-handler.test.mjs sends such requests.
   const handler = readText("examples/validated-task-handler/handler.ts");
   assert.match(handler, /req\.rawHeaders/, "handler.ts counts the Authorization header lines of a request");
-  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
+  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once gets 400/, "step 2 gives 400 for a header sent more than once");
 });
 
@@ -821,7 +847,7 @@ test("step 2 gives 400 to a header sent more than once whatever scheme it names,
   const read = handler.indexOf("bearerScheme.test(authHeader)");
   assert.ok(counted !== -1 && read !== -1, "handler.ts counts the Authorization header lines and reads the scheme");
   assert.ok(counted < read, "handler.ts counts the Authorization header lines before it reads the scheme");
-  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
+  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   const repeated = step.split("; an invalid token ")[0].match(/, and so do two `Authorization: ([^`]+)` lines: the handler counts the header lines before it reads the scheme, so a repeated header gets 400 whatever scheme it names$/);
   assert.ok(repeated, "step 2 gives 400 to two Authorization lines that name another scheme");
   assert.doesNotMatch(received(repeated[1]), bearerSchemePattern(), `handler.ts reads ${repeated[1]} as another scheme, which gets 401 when sent once`);
@@ -830,7 +856,7 @@ test("step 2 gives 400 to a header sent more than once whatever scheme it names,
 test("step 2 names the challenges the handler's 400 and 401 responses carry and the header line count at which it answers 431", () => {
   // test/validated-task-handler.test.mjs sends requests that get these answers.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const step = lines.find((l) => l.startsWith("2. Bearer authentication:"));
+  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   const challenge = handler.match(/const bearerChallenge = '([^']+)';/);
   assert.ok(challenge, "handler.ts sets the challenge its 401 responses carry");
   // RFC 6750, section 3: the Bearer scheme is followed by one or more auth-params.
@@ -847,8 +873,8 @@ test("step 2 names the challenges the handler's 400 and 401 responses carry and 
   assert.ok(limit, "handler.ts sets the number of header lines at which a request gets 431");
   const count = Number(limit[1]).toLocaleString("en-US");
   assert.ok(step.includes(`a request with ${count} or more header lines gets 431`), `step 2 gives 431 for ${count} or more header lines`);
-  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
-  assert.match(sentence, /Requests rejected with HTTP 431 and requests for the agent card write no audit line\./, "README says a 431 writes no audit line");
+  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  assert.match(sentence, /Requests rejected with HTTP 431 and requests for the agent card write no audit line\./, "docs/validated-task-handler.md says a 431 writes no audit line");
 });
 
 // The characters the pattern takes in a bearer token, of the 256 a header byte
@@ -868,11 +894,11 @@ test("the bearer token sentence and step 2 name the characters the handler takes
   const marks = made.filter((c) => !alphanumeric.includes(c));
   const named = (text) => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1]).sort();
   const sentences = {
-    "the bearer token sentence": lines.find((l) => /The example accepts any bearer token/.test(l)),
-    "step 2": lines.find((l) => l.startsWith("2. Bearer authentication:")),
+    "the bearer token sentence": handlerPageLines.find((l) => /The example accepts any bearer token/.test(l)),
+    "step 2": inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:")),
   };
   for (const [where, sentence] of Object.entries(sentences)) {
-    assert.ok(sentence, `README has ${where}`);
+    assert.ok(sentence, `docs/ has ${where}`);
     const set = sentence.match(/\(one or more ASCII letters, digits, ([^)]+), then any number of ([^)]+)\)/);
     assert.ok(set, `${where} names the characters of a bearer token`);
     assert.deepEqual(named(set[1]), [...marks].sort(), `${where} names every character handler.ts takes in a token besides letters and digits, and no other`);
@@ -893,7 +919,7 @@ test("the audit sentence names a body that is not a JSON object or array, the si
   const handler = readText("examples/validated-task-handler/handler.ts");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
-  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
   const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
   const reasons = [
     "not a JSON object or array",
@@ -904,35 +930,37 @@ test("the audit sentence names a body that is not a JSON object or array, the si
     "at most a bare HTTP 400 with no body",
   ];
   for (const reason of reasons) {
-    assert.ok(rejected.includes(reason), `README says request_rejected covers a body ${reason}`);
+    assert.ok(rejected.includes(reason), `docs/validated-task-handler.md says request_rejected covers a body ${reason}`);
   }
 });
 
 test("the audit sentence limits the bare 400 to a client that closes the connection and names the 408 for a stalled upload", () => {
-  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
   const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
   assert.match(rejected, /at most a bare HTTP 400 with no body when the client closes it/);
   assert.match(rejected, /a bare HTTP 408 with no body when the upload stalls until Node's request timeout/);
 });
 
-test("README does not describe the strict JSON parser as accepting any valid JSON", () => {
+test("README and its docs pages do not describe the strict JSON parser as accepting any valid JSON", () => {
   // The parser rejects valid JSON such as 123 or "text" that is not an object
   // or array, so "not valid JSON" undersells what gets a 400.
-  assert.doesNotMatch(readme, /not valid JSON/);
-  assert.doesNotMatch(readme, /no JSON reply because the connection is already gone/);
+  for (const text of [readme, ...docsPages.map(readText)]) {
+    assert.doesNotMatch(text, /not valid JSON/);
+    assert.doesNotMatch(text, /no JSON reply because the connection is already gone/);
+  }
 });
 
 test("step 3 limits the Invalid JSON reply to a non-empty body sent as application/json", () => {
   // The parser reads an empty body as {} and skips a body that is not declared
   // as JSON, so both fail schema validation in step 4, not JSON parsing.
-  const step = lines.find((l) => l.startsWith("3. JSON parsing:"));
-  assert.ok(step, "README lists JSON parsing as step 3");
+  const step = inputValidationLines.find((l) => l.startsWith("3. JSON parsing:"));
+  assert.ok(step, "docs/input-validation.md lists JSON parsing as step 3");
   const [claim, exceptions = ""] = step.split('`{"code":-32700,"message":"Invalid JSON"}`');
   assert.ok(claim.includes("non-empty body sent as `application/json`"), "step 3 applies to a non-empty body sent as application/json");
   assert.ok(claim.includes("not a JSON object or array"), "step 3 names a body that is not a JSON object or array");
-  assert.match(exceptions, /empty body/, "README says an empty body does not get the Invalid JSON reply");
-  assert.match(exceptions, /not sent as `application\/json`/, "README says a body with another content type does not get the Invalid JSON reply");
-  assert.match(exceptions, /step 4/, "README says which step answers those bodies instead");
+  assert.match(exceptions, /empty body/, "docs/input-validation.md says an empty body does not get the Invalid JSON reply");
+  assert.match(exceptions, /not sent as `application\/json`/, "docs/input-validation.md says a body with another content type does not get the Invalid JSON reply");
+  assert.match(exceptions, /step 4/, "docs/input-validation.md says which step answers those bodies instead");
 });
 
 test("step 3 says a body the parser cannot read gets Invalid request body, not Invalid JSON, whatever it contains", () => {
@@ -941,8 +969,8 @@ test("step 3 says a body the parser cannot read gets Invalid request body, not I
   const handler = readText("examples/validated-task-handler/handler.ts");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
-  const step = lines.find((l) => l.startsWith("3. JSON parsing:"));
-  assert.ok(step, "README lists JSON parsing as step 3");
+  const step = inputValidationLines.find((l) => l.startsWith("3. JSON parsing:"));
+  assert.ok(step, "docs/input-validation.md lists JSON parsing as step 3");
   assert.ok(step.includes('`{"code":-32600,"message":"Invalid request body"}`'), "step 3 names the Invalid request body reply");
   assert.match(step, /the parser cannot read[^.]*whatever it contains/, "step 3 says the reply does not depend on what the body contains");
   assert.match(step, new RegExp(`\\b413\\b[^,]*over ${limit[1]} MB`), "step 3 gives 413 for a body over the size limit");
@@ -964,25 +992,25 @@ test("step 3 says the body limit leaves room for the file parts step 4 allows wh
   const [limitBytes, mostParts, longest] = [Number(limit[1]) * 1024 * 1024, Number(parts[1]), Number(bytes[1])];
   assert.ok(mostParts * longest < limitBytes, "the bytes of the most file parts are under the limit with one byte for each character");
   assert.ok(mostParts * longest * 6 > limitBytes, "they are over the limit with each character written as a six-byte escape");
-  const step = lines.find((l) => l.startsWith("3. JSON parsing:"));
-  assert.ok(step, "README lists JSON parsing as step 3");
+  const step = inputValidationLines.find((l) => l.startsWith("3. JSON parsing:"));
+  assert.ok(step, "docs/input-validation.md lists JSON parsing as step 3");
   assert.ok(
     step.includes(`over ${limit[1]} MB (room for ${mostParts} file parts of ${longest.toLocaleString("en-US")} base64 characters written without JSON escapes, the most step 4 allows)`),
     "step 3 says the limit leaves room for the file parts when their bytes are written without JSON escapes"
   );
 });
 
-test("the audit sentence and the attack section give the body limit of POST /a2a/message as handler.ts sets it, with the characters the route reads and the bytes they take", () => {
+test("the audit sentence and the attack page give the body limit of POST /a2a/message as handler.ts sets it, with the characters the route reads and the bytes they take", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
   const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const routeLimit = handler.match(/const (\w+) = express\.json\(\{ limit: "(\d+)kb" \}\);/);
   assert.ok(routeLimit, "handler.ts sets a second JSON body limit in kilobytes");
   assert.ok(handler.includes(`app.post("/a2a/message", rateLimit, authenticate, ${routeLimit[1]}, `), "POST /a2a/message uses the parser with the second limit");
-  const sentence = lines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
+  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
   assert.ok(sentence.startsWith("Requests to `POST /` and to `POST /a2a/message` "), "the audit sentence names POST /a2a/message second");
   const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
-  assert.ok(rejected.includes(`over ${limit[1]} MB, or over ${routeLimit[2]} KB at the second route,`), "README says request_rejected covers a body over the limit of each route");
+  assert.ok(rejected.includes(`over ${limit[1]} MB, or over ${routeLimit[2]} KB at the second route,`), "docs/validated-task-handler.md says request_rejected covers a body over the limit of each route");
   // The longest from, to and content the route takes, and the bytes they take
   // when each character is written as a \uXXXX escape, the longest form JSON
   // has for one.
@@ -993,11 +1021,10 @@ test("the audit sentence and the attack section give the body limit of POST /a2a
   const bytes = characters * 6;
   assert.ok(bytes < Number(routeLimit[2]) * 1024, `${bytes} bytes fit the limit of ${routeLimit[2]} KB`);
   const count = (number) => number.toLocaleString("en-US");
-  const section = attackSection(readme);
-  assert.ok(section.includes(`413 for a body over ${routeLimit[2]} KB, not ${limit[1]} MB`), "the attack section gives the body limit of POST /a2a/message beside the limit of POST /");
+  assert.ok(attackPage.includes(`413 for a body over ${routeLimit[2]} KB, not ${limit[1]} MB`), "docs/testing-against-real-attacks.md gives the body limit of POST /a2a/message beside the limit of POST /");
   assert.ok(
-    section.includes(`the ${count(characters)} characters it reads take at most ${count(bytes)} bytes, each written as a six-byte \`\\uXXXX\` escape`),
-    `the attack section says the ${count(characters)} characters the route reads take at most ${count(bytes)} bytes`
+    attackPage.includes(`the ${count(characters)} characters it reads take at most ${count(bytes)} bytes, each written as a six-byte \`\\uXXXX\` escape`),
+    `docs/testing-against-real-attacks.md says the ${count(characters)} characters the route reads take at most ${count(bytes)} bytes`
   );
 });
 
@@ -1005,10 +1032,10 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
   const handler = readText("examples/validated-task-handler/handler.ts");
   const bytes = handler.match(/^    bytes: z\.string\(\)\.max\((\d+)\)\.pipe\(z\.string\(\)\.refine\(isBase64, "[^"]+"\)\),/m);
   assert.ok(bytes, "the schema checks the length of bytes, then that they are base64");
-  const step = lines.find((l) => l.startsWith("4. Schema validation"));
-  assert.ok(step, "README lists schema validation as step 4");
+  const step = inputValidationLines.find((l) => l.startsWith("4. Schema validation"));
+  assert.ok(step, "docs/input-validation.md lists schema validation as step 4");
   assert.ok(step.includes(`up to ${Number(bytes[1]).toLocaleString("en-US")} characters of \`bytes\`, which must be base64 as RFC 4648, section 4, defines it`), "step 4 gives the longest bytes and says they must be base64");
-  const section = readme.split(/^## Input validation$/m)[1] ?? "";
+  const section = inputValidation.split(/^# Input validation$/m)[1] ?? "";
   const excerpt = codeBlocks(section).find((b) => b.lang === "typescript");
   assert.ok(excerpt, "the Input validation section has a TypeScript excerpt");
   const declarations = excerpt.body.trim().split("\n\n");
@@ -1088,7 +1115,7 @@ test("each name handler.ts declares at its top level or imports that the schema 
   // A reader who pastes the excerpt into a file of their own otherwise meets a
   // name the excerpt never declares and nothing says where it is.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const section = (readme.split(/^## Input validation$/m)[1] ?? "").split(/^## /m)[0];
+  const section = (inputValidation.split(/^# Input validation$/m)[1] ?? "").split(/^## /m)[0];
   checkExcerptNames(handler, section);
   // The check fails for a section that names z and not the module handler.ts
   // imports it from.
@@ -1942,7 +1969,7 @@ function checkTestedFloorSentence(engines, sentence, files) {
   const [major, minor] = [Number(floor[1]), Number(floor[2])];
   assert.ok(
     sentence.includes(`Node.js ${major}.${minor} is the lowest release the tests have been run on, not a measured minimum`),
-    `README says Node.js ${major}.${minor} is a tested floor, not a measured minimum`
+    `the npm test sentence says Node.js ${major}.${minor} is a tested floor, not a measured minimum`
   );
   assert.equal(
     major,
@@ -1961,21 +1988,21 @@ function checkTestedFloorSentence(engines, sentence, files) {
   );
   assert.ok(
     sentence.includes(`releases before ${major}.${lowest} have no`),
-    `README says why releases before ${major}.${lowest} cannot run the tests`
+    `the npm test sentence says why releases before ${major}.${lowest} cannot run the tests`
   );
   assert.ok(
     sentence.includes(`releases ${major}.${lowest} to ${major}.${minor - 1} are untested`),
-    "README says which releases below the floor are untested, leaving out releases that cannot run the tests"
+    "the npm test sentence says which releases below the floor are untested, leaving out releases that cannot run the tests"
   );
 }
 
-test("README says the Node.js version for npm test is the lowest release tested, not a measured minimum", () => {
+test("docs/validated-task-handler.md says the Node.js version for npm test is the lowest release tested, not a measured minimum", () => {
   // npm test cannot run on a release without node --test or without a name the
   // test files import from node:test, and passes on 18.17. No release between
   // the two has been run, so the floor may be higher than the tests need.
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  const sentence = lines.find((l) => l.includes("`npm test` from the repository root"));
-  assert.ok(sentence, "README names the command that runs the tests");
+  const sentence = handlerPageLines.find((l) => l.includes("`npm test` from the repository root"));
+  assert.ok(sentence, "docs/validated-task-handler.md names the command that runs the tests");
   checkTestedFloorSentence(pkg.engines?.node, sentence, testFiles());
 });
 
@@ -2045,8 +2072,8 @@ function attackSection(text) {
 }
 
 // What the attack section says against the payload list: the rows of its
-// table, the version the list was read from and the number of payloads the
-// command sends.
+// table and the number of payloads the command sends. The version the list was
+// read from is on docs/testing-against-real-attacks.md.
 function checkAttackSection(section, payloads) {
   const number = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
   const command = codeBlocks(section).find((b) => b.body.includes("hackmyagent attack "));
@@ -2056,7 +2083,6 @@ function checkAttackSection(section, payloads) {
   const rows = section.split("\n").filter((l) => l.startsWith("|")).slice(2);
   const cells = rows.map((row) => row.split("|").slice(1, -1).map((cell) => cell.trim()));
   assert.deepEqual(cells, payloads, "the table lists each payload of the a2a-attack category with its intensity and description");
-  assert.match(section, /`a2a-attack` category of hackmyagent 0\.33\.2\b/, "README names the scanner version the table was read from");
   const sent = payloads.filter(([, intensity]) => intensity !== "aggressive").length;
   assert.ok(
     section.includes(`the default \`active\` intensity the command sends the ${number[sent]} \`passive\` and \`active\` payloads`),
@@ -2070,6 +2096,8 @@ function checkAttackSection(section, payloads) {
 
 test("the attack table lists the payloads of the scanner's a2a-attack category, and the sentence above the command counts those it sends", () => {
   checkAttackSection(attackSection(readme), a2aAttackPayloads);
+  assert.match(attackPage, /`a2a-attack` category of hackmyagent 0\.33\.2\b/, "docs/testing-against-real-attacks.md names the scanner version the table was read from");
+  assert.ok(attackSection(readme).includes("[docs/testing-against-real-attacks.md](docs/testing-against-real-attacks.md) names the release the table was read from"), "the attack section links the page that names the scanner version");
 });
 
 test("the attack table check fails for a table with an attack the category lacks, a missing payload or another intensity, and for a sentence that miscounts the payloads the command sends", () => {
@@ -2093,20 +2121,23 @@ test("the attack table check fails for a table with an attack the category lacks
   );
 });
 
-test("README and the handler's header name the tests on the linked attack page, and no attack that the page and the scanner's category both lack", () => {
+test("docs/testing-against-real-attacks.md and the handler's header name the tests on the linked attack page, and neither they nor the README name an attack that the page and the scanner's category both lack", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
   const header = handler.match(/^\/\*\*[\s\S]*?\*\//)?.[0] ?? "";
   const link = "https://agentpwn.com/attacks/a2a-attack";
-  const sentence = attackSection(readme).split("\n").find((l) => l.includes(`](${link})`));
-  assert.ok(sentence, "the attack section links the attack page");
+  const sentence = attackPage.split("\n").find((l) => l.includes(`](${link})`));
+  assert.ok(sentence, "docs/testing-against-real-attacks.md links the attack page");
   assert.ok(header.includes(link), "the handler's header links the attack page");
   // A comment wraps, so join its lines before looking for a name in it.
   const flat = (text) => text.replace(/[\s*]+/g, " ").toLowerCase();
   for (const page of a2aAttackPages) {
-    assert.ok(sentence.includes(page), `README names the ${page} test`);
+    assert.ok(sentence.includes(page), `docs/testing-against-real-attacks.md names the ${page} test`);
     assert.ok(flat(header).includes(page.toLowerCase()), `the handler's header names the ${page} test`);
   }
   assert.doesNotMatch(flat(readme), unlistedAttacks, "README.md names an attack the page and the category lack");
+  for (const page of docsPages) {
+    assert.doesNotMatch(flat(readText(page)), unlistedAttacks, `${page} names an attack the page and the category lack`);
+  }
   assert.doesNotMatch(flat(handler), unlistedAttacks, "handler.ts names an attack the page and the category lack");
 });
 
