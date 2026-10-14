@@ -1048,19 +1048,22 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
 // The names a TypeScript source declares at its top level, exported or not:
 // constants, variables, functions, async functions, classes, types,
 // interfaces, enums, const enums and namespaces, each also after declare or
-// abstract, and the names of using and await using declarations. A
-// declaration that does not start with its name, such as const { a } = b or
-// declare global {}, fails the check, so that none is passed over.
+// abstract, and the names of using and await using declarations. The words of
+// a declaration may be separated by a run of spaces and tabs, as in
+// export\tconst x or using  u. A declaration that does not start with its
+// name, such as const { a } = b or declare global {}, fails the check, so that
+// none is passed over.
 function topLevelDeclarations(source) {
-  const exported = "(?:export (?:default )?)?";
-  const keywords = "const|let|var|async function|function|class|type|interface|enum|namespace";
+  const space = "[ \\t]+";
+  const exported = `(?:export${space}(?:default${space})?)?`;
+  const keywords = `const|let|var|async${space}function|function|class|type|interface|enum|namespace`;
   // using is a declaration only when a name follows it, as in using u = f():
   // it is otherwise an identifier, as in using(x), using = 1, await using; or
   // using in x.
-  const using = "(?:await )?using (?!(?:in|instanceof)\\b)(?=[\\w$]|[^\\x00-\\x7f])";
-  const declaration = new RegExp(`^${exported}(?:(?:declare|abstract) |(?:${keywords})\\b|${using})`);
+  const using = `(?:await${space})?using${space}(?!(?:in|instanceof)\\b)(?=[\\w$]|[^\\x00-\\x7f])`;
+  const declaration = new RegExp(`^${exported}(?:(?:declare|abstract)${space}|(?:${keywords})\\b|${using})`);
   // const enum comes before const, which would read enum as the name.
-  const named = new RegExp(`^${exported}(?:declare )?(?:abstract )?(?:const enum|(?:await )?using|${keywords})\\b\\*? (\\w+)`);
+  const named = new RegExp(`^${exported}(?:declare${space})?(?:abstract${space})?(?:const${space}enum|(?:await${space})?using|${keywords})\\b\\*?${space}(\\w+)`);
   return source.split("\n").filter((line) => declaration.test(line)).map((line) => {
     const name = line.match(named);
     assert.ok(name, `the check reads the name this declaration starts with: ${line}`);
@@ -1185,6 +1188,26 @@ test("the excerpt check reads the top-level declarations and the imports of a Ty
     { name: "Config", module: "./config" },
   ]);
   assert.throws(() => importedNames('import {\n  z,\n} from "zod";'), /the check reads this import declaration: import \{/);
+});
+
+test("the excerpt check reads a top-level declaration whose words a run of spaces and tabs separates", () => {
+  const declarations = [
+    "export  const a = 1;",
+    "export\tdefault  class B {}",
+    "using  c = f();",
+    "await\tusing d = g();",
+    "declare\tconst e: number;",
+    "export  declare  abstract\tclass F {}",
+    "async  function g() {}",
+    "const \t enum H { X }",
+    "function*\ti() {}",
+    "const\tj = 2;",
+    // using with no name after it is an identifier, not a declaration.
+    "using\t\tin x;",
+    "await  using;",
+  ];
+  assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "B", "c", "d", "e", "F", "g", "H", "i", "j"]);
+  assert.throws(() => topLevelDeclarations("export  const { a } = b;"), /the check reads the name this declaration starts with: export {2}const \{ a \} = b;/);
 });
 
 test("README names the command that runs the tests", () => {
