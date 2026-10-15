@@ -1049,18 +1049,21 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
 // constants, variables, functions, async functions, classes, types,
 // interfaces, enums, const enums and namespaces, each also after declare or
 // abstract, and the names of using and await using declarations. The words of
-// a declaration may be separated by a run of spaces and tabs, as in
-// export\tconst x or using  u. A declaration that does not start with its
-// name, such as const { a } = b or declare global {}, fails the check, so that
-// none is passed over.
+// a declaration may be separated by a run of the characters the TypeScript
+// scanner reads as white space within a line: space, tab, vertical tab, form
+// feed, U+0085, the no-break space and the other Unicode space separators,
+// U+200B and U+FEFF, as in export\tconst x or using  u. A declaration that
+// does not start with its name, such as const { a } = b or declare global {},
+// fails the check, so that none is passed over.
 function topLevelDeclarations(source) {
-  const space = "[ \\t]+";
+  const white = "[ \\t\\v\\f\\u0085\\u00a0\\u1680\\u2000-\\u200b\\u202f\\u205f\\u3000\\ufeff]";
+  const space = `${white}+`;
   const exported = `(?:export${space}(?:default${space})?)?`;
   const keywords = `const|let|var|async${space}function|function|class|type|interface|enum|namespace`;
   // using is a declaration only when a name follows it, as in using u = f():
   // it is otherwise an identifier, as in using(x), using = 1, await using; or
   // using in x.
-  const using = `(?:await${space})?using${space}(?!(?:in|instanceof)\\b)(?=[\\w$]|[^\\x00-\\x7f])`;
+  const using = `(?:await${space})?using${space}(?!${white}|(?:in|instanceof)\\b)(?=[\\w$]|[^\\x00-\\x7f])`;
   const declaration = new RegExp(`^${exported}(?:(?:declare|abstract)${space}|(?:${keywords})\\b|${using})`);
   // const enum comes before const, which would read enum as the name.
   const named = new RegExp(`^${exported}(?:declare${space})?(?:abstract${space})?(?:const${space}enum|(?:await${space})?using|${keywords})\\b\\*?${space}(\\w+)`);
@@ -1208,6 +1211,29 @@ test("the excerpt check reads a top-level declaration whose words a run of space
   ];
   assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "B", "c", "d", "e", "F", "g", "H", "i", "j"]);
   assert.throws(() => topLevelDeclarations("export  const { a } = b;"), /the check reads the name this declaration starts with: export {2}const \{ a \} = b;/);
+});
+
+test("the excerpt check reads a top-level declaration whose words a vertical tab, form feed, no-break space or another character TypeScript reads as white space separates", () => {
+  // The characters other than space and tab that the TypeScript scanner reads
+  // as white space within a line.
+  const white = [0x0b, 0x0c, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x200b, 0x202f, 0x205f, 0x3000, 0xfeff];
+  for (const c of white) {
+    const w = String.fromCodePoint(c);
+    const declarations = [
+      `export${w}const a = 1;`,
+      `export${w}default${w}class B {}`,
+      `using${w}c = f();`,
+      `await${w}using${w}${w}d = g();`,
+      `const enum${w}E { X }`,
+      `declare${w}abstract${w}class F {}`,
+      // using with no name after it is an identifier, not a declaration.
+      `using${w}${w};`,
+      `using${w}in x;`,
+    ];
+    const code = `U+${c.toString(16).toUpperCase().padStart(4, "0")}`;
+    assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "B", "c", "d", "E", "F"], `the check reads the declarations whose words ${code} separates`);
+    assert.throws(() => topLevelDeclarations(`export${w}const { a } = b;`), /the check reads the name this declaration starts with: export.const \{ a \} = b;/, `the check fails for a declaration after export${code} that does not start with its name`);
+  }
 });
 
 test("README names the command that runs the tests", () => {
