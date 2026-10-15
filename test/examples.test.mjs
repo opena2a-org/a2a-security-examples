@@ -151,6 +151,14 @@ test(".gitignore excludes environment, key and secrets files", () => {
   }
 });
 
+test("the example's tsconfig.json uses a module resolution TypeScript 6 accepts", () => {
+  const { module, moduleResolution } = JSON.parse(readText("examples/validated-task-handler/tsconfig.json")).compilerOptions;
+  // Without moduleResolution, module commonjs resolves as node10, which
+  // TypeScript 6 rejects as it rejects its alias node.
+  const resolution = (moduleResolution ?? (/^commonjs$/i.test(module) ? "node10" : "")).toLowerCase();
+  assert.ok(!["node", "node10", "classic"].includes(resolution), `moduleResolution ${resolution} is deprecated`);
+});
+
 // The fields of package.json that npm install records in the lock file's root
 // entry, as measured with npm 11.19.0. npm 10.8.2, the npm in the node:20
 // images, records no libc: see fieldsNotEveryNpmRecords.
