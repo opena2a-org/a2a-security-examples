@@ -1053,26 +1053,28 @@ function sourceLines(source) {
   return source.split(new RegExp(`\\r\\n|[\\n\\r${separators}]`));
 }
 
+// A regular expression class of the characters the TypeScript scanner reads as
+// white space within a line: space, tab, vertical tab, form feed, U+0085, the
+// no-break space and the other Unicode space separators, U+200B and U+FEFF.
+const whiteClass = "[ \\t\\v\\f\\u0085\\u00a0\\u1680\\u2000-\\u200b\\u202f\\u205f\\u3000\\ufeff]";
+
 // The names a TypeScript source declares at its top level, exported or not:
 // constants, variables, functions, async functions, classes, types,
 // interfaces, enums, const enums and namespaces, each also after declare or
 // abstract, and the names of using and await using declarations. The words of
-// a declaration may be separated by a run of the characters the TypeScript
-// scanner reads as white space within a line: space, tab, vertical tab, form
-// feed, U+0085, the no-break space and the other Unicode space separators,
-// U+200B and U+FEFF, as in export\tconst x or using  u. A declaration may
-// start after any of the characters sourceLines splits at, such as U+2028. A
-// declaration that does not start with its name, such as const { a } = b or
-// declare global {}, fails the check, so that none is passed over.
+// a declaration may be separated by a run of the characters in whiteClass, as
+// in export\tconst x or using  u. A declaration may start after any of the
+// characters sourceLines splits at, such as U+2028. A declaration that does
+// not start with its name, such as const { a } = b or declare global {}, fails
+// the check, so that none is passed over.
 function topLevelDeclarations(source) {
-  const white = "[ \\t\\v\\f\\u0085\\u00a0\\u1680\\u2000-\\u200b\\u202f\\u205f\\u3000\\ufeff]";
-  const space = `${white}+`;
+  const space = `${whiteClass}+`;
   const exported = `(?:export${space}(?:default${space})?)?`;
   const keywords = `const|let|var|async${space}function|function|class|type|interface|enum|namespace`;
   // using is a declaration only when a name follows it, as in using u = f():
   // it is otherwise an identifier, as in using(x), using = 1, await using; or
   // using in x.
-  const using = `(?:await${space})?using${space}(?!${white}|(?:in|instanceof)\\b)(?=[\\w$]|[^\\x00-\\x7f])`;
+  const using = `(?:await${space})?using${space}(?!${whiteClass}|(?:in|instanceof)\\b)(?=[\\w$]|[^\\x00-\\x7f])`;
   const declaration = new RegExp(`^${exported}(?:(?:declare|abstract)${space}|(?:${keywords})\\b|${using})`);
   // const enum comes before const, which would read enum as the name.
   const named = new RegExp(`^${exported}(?:declare${space})?(?:abstract${space})?(?:const${space}enum|(?:await${space})?using|${keywords})\\b\\*?${space}(\\w+)`);
@@ -1085,11 +1087,19 @@ function topLevelDeclarations(source) {
 
 // The names a TypeScript source imports, each with the module it comes from.
 // An import declaration may start after any of the characters sourceLines
-// splits at. One that is not on one line with its module in double quotes
-// fails the check, so that none is passed over.
+// splits at, and its import keyword may be followed by a run of the characters
+// in whiteClass or by a character that cannot continue a name, as in
+// import\t{ z } or import{ z }. A line on which import is followed by ( or .,
+// as in import("./x") or import.meta, is an expression and is passed over. An
+// import declaration that is not on one line with its module in double quotes,
+// as when import ends its line, fails the check, so that none is passed over.
 function importedNames(source) {
-  return sourceLines(source).filter((line) => line.startsWith("import ") && !/^import "[^"]+";$/.test(line)).flatMap((line) => {
-    const declaration = line.match(/^import (.+) from "([^"]+)";$/);
+  const keyword = new RegExp(`^import(?:${whiteClass}|[^\\w$\\\\\\u0080-\\uffff]|$)`);
+  const expression = new RegExp(`^import${whiteClass}*[(.]`);
+  const sideEffect = new RegExp(`^import${whiteClass}*"[^"]+";$`);
+  const imports = sourceLines(source).filter((line) => keyword.test(line) && !expression.test(line) && !sideEffect.test(line));
+  return imports.flatMap((line) => {
+    const declaration = line.match(new RegExp(`^import${whiteClass}*(.+) from "([^"]+)";$`));
     assert.ok(declaration, `the check reads this import declaration: ${line}`);
     const [, clause, module] = declaration;
     // The name a module's code uses is the last word of each item: b in a as b,
@@ -1253,6 +1263,49 @@ test("the excerpt check reads a top-level declaration or import that follows a c
     assert.deepEqual(topLevelDeclarations(`export${br}const a = 1;`), ["a"], `the check reads the declaration after export and ${code}`);
     assert.throws(() => topLevelDeclarations(`const a = 1;${br}const { b } = c;${br}`), /the check reads the name this declaration starts with: const \{ b \} = c;$/, `the check fails for a declaration between two ${code} breaks that does not start with its name`);
     assert.deepEqual(importedNames(`const a = 1;${br}import { z } from "zod";${br}`), [{ name: "z", module: "zod" }], `the check reads the import between two ${code} breaks`);
+  }
+});
+
+test("the excerpt check reads an import whose import keyword a tab, another character TypeScript reads as white space, a brace or * follows, and fails for one whose import keyword ends its line", () => {
+  // Space and the characters other than it that the TypeScript scanner reads
+  // as white space within a line.
+  const white = [0x20, 0x09, 0x0b, 0x0c, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x200b, 0x202f, 0x205f, 0x3000, 0xfeff];
+  for (const c of white) {
+    const w = String.fromCodePoint(c);
+    const code = `U+${c.toString(16).toUpperCase().padStart(4, "0")}`;
+    const imports = [
+      `import${w}{ z } from "zod";`,
+      `import${w}${w}express from "express";`,
+      `import${w}* as ns from "os";`,
+      `import${w}"./setup";`,
+      // import followed by ( is an import call, not a declaration.
+      `import${w}("./x");`,
+    ];
+    assert.deepEqual(importedNames(imports.join("\n")), [
+      { name: "z", module: "zod" },
+      { name: "express", module: "express" },
+      { name: "ns", module: "os" },
+    ], `the check reads the imports whose import keyword ${code} follows`);
+    assert.throws(() => importedNames(`import${w}{\n  z,\n} from "zod";`), /the check reads this import declaration: import.\{$/, `the check fails for an import after import${code} that is not on one line`);
+  }
+  const imports = [
+    'import{ z } from "zod";',
+    'import*as ns from "os";',
+    'import"./setup";',
+    // import followed by ( or . is an expression, and a name that starts with
+    // import is not the import keyword.
+    'import("./x");',
+    "import.meta.url;",
+    "important = 1;",
+    "imports.push(x);",
+  ];
+  assert.deepEqual(importedNames(imports.join("\n")), [
+    { name: "z", module: "zod" },
+    { name: "ns", module: "os" },
+  ]);
+  const breaks = [["LF", "\n"], ["CR", "\r"], ["CR LF", "\r\n"], ["U+2028", String.fromCharCode(0x2028)], ["U+2029", String.fromCharCode(0x2029)]];
+  for (const [code, br] of breaks) {
+    assert.throws(() => importedNames(`import${br}{ z } from "zod";`), /the check reads this import declaration: import$/, `the check fails for an import whose import keyword ${code} follows`);
   }
 });
 
