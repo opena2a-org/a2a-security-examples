@@ -9,6 +9,7 @@ import { createRequire } from "node:module";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { contentSha256, publishedSha256, schema, schemaErrors, unknownKeywords } from "./a2a-schema.mjs";
+import { protoErrors, protoText, publishedSha256 as protoSha256, readProto, textSha256, unknownTypes, v03Fields, v1Fields, withoutFields } from "./a2a-proto.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const typescript = join(root, "examples/validated-task-handler/node_modules/typescript/lib/typescript.js");
@@ -62,10 +63,95 @@ test("the schema check fails on a keyword it does not apply instead of skipping 
   assert.deepEqual(unknownKeywords({ definitions }), ["pattern"]);
 });
 
-test("the agent card example validates against the A2A v0.3.0 AgentCard and sets no property it does not define", () => {
+test("the A2A v1.0.1 proto the tests check against is the published a2a.proto, and the check knows the type of each field it defines", () => {
+  assert.equal(textSha256(protoText), protoSha256);
+  assert.deepEqual(unknownTypes(), []);
+});
+
+test("the proto check fails on a line, an option or a field type it does not read instead of skipping it", () => {
+  assert.throws(() => readProto("message A {\n  reserved 2;\n}\n"), /line 2: the reader does not know reserved 2;/);
+  assert.throws(() => readProto('message A {\n  string b = 1 [json_name = "c"];\n}\n'), /line 2: the reader does not know the option json_name/);
+  assert.throws(() => readProto("message A {\n  string b = 1;\n"), /ends inside a block/);
+  assert.deepEqual(unknownTypes(readProto("message A {\n  uint64 b = 1;\n  A c = 2;\n}\n")), ["uint64"]);
+});
+
+test("the proto check fails a value that a2a.proto or section 5.5 or 5.7 of the specification rejects", () => {
+  assert.deepEqual(protoErrors("Message", { messageId: "m1", role: "ROLE_USER", parts: [{ text: "a", raw: "aGk=" }] }), [
+    "Message.parts[0]: sets text and raw, which are one oneof",
+  ]);
+  assert.deepEqual(protoErrors("Message", { message_id: "m1", role: "user", parts: [] }), [
+    "Message.message_id: is the proto name of messageId, which JSON uses",
+    "Message.role: is not a value of Role",
+    "Message.messageId: is required",
+    "Message.parts: is required and is not set",
+  ]);
+  assert.deepEqual(protoErrors("Message", { messageId: "", role: "ROLE_UNSPECIFIED", parts: [{ kind: "text", text: null }] }), [
+    "Message.parts[0].kind: is not a field of Part",
+    "Message.parts[0].text: is null",
+    "Message.messageId: is required and is not set",
+    "Message.role: is required and is not set",
+  ]);
+  assert.deepEqual(protoErrors("TaskStatus", { state: 3, timestamp: "yesterday" }), [
+    "TaskStatus.state: is not a value of TaskState",
+    "TaskStatus.timestamp: is not an RFC 3339 timestamp",
+  ]);
+});
+
+test("the agent card example validates against the A2A v0.3.0 AgentCard without the fields only v1.0 defines", () => {
   const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
-  assert.deepEqual(schemaErrors("AgentCard", card), []);
+  assert.deepEqual(schemaErrors("AgentCard", withoutFields(card, v1Fields)), []);
   assert.equal(card.protocolVersion, "0.3.0");
+});
+
+test("the agent card example is an A2A v1.0.1 AgentCard without the fields only v0.3.0 defines, and lists a JSON-RPC interface for v1.0 and then one for v0.3", () => {
+  const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
+  assert.deepEqual(protoErrors("AgentCard", withoutFields(card, v03Fields)), []);
+  assert.deepEqual(
+    card.supportedInterfaces.map((i) => [i.url, i.protocolBinding, i.protocolVersion]),
+    [
+      [card.url, "JSONRPC", "1.0"],
+      [card.url, "JSONRPC", "0.3"],
+    ]
+  );
+});
+
+test("each field of the agent card example is read by the A2A v0.3.0 check or the v1.0.1 check: each check fails the whole card on exactly the fields of the other version", () => {
+  const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
+  const names = (paths) => paths.map((path) => path.join("."));
+  for (const path of [...v1Fields, ...v03Fields]) {
+    assert.notEqual(path.reduce((node, key) => node?.[key], card), undefined, `the card sets ${path.join(".")}`);
+  }
+  assert.deepEqual(names(v1Fields).filter((name) => names(v03Fields).includes(name)), [], "no field is left out by both checks");
+  // The v0.3.0 schema gives a security scheme as an anyOf, so its check names
+  // the scheme that holds httpAuthSecurityScheme, not the field.
+  assert.deepEqual(schemaErrors("AgentCard", card), [
+    "AgentCard.supportedInterfaces: is not a property the schema defines",
+    "AgentCard.securitySchemes.bearer: matches none of the schemas in anyOf",
+    "AgentCard.securityRequirements: is not a property the schema defines",
+  ]);
+  assert.deepEqual(protoErrors("AgentCard", card), [
+    "AgentCard.protocolVersion: is not a field of AgentCard",
+    "AgentCard.url: is not a field of AgentCard",
+    "AgentCard.preferredTransport: is not a field of AgentCard",
+    "AgentCard.capabilities.stateTransitionHistory: is not a field of AgentCapabilities",
+    "AgentCard.securitySchemes.bearer.type: is not a field of SecurityScheme",
+    "AgentCard.securitySchemes.bearer.scheme: is not a field of SecurityScheme",
+    "AgentCard.security: is not a field of AgentCard",
+  ]);
+});
+
+test("the proto check rejects the agent card example without the fields only v1.0 defines, the card the example served for A2A v0.3.0 alone", () => {
+  const card = withoutFields(JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8")), v1Fields);
+  assert.deepEqual(protoErrors("AgentCard", card), [
+    "AgentCard.protocolVersion: is not a field of AgentCard",
+    "AgentCard.url: is not a field of AgentCard",
+    "AgentCard.preferredTransport: is not a field of AgentCard",
+    "AgentCard.capabilities.stateTransitionHistory: is not a field of AgentCapabilities",
+    "AgentCard.securitySchemes.bearer.type: is not a field of SecurityScheme",
+    "AgentCard.securitySchemes.bearer.scheme: is not a field of SecurityScheme",
+    "AgentCard.security: is not a field of AgentCard",
+    "AgentCard.supportedInterfaces: is required",
+  ]);
 });
 
 test("the agent card example is named for the skills it lists: each word of its name but Agent is a word of a skill's name or a form of one", () => {
@@ -126,6 +212,25 @@ test("the message/send request in the README and the reply it shows validate aga
   const reply = JSON.parse(blocks[i + 1].body);
   assert.deepEqual(schemaErrors("SendMessageSuccessResponse", reply), []);
   assert.equal(reply.id, request.id, "the reply answers the request's id");
+});
+
+test("the SendMessage request in docs/validated-task-handler.md and the reply it shows are A2A v1.0.1 JSON-RPC messages the proto check accepts", () => {
+  const page = readText("docs/validated-task-handler.md");
+  const blocks = [...page.matchAll(/^```(\S*)\n([\s\S]*?)^```$/gm)].map((m) => ({ lang: m[1], body: m[2] }));
+  const i = blocks.findIndex((b) => b.lang === "bash" && b.body.includes('"method":"SendMessage"'));
+  assert.ok(i >= 0, "a bash block in docs/validated-task-handler.md sends SendMessage");
+  assert.match(blocks[i].body, /-H "A2A-Version: 1\.0"/, "the request names A2A v1.0 in its A2A-Version header");
+  const request = JSON.parse(blocks[i].body.match(/-d '([^']+)'/)[1]);
+  assert.deepEqual(Object.keys(request).sort(), ["id", "jsonrpc", "method", "params"]);
+  assert.equal(request.jsonrpc, "2.0");
+  assert.deepEqual(protoErrors("SendMessageRequest", request.params), []);
+  assert.equal(blocks[i + 1]?.lang, "text", "the page shows the reply after the request");
+  const reply = JSON.parse(blocks[i + 1].body);
+  assert.deepEqual(Object.keys(reply).sort(), ["id", "jsonrpc", "result"]);
+  assert.equal(reply.jsonrpc, "2.0");
+  assert.equal(reply.id, request.id, "the reply answers the request's id");
+  assert.deepEqual(protoErrors("SendMessageResponse", reply.result), []);
+  assert.equal(reply.result.task.status.state, "TASK_STATE_COMPLETED");
 });
 
 test("this file reads each file it checks through readText, which gives \"\\n\" line endings, or JSON.parse, which allows \"\\r\\n\", so its checks hold on a copy with \"\\r\\n\" line endings", () => {

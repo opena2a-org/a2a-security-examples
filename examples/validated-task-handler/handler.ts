@@ -1,11 +1,13 @@
 /**
  * Validated A2A Task Handler
  *
- * An agent written to A2A specification v0.3.0: it answers the JSON-RPC 2.0
- * method message/send at POST / and serves its agent card at
- * /.well-known/agent-card.json. It also answers POST /a2a/message, a route
- * A2A v0.3.0 does not define, which the a2a target of the HackMyAgent scanner
- * posts its payloads to.
+ * An agent written to A2A specifications v1.0 and v0.3.0. At POST / it answers
+ * the JSON-RPC 2.0 method SendMessage of v1.0 to a request with the header
+ * A2A-Version: 1.0, and the method message/send of v0.3.0 to a request with
+ * A2A-Version: 0.3 or with no A2A-Version header. It serves one agent card,
+ * with the fields of both versions, at /.well-known/agent-card.json. It also
+ * answers POST /a2a/message, a route neither version defines, which the a2a
+ * target of the HackMyAgent scanner posts its payloads to.
  *
  * Demonstrates secure task handling with:
  * - Zod schema validation on all inputs
@@ -120,6 +122,74 @@ const MessageSendParamsSchema = z.object({
   message: MessageSchema,
   metadata: z.record(z.string(), z.string().max(1000)).optional(),
 });
+
+type MessageSendParams = z.infer<typeof MessageSendParamsSchema>;
+
+// The SendMessage params of A2A specification v1.0, narrowed as the v0.3.0
+// schemas above are. A v1.0 part has no kind: it sets one of text, raw, url
+// and data, which a2a.proto declares as one oneof. raw holds the base64 bytes
+// a v0.3.0 file part holds in file.bytes, with mediaType and filename in place
+// of mimeType and name. A part that sets url or data is rejected, as a v0.3.0
+// file part given as a URI and a data part are. Each schema gives what it
+// reads in the form of the v0.3.0 schemas, which the checks and the
+// processing below read.
+
+const PART_CONTENT_FIELDS = ["text", "raw", "url", "data"] as const;
+
+const TextPartV1Schema = z
+  .object({ text: TextPartSchema.shape.text })
+  .transform(({ text }) => ({ kind: "text" as const, text }));
+
+const RawPartV1Schema = z
+  .object({
+    raw: FilePartSchema.shape.file.shape.bytes,
+    mediaType: FilePartSchema.shape.file.shape.mimeType,
+    filename: FilePartSchema.shape.file.shape.name,
+  })
+  .transform(({ raw, mediaType, filename }) => ({
+    kind: "file" as const,
+    file: { bytes: raw, mimeType: mediaType, name: filename },
+  }));
+
+// The one content field a part sets picks the schema that reads it. A part
+// that sets none of them, or more than one, is rejected.
+const PartV1Schema = z.record(z.unknown()).transform((part, ctx) => {
+  const set = PART_CONTENT_FIELDS.filter((field) => part[field] !== undefined);
+  if (set.length !== 1) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Set exactly one of text, raw, url and data" });
+    return z.NEVER;
+  }
+  if (set[0] === "url" || set[0] === "data") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [set[0]], message: "Only text and raw parts are accepted" });
+    return z.NEVER;
+  }
+  const parsed = (set[0] === "text" ? TextPartV1Schema : RawPartV1Schema).safeParse(part);
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) ctx.addIssue(issue);
+    return z.NEVER;
+  }
+  return parsed.data;
+});
+
+const ROLES_V1 = { ROLE_USER: "user", ROLE_AGENT: "agent" } as const;
+
+const MessageV1Schema = z.object({
+  messageId: MessageSchema.shape.messageId,
+  role: z.enum(["ROLE_USER", "ROLE_AGENT"]),
+  parts: z.array(PartV1Schema).min(1).max(10),
+  contextId: MessageSchema.shape.contextId,
+  taskId: MessageSchema.shape.taskId,
+});
+
+const SendMessageRequestV1Schema = z
+  .object({
+    message: MessageV1Schema,
+    metadata: MessageSendParamsSchema.shape.metadata,
+  })
+  .transform(({ message: { role, ...message }, metadata }): MessageSendParams => ({
+    message: { kind: "message", role: ROLES_V1[role], ...message },
+    metadata,
+  }));
 
 // The message HackMyAgent's a2a target sends in place of a JSON-RPC request:
 // the names of the sending and receiving agents and one text payload, which
@@ -320,15 +390,29 @@ async function rateLimit(
 
 type RequestId = z.infer<typeof RequestIdSchema> | null;
 
+type FieldPath = (string | number)[];
+
+interface FieldError {
+  field: string;
+  message: string;
+}
+
 interface RpcError {
   code: number;
   message: string;
-  data?: { field: string; message: string }[];
+  data?: FieldError[];
+}
+
+// The error object of a JSON-RPC error response, as a route sends it.
+interface WireError {
+  code: number;
+  message: string;
+  data?: unknown[];
 }
 
 // A JSON-RPC 2.0 error response. id is the request's id, or null when the
 // request has no valid one.
-function sendError(res: express.Response, status: number, id: RequestId, error: RpcError) {
+function sendError(res: express.Response, status: number, id: RequestId, error: WireError) {
   return res.status(status).json({ jsonrpc: "2.0", id, error });
 }
 
@@ -338,33 +422,70 @@ function requestIdOf(body: unknown): RequestId {
   return parsed.success ? parsed.data : null;
 }
 
+// A field's path as a v0.3.0 reply names it, as in params.message.parts.0.kind.
+const dottedPath = (path: FieldPath) => path.join(".");
+
+// A field's path as a google.rpc.BadRequest names it, with each index in
+// brackets, as in params.message.parts[0].raw.
+const bracketedPath = (path: FieldPath) =>
+  path.map((key, i) => (typeof key === "number" ? `[${key}]` : i === 0 ? key : `.${key}`)).join("");
+
 // Only expose field-level errors, not internal details
-function fieldErrors(issues: z.ZodIssue[], prefix: string[] = []) {
-  return issues.map((i) => ({ field: [...prefix, ...i.path].join("."), message: i.message }));
+function fieldErrors(issues: z.ZodIssue[], name: (path: FieldPath) => string = dottedPath, prefix: string[] = []) {
+  return issues.map((i) => ({ field: name([...prefix, ...i.path]), message: i.message }));
 }
 
 // What a route reads from a body: the message/send params, or the error for
 // the first check that fails, each with the id the reply answers.
 type ParsedRequest =
   | { id: RequestId; error: RpcError }
-  | { id: RequestId; params: z.infer<typeof MessageSendParamsSchema> };
+  | { id: RequestId; params: MessageSendParams };
 
-// Check the JSON-RPC request, its method, then its params, and return the
-// message/send params or the error for the first check that fails.
-function parseRequest(body: unknown): ParsedRequest {
+// Check the JSON-RPC request, its method, then its params with schema, and
+// return the params in the form of message/send params or the error for the
+// first check that fails. name gives the name of a field that fails.
+function parseRequest(
+  body: unknown,
+  method: string,
+  schema: z.ZodType<MessageSendParams, z.ZodTypeDef, unknown>,
+  name: (path: FieldPath) => string
+): ParsedRequest {
   const request = JsonRpcRequestSchema.safeParse(body);
   if (!request.success) {
-    return { id: requestIdOf(body), error: { code: -32600, message: "Invalid Request", data: fieldErrors(request.error.issues) } };
+    return { id: requestIdOf(body), error: { code: -32600, message: "Invalid Request", data: fieldErrors(request.error.issues, name) } };
   }
   const { id } = request.data;
-  if (request.data.method !== "message/send") {
+  if (request.data.method !== method) {
     return { id, error: { code: -32601, message: "Method not found" } };
   }
-  const params = MessageSendParamsSchema.safeParse(request.data.params);
+  const params = schema.safeParse(request.data.params);
   if (!params.success) {
-    return { id, error: { code: -32602, message: "Invalid params", data: fieldErrors(params.error.issues, ["params"]) } };
+    return { id, error: { code: -32602, message: "Invalid params", data: fieldErrors(params.error.issues, name, ["params"]) } };
   }
   return { id, params: params.data };
+}
+
+// The reasons A2A v1.0 gives the errors it defines in a google.rpc.ErrorInfo:
+// the error's name in upper snake case without the Error suffix.
+const ERROR_REASONS_V1 = new Map([
+  [-32001, "TASK_NOT_FOUND"],
+  [-32009, "VERSION_NOT_SUPPORTED"],
+]);
+
+// A JSON-RPC error as A2A v1.0 sends one (specification v1.0, section 9.5):
+// each object in data names its type in @type. The fields that fail
+// validation are given in a google.rpc.BadRequest, and an error A2A defines,
+// such as Task not found, in a google.rpc.ErrorInfo that names it.
+function toErrorV1({ code, message, data }: RpcError): WireError {
+  if (data) {
+    const fieldViolations = data.map(({ field, message: description }) => ({ field, description }));
+    return { code, message, data: [{ "@type": "type.googleapis.com/google.rpc.BadRequest", fieldViolations }] };
+  }
+  const reason = ERROR_REASONS_V1.get(code);
+  if (reason) {
+    return { code, message, data: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason, domain: "a2a-protocol.org" }] };
+  }
+  return { code, message };
 }
 
 // Check the message HackMyAgent's a2a target sends and return it as the
@@ -399,18 +520,73 @@ const parseJson = express.json({ limit: "11mb" });
 // escape, and the rest of the 64 KB is room for the rest of the message.
 const parseAgentMessageJson = express.json({ limit: "64kb" });
 
+type Task = Awaited<ReturnType<typeof processTask>>;
+
+// What a route reads and answers: parse reads the body, reply gives the reply
+// to a message the agent accepts from the completed task, and error gives the
+// error object of a JSON-RPC error response.
+interface MessageRoute {
+  parse: (body: unknown) => ParsedRequest;
+  reply: (id: RequestId, task: Task) => unknown;
+  error: (error: RpcError) => WireError;
+}
+
+// The A2A versions POST / answers, by the Major.Minor an A2A-Version header
+// names.
+const VERSIONS = new Map<string, MessageRoute>([
+  [
+    "0.3",
+    {
+      parse: (body) => parseRequest(body, "message/send", MessageSendParamsSchema, dottedPath),
+      reply: (id, task) => ({ jsonrpc: "2.0", id, result: task }),
+      error: (error) => error,
+    },
+  ],
+  [
+    "1.0",
+    {
+      parse: (body) => parseRequest(body, "SendMessage", SendMessageRequestV1Schema, bracketedPath),
+      reply: (id, task) => ({ jsonrpc: "2.0", id, result: { task: toTaskV1(task) } }),
+      error: toErrorV1,
+    },
+  ],
+]);
+
+// The version a request asks for in its A2A-Version header, as Major.Minor.
+// A request without the header, or with an empty one, asks for 0.3
+// (specification v1.0, section 3.6.2), and a patch number, as in 1.0.1, is
+// not considered (section 3.6). A value that is not a version is given as it
+// is, which names no version this agent answers.
+function requestedVersion(req: express.Request): string {
+  const header = req.get("A2A-Version") ?? "";
+  if (header === "") return "0.3";
+  return header.match(/^(\d+\.\d+)(?:\.\d+)?$/)?.[1] ?? header;
+}
+
 // Every request that reaches the limiter counts toward the rate limit before
 // authentication reads it, so a client that guesses tokens gets 429, not a 401
 // for each guess, once it has used up the requests the limiter allows it in
 // the 60 seconds that started with its first request. A request that
 // limitHeaderLines answers 431 never reaches the limiter and is not counted.
-app.post("/", rateLimit, authenticate, parseJson, (req, res) =>
-  handleMessage(req, res, parseRequest, (id, result) => ({ jsonrpc: "2.0", id, result }))
-);
+// A request for a version this agent does not answer gets the JSON-RPC error
+// A2A v1.0 defines for it, VersionNotSupportedError, before the JSON-RPC
+// request in its body is checked.
+app.post("/", rateLimit, authenticate, parseJson, (req, res) => {
+  const version = VERSIONS.get(requestedVersion(req));
+  if (version) return handleMessage(req, res, version);
+  audit({
+    timestamp: new Date().toISOString(),
+    taskId: randomUUID(),
+    clientIp: req.ip || "unknown",
+    action: "version_not_supported",
+    details: {},
+  });
+  return sendError(res, 400, requestIdOf(req.body), toErrorV1({ code: -32009, message: "Version not supported" }));
+});
 
 // HackMyAgent's a2a target (hackmyagent attack <url> --target-type a2a) posts
-// {"from", "to", "content"} to <url>/a2a/message, a route A2A v0.3.0 does not
-// define, in place of a message/send request. The message counts toward the
+// {"from", "to", "content"} to <url>/a2a/message, a route neither A2A version
+// defines, in place of a message/send request. The message counts toward the
 // same rate limit as a message sent to POST / and gets the same
 // authentication. Its schema is the route's own: a from, to
 // or content the schema rejects gets -32600 Invalid Request, where POST /
@@ -421,23 +597,22 @@ app.post("/", rateLimit, authenticate, parseJson, (req, res) =>
 // The reply to a message the agent accepts holds the text of the completed
 // task's reply.
 app.post("/a2a/message", rateLimit, authenticate, parseAgentMessageJson, (req, res) =>
-  handleMessage(req, res, parseAgentMessage, (_id, result) => ({ content: result.status.message.parts[0].text }))
+  handleMessage(req, res, {
+    parse: parseAgentMessage,
+    reply: (_id, task) => ({ content: task.status.message.parts[0].text }),
+    error: (error) => error,
+  })
 );
 
-// Check the body with parse, run the message it gives through the checks
-// below, and answer with the completed task in the route's own reply format
-// or with a JSON-RPC error.
-async function handleMessage(
-  req: express.Request,
-  res: express.Response,
-  parse: (body: unknown) => ParsedRequest,
-  toReply: (id: RequestId, result: Awaited<ReturnType<typeof processTask>>) => unknown
-) {
+// Check the body with the route's parse, run the message it gives through the
+// checks below, and answer with the completed task in the route's own reply
+// format or with a JSON-RPC error in the route's own error format.
+async function handleMessage(req: express.Request, res: express.Response, route: MessageRoute) {
   const clientIp = req.ip || "unknown";
   const requestId = randomUUID();
 
   // Schema validation
-  const parsed = parse(req.body);
+  const parsed = route.parse(req.body);
   if ("error" in parsed) {
     const { error } = parsed;
     audit({
@@ -447,7 +622,7 @@ async function handleMessage(
       action: "validation_failed",
       details: { code: error.code, issues: error.data?.length ?? 0 },
     });
-    return sendError(res, 400, parsed.id, error);
+    return sendError(res, 400, parsed.id, route.error(error));
   }
 
   const { id, params } = parsed;
@@ -464,7 +639,7 @@ async function handleMessage(
       action: "task_not_found",
       details: { partCount: message.parts.length },
     });
-    return sendError(res, 400, id, { code: -32001, message: "Task not found" });
+    return sendError(res, 400, id, route.error({ code: -32001, message: "Task not found" }));
   }
 
   // Prompt injection check on all text parts
@@ -477,7 +652,7 @@ async function handleMessage(
         action: "injection_detected",
         details: { partCount: message.parts.length },
       });
-      return sendError(res, 400, id, { code: -32602, message: "Request rejected by security filter" });
+      return sendError(res, 400, id, route.error({ code: -32602, message: "Request rejected by security filter" }));
     }
   }
 
@@ -495,7 +670,7 @@ async function handleMessage(
 
   try {
     const result = await processTask(taskId, message.contextId ?? randomUUID(), message);
-    return res.json(toReply(id, result));
+    return res.json(route.reply(id, result));
   } catch (error) {
     // Never leak internal error details
     audit({
@@ -505,17 +680,21 @@ async function handleMessage(
       action: "task_failed",
       details: { error: error instanceof Error ? error.message : "unknown" },
     });
-    return sendError(res, 500, id, { code: -32603, message: "Task processing failed" });
+    return sendError(res, 500, id, route.error({ code: -32603, message: "Task processing failed" }));
   }
 }
 
 // --- Agent Card Endpoint ---
 
-// An AgentCard as A2A specification v0.3.0 defines it, read from
-// examples/secure-agent-card/agent-card.json, so the card the README shows and
-// the card clients fetch are one file. Only url, which clients send JSON-RPC
-// requests to, is replaced, with the address this server answers on. The card
-// is public: securitySchemes says how to authenticate and never holds a
+// An AgentCard with the fields A2A specification v1.0 defines and those
+// v0.3.0 defines, read from examples/secure-agent-card/agent-card.json, so the
+// card the README shows and the card clients fetch are one file. Section 5.7
+// of v1.0 says an implementation should ignore a field it does not recognize,
+// and the JSON Schema of v0.3.0 allows fields it does not define. Only
+// the addresses clients send JSON-RPC requests to are replaced, with the one
+// this server answers both versions on: url, which v0.3.0 reads, and the url
+// of each interface in supportedInterfaces, which v1.0 reads. The card is
+// public: securitySchemes says how to authenticate and never holds a
 // credential. The example's directory is this file's directory when tsx runs
 // handler.ts, and its parent when node runs the compiled dist/handler.js.
 const exampleDir = __filename.endsWith(".ts") ? __dirname : dirname(__dirname);
@@ -539,10 +718,12 @@ function readAgentCard(path: string) {
   }
 }
 
-// Specification v0.3.0 names /.well-known/agent-card.json. Earlier versions
-// named /.well-known/agent.json, which still serves the same card.
+// Specifications v0.3.0 and v1.0 name /.well-known/agent-card.json. Earlier
+// versions named /.well-known/agent.json, which still serves the same card.
 app.get(["/.well-known/agent-card.json", "/.well-known/agent.json"], (_req, res) => {
-  res.json({ ...agentCard, url: process.env.AGENT_URL || `http://localhost:${port}` });
+  const url = process.env.AGENT_URL || `http://localhost:${port}`;
+  const supportedInterfaces = agentCard.supportedInterfaces?.map((agentInterface: object) => ({ ...agentInterface, url }));
+  res.json({ ...agentCard, url, supportedInterfaces });
 });
 
 // --- Error Handling ---
@@ -647,12 +828,36 @@ async function processTask(
     id: taskId,
     contextId,
     status: {
-      state: "completed",
+      state: "completed" as const,
       message: {
         kind: "message",
         messageId: randomUUID(),
         role: "agent",
         parts: [{ kind: "text", text: responseText }],
+      },
+    },
+  };
+}
+
+const TASK_STATES_V1 = { completed: "TASK_STATE_COMPLETED" } as const;
+
+// The completed task as an A2A v1.0 Task. Objects have no kind, an enum value
+// is the name a2a.proto gives it, and the agent's message names the context
+// and the task it belongs to, which a2a.proto asks of a message from the
+// agent once a task is created.
+function toTaskV1(task: Task) {
+  const { message } = task.status;
+  return {
+    id: task.id,
+    contextId: task.contextId,
+    status: {
+      state: TASK_STATES_V1[task.status.state],
+      message: {
+        messageId: message.messageId,
+        contextId: task.contextId,
+        taskId: task.id,
+        role: "ROLE_AGENT",
+        parts: message.parts.map(({ text }) => ({ text })),
       },
     },
   };
