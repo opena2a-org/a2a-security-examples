@@ -1045,6 +1045,14 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
   }
 });
 
+// The lines of a TypeScript source, split at each character the TypeScript
+// scanner reads as a line break: line feed, carriage return, U+2028 and U+2029,
+// with a carriage return and line feed read as one break.
+function sourceLines(source) {
+  const separators = String.fromCharCode(0x2028, 0x2029);
+  return source.split(new RegExp(`\\r\\n|[\\n\\r${separators}]`));
+}
+
 // The names a TypeScript source declares at its top level, exported or not:
 // constants, variables, functions, async functions, classes, types,
 // interfaces, enums, const enums and namespaces, each also after declare or
@@ -1052,9 +1060,10 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
 // a declaration may be separated by a run of the characters the TypeScript
 // scanner reads as white space within a line: space, tab, vertical tab, form
 // feed, U+0085, the no-break space and the other Unicode space separators,
-// U+200B and U+FEFF, as in export\tconst x or using  u. A declaration that
-// does not start with its name, such as const { a } = b or declare global {},
-// fails the check, so that none is passed over.
+// U+200B and U+FEFF, as in export\tconst x or using  u. A declaration may
+// start after any of the characters sourceLines splits at, such as U+2028. A
+// declaration that does not start with its name, such as const { a } = b or
+// declare global {}, fails the check, so that none is passed over.
 function topLevelDeclarations(source) {
   const white = "[ \\t\\v\\f\\u0085\\u00a0\\u1680\\u2000-\\u200b\\u202f\\u205f\\u3000\\ufeff]";
   const space = `${white}+`;
@@ -1067,7 +1076,7 @@ function topLevelDeclarations(source) {
   const declaration = new RegExp(`^${exported}(?:(?:declare|abstract)${space}|(?:${keywords})\\b|${using})`);
   // const enum comes before const, which would read enum as the name.
   const named = new RegExp(`^${exported}(?:declare${space})?(?:abstract${space})?(?:const${space}enum|(?:await${space})?using|${keywords})\\b\\*?${space}(\\w+)`);
-  return source.split("\n").filter((line) => declaration.test(line)).map((line) => {
+  return sourceLines(source).filter((line) => declaration.test(line)).map((line) => {
     const name = line.match(named);
     assert.ok(name, `the check reads the name this declaration starts with: ${line}`);
     return name[1];
@@ -1075,10 +1084,11 @@ function topLevelDeclarations(source) {
 }
 
 // The names a TypeScript source imports, each with the module it comes from.
-// An import declaration that is not on one line with its module in double
-// quotes fails the check, so that none is passed over.
+// An import declaration may start after any of the characters sourceLines
+// splits at. One that is not on one line with its module in double quotes
+// fails the check, so that none is passed over.
 function importedNames(source) {
-  return source.split("\n").filter((line) => line.startsWith("import ") && !/^import "[^"]+";$/.test(line)).flatMap((line) => {
+  return sourceLines(source).filter((line) => line.startsWith("import ") && !/^import "[^"]+";$/.test(line)).flatMap((line) => {
     const declaration = line.match(/^import (.+) from "([^"]+)";$/);
     assert.ok(declaration, `the check reads this import declaration: ${line}`);
     const [, clause, module] = declaration;
@@ -1233,6 +1243,16 @@ test("the excerpt check reads a top-level declaration whose words a vertical tab
     const code = `U+${c.toString(16).toUpperCase().padStart(4, "0")}`;
     assert.deepEqual(topLevelDeclarations(declarations.join("\n")), ["a", "B", "c", "d", "E", "F"], `the check reads the declarations whose words ${code} separates`);
     assert.throws(() => topLevelDeclarations(`export${w}const { a } = b;`), /the check reads the name this declaration starts with: export.const \{ a \} = b;/, `the check fails for a declaration after export${code} that does not start with its name`);
+  }
+});
+
+test("the excerpt check reads a top-level declaration or import that follows a carriage return, U+2028 or U+2029, each of which TypeScript reads as a line break", () => {
+  const breaks = [["CR", "\r"], ["CR LF", "\r\n"], ["U+2028", String.fromCharCode(0x2028)], ["U+2029", String.fromCharCode(0x2029)]];
+  for (const [code, br] of breaks) {
+    assert.deepEqual(topLevelDeclarations(`const a = 1;${br}const b = 2;`), ["a", "b"], `the check reads the declaration after ${code}`);
+    assert.deepEqual(topLevelDeclarations(`export${br}const a = 1;`), ["a"], `the check reads the declaration after export and ${code}`);
+    assert.throws(() => topLevelDeclarations(`const a = 1;${br}const { b } = c;${br}`), /the check reads the name this declaration starts with: const \{ b \} = c;$/, `the check fails for a declaration between two ${code} breaks that does not start with its name`);
+    assert.deepEqual(importedNames(`const a = 1;${br}import { z } from "zod";${br}`), [{ name: "z", module: "zod" }], `the check reads the import between two ${code} breaks`);
   }
 });
 
