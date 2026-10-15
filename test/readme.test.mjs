@@ -1139,9 +1139,12 @@ function importedNames(source) {
     const [, clause, module] = declaration;
     // The name a module's code uses is the last word of each item: b in a as b,
     // ns in * as ns, and X in type X, whether type comes before one item or,
-    // as in import type X, before all of them.
-    const items = clause.replace(/[{}]/g, "").split(",").map((item) => item.trim()).filter((item) => item !== "");
-    return items.map((item) => ({ name: item.split(/\s+/).pop(), module }));
+    // as in import type X, before all of them. The words of an item are split
+    // at runs of the characters in whiteClass, which include U+0085 and U+200B
+    // that String.prototype.trim and \s do not match.
+    const white = new RegExp(`${whiteClass}+`);
+    const items = clause.replace(/[{}]/g, "").split(",").map((item) => item.split(white).filter((word) => word !== "")).filter((words) => words.length > 0);
+    return items.map((words) => ({ name: words.pop(), module }));
   });
 }
 
@@ -1367,6 +1370,37 @@ test("the excerpt check reads a top-level declaration or import that does not be
   for (const source of ["function f() {\nconst a = 1;", "const s = `\nconst a = 1;", "/*\nconst a = 1;", 'const a = 1; const s = "b']) {
     assert.throws(() => topLevelDeclarations(source), /the check reads the source to its end with each bracket, comment, string and template closed/);
     assert.throws(() => importedNames(source), /the check reads the source to its end with each bracket, comment, string and template closed/);
+  }
+});
+
+test("the excerpt check reads the name of an import whose clause separates words with a tab, U+0085, U+200B or another character TypeScript reads as white space", () => {
+  // Space and the characters other than it that the TypeScript scanner reads
+  // as white space within a line. String.prototype.trim and \s match neither
+  // U+0085 nor U+200B.
+  const white = [0x20, 0x09, 0x0b, 0x0c, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x200b, 0x202f, 0x205f, 0x3000, 0xfeff];
+  for (const c of white) {
+    const w = String.fromCodePoint(c);
+    const code = `U+${c.toString(16).toUpperCase().padStart(4, "0")}`;
+    const imports = [
+      `import * as${w}ns from "os";`,
+      `import {${w}z${w}} from "zod";`,
+      `import { ZodIssue${w}as${w}${w}Issue } from "zod";`,
+      `import fs,${w}{${w}type${w}Stats } from "fs";`,
+      `import os,${w}*${w}as${w}m from "os";`,
+      `import type${w}{ Server } from "http";`,
+      `import type${w}Config from "./config";`,
+    ];
+    assert.deepEqual(importedNames(imports.join("\n")), [
+      { name: "ns", module: "os" },
+      { name: "z", module: "zod" },
+      { name: "Issue", module: "zod" },
+      { name: "fs", module: "fs" },
+      { name: "Stats", module: "fs" },
+      { name: "os", module: "os" },
+      { name: "m", module: "os" },
+      { name: "Server", module: "http" },
+      { name: "Config", module: "./config" },
+    ], `the check reads the names of the imports whose clause ${code} separates words in`);
   }
 });
 
