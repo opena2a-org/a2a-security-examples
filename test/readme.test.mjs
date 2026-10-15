@@ -1045,12 +1045,44 @@ test("step 4 says the bytes of a file part must be base64, as the handler's sche
   }
 });
 
-// The lines of a TypeScript source, split at each character the TypeScript
-// scanner reads as a line break: line feed, carriage return, U+2028 and U+2029,
-// with a carriage return and line feed read as one break.
-function sourceLines(source) {
-  const separators = String.fromCharCode(0x2028, 0x2029);
-  return source.split(new RegExp(`\\r\\n|[\\n\\r${separators}]`));
+// The text of each part of a TypeScript source that may start a statement at
+// its top level, read with moduleTokens(). A part starts with a token outside
+// any bracket and template substitution that begins the source, follows a line
+// break, as a statement may end at one, or follows a ;. It also starts with a
+// word a declaration or import starts with, such as const, export or import,
+// that follows a } outside any bracket, as after the } of a function or class
+// body: in a valid module, no such word comes next on the line after the } of
+// an object literal, a pattern or the names an import lists. A part ends with
+// the last token before the next part or the next line break, a line break
+// being each character the TypeScript scanner reads as one: line feed,
+// carriage return, U+2028 and U+2029. So a part may follow white space, a
+// comment or another statement on its line, as const a = 1; does in
+// /* c */ const a = 1; and const b = 2; in a(); const b = 2;, and none starts
+// inside a comment, string or template. A source that ends inside a bracket,
+// comment, string or template fails the check, as a bracket the reader does
+// not close would hide each statement after it.
+function topLevelParts(source) {
+  const starters = new Set(["abstract", "async", "await", "class", "const", "declare", "enum", "export", "function", "import", "interface", "let", "namespace", "type", "using", "var"]);
+  const tokens = moduleTokens(source);
+  assert.ok(!tokens.unclosed && (tokens.at(-1)?.open ?? 0) === 0, "the check reads the source to its end with each bracket, comment, string and template closed");
+  // The text the indexes of the tokens count in.
+  const text = source.replace(/^\u{FEFF}/u, "");
+  const lineBreak = (before, after) => /[\n\r\u{2028}\u{2029}]/u.test(text.slice(before.end, after.start));
+  const starts = (k) => {
+    const [previous, token] = [tokens[k - 1], tokens[k]];
+    if (previous === undefined) return true;
+    if (previous.open !== 0) return false;
+    const after = (value) => previous.type === "punct" && previous.value === value;
+    return lineBreak(previous, token) || after(";") || (after("}") && token.type === "name" && starters.has(token.raw));
+  };
+  const parts = [];
+  for (let k = 0; k < tokens.length; k++) {
+    if (!starts(k)) continue;
+    let last = k;
+    while (last + 1 < tokens.length && !starts(last + 1) && !lineBreak(tokens[last], tokens[last + 1])) last++;
+    parts.push(text.slice(tokens[k].start, tokens[last].end));
+  }
+  return parts;
 }
 
 // A regular expression class of the characters the TypeScript scanner reads as
@@ -1063,10 +1095,11 @@ const whiteClass = "[ \\t\\v\\f\\u0085\\u00a0\\u1680\\u2000-\\u200b\\u202f\\u205
 // interfaces, enums, const enums and namespaces, each also after declare or
 // abstract, and the names of using and await using declarations. The words of
 // a declaration may be separated by a run of the characters in whiteClass, as
-// in export\tconst x or using  u. A declaration may start after any of the
-// characters sourceLines splits at, such as U+2028. A declaration that does
-// not start with its name, such as const { a } = b or declare global {}, fails
-// the check, so that none is passed over.
+// in export\tconst x or using  u. A declaration is read where it starts a part
+// topLevelParts gives, as after a line break such as U+2028 or after another
+// statement on its line. A declaration that does not start with its name, such
+// as const { a } = b or declare global {}, fails the check, so that none is
+// passed over.
 function topLevelDeclarations(source) {
   const space = `${whiteClass}+`;
   const exported = `(?:export${space}(?:default${space})?)?`;
@@ -1078,29 +1111,31 @@ function topLevelDeclarations(source) {
   const declaration = new RegExp(`^${exported}(?:(?:declare|abstract)${space}|(?:${keywords})\\b|${using})`);
   // const enum comes before const, which would read enum as the name.
   const named = new RegExp(`^${exported}(?:declare${space})?(?:abstract${space})?(?:const${space}enum|(?:await${space})?using|${keywords})\\b\\*?${space}(\\w+)`);
-  return sourceLines(source).filter((line) => declaration.test(line)).map((line) => {
-    const name = line.match(named);
-    assert.ok(name, `the check reads the name this declaration starts with: ${line}`);
+  return topLevelParts(source).filter((part) => declaration.test(part)).map((part) => {
+    const name = part.match(named);
+    assert.ok(name, `the check reads the name this declaration starts with: ${part}`);
     return name[1];
   });
 }
 
 // The names a TypeScript source imports, each with the module it comes from.
-// An import declaration may start after any of the characters sourceLines
-// splits at, and its import keyword may be followed by a run of the characters
-// in whiteClass or by a character that cannot continue a name, as in
-// import\t{ z } or import{ z }. A line on which import is followed by ( or .,
+// An import declaration is read where it starts a part topLevelParts gives, as
+// after a line break such as U+2028 or after another statement on its line,
+// and its import keyword may be followed by a run of the characters in
+// whiteClass or by a character that cannot continue a name, as in
+// import\t{ z } or import{ z }. A part on which import is followed by ( or .,
 // as in import("./x") or import.meta, is an expression and is passed over. An
-// import declaration that is not on one line with its module in double quotes,
-// as when import ends its line, fails the check, so that none is passed over.
+// import declaration that is not on one line with its module in double quotes
+// and a ; after it, as when import ends its line, fails the check, so that
+// none is passed over.
 function importedNames(source) {
   const keyword = new RegExp(`^import(?:${whiteClass}|[^\\w$\\\\\\u0080-\\uffff]|$)`);
   const expression = new RegExp(`^import${whiteClass}*[(.]`);
   const sideEffect = new RegExp(`^import${whiteClass}*"[^"]+";$`);
-  const imports = sourceLines(source).filter((line) => keyword.test(line) && !expression.test(line) && !sideEffect.test(line));
-  return imports.flatMap((line) => {
-    const declaration = line.match(new RegExp(`^import${whiteClass}*(.+) from "([^"]+)";$`));
-    assert.ok(declaration, `the check reads this import declaration: ${line}`);
+  const imports = topLevelParts(source).filter((part) => keyword.test(part) && !expression.test(part) && !sideEffect.test(part));
+  return imports.flatMap((part) => {
+    const declaration = part.match(new RegExp(`^import${whiteClass}*(.+) from "([^"]+)";$`));
+    assert.ok(declaration, `the check reads this import declaration: ${part}`);
     const [, clause, module] = declaration;
     // The name a module's code uses is the last word of each item: b in a as b,
     // ns in * as ns, and X in type X, whether type comes before one item or,
@@ -1309,6 +1344,32 @@ test("the excerpt check reads an import whose import keyword a tab, another char
   }
 });
 
+test("the excerpt check reads a top-level declaration or import that does not begin its line, and none inside a block, comment, string or template", () => {
+  assert.deepEqual(topLevelDeclarations("const a = 1; const b = 2;"), ["a", "b"], "the check reads the declaration after another statement");
+  assert.deepEqual(topLevelDeclarations("/* c */ const a = 1;"), ["a"], "the check reads the declaration after a comment");
+  assert.deepEqual(topLevelDeclarations("  const a = 1;\n\tlet b = 2;"), ["a", "b"], "the check reads the declaration after white space");
+  assert.deepEqual(topLevelDeclarations("class A {} export class B {}\nfunction c() {} const d = 1;"), ["A", "B", "c", "d"], "the check reads the declaration after the } of a class or function body");
+  assert.deepEqual(topLevelDeclarations("const a = 1; /* b */ export  const c = 2; // const d = 3;"), ["a", "c"], "the check reads the declarations of a line and none in its comments");
+  assert.deepEqual(
+    importedNames('import { a } from "a"; import { z } from "zod";\nimport "./setup"; import * as path from "path"; const b = 1; import os from "os";'),
+    [{ name: "a", module: "a" }, { name: "z", module: "zod" }, { name: "path", module: "path" }, { name: "os", module: "os" }],
+    "the check reads each import of a line"
+  );
+  // A declaration inside a block, comment, string or template is not at the
+  // top level.
+  const inner = ["function f() { const g = 1; }", 'const s = "; const t = 1;";', "const u = `\nconst v = 1;\n`;", "/*\nconst w = 1;\n*/", "const x = { y: 1 }; if (x) { let z = 2; }"];
+  assert.deepEqual(topLevelDeclarations(inner.join("\n")), ["f", "s", "u", "x"]);
+  assert.deepEqual(importedNames('const s = "; import { a } from \\"a\\";";\n// import { b } from "b";'), []);
+  assert.throws(() => topLevelDeclarations("const a = 1; const { b } = c;"), /the check reads the name this declaration starts with: const \{ b \} = c;$/);
+  assert.throws(() => importedNames('const a = 1; import { z } from "zod"'), /the check reads this import declaration: import \{ z \} from "zod"$/);
+  // A source the reader cannot close may hide a top-level declaration after
+  // the bracket it cannot close.
+  for (const source of ["function f() {\nconst a = 1;", "const s = `\nconst a = 1;", "/*\nconst a = 1;", 'const a = 1; const s = "b']) {
+    assert.throws(() => topLevelDeclarations(source), /the check reads the source to its end with each bracket, comment, string and template closed/);
+    assert.throws(() => importedNames(source), /the check reads the source to its end with each bracket, comment, string and template closed/);
+  }
+});
+
 test("README names the command that runs the tests", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.ok(pkg.scripts?.test, "the root package.json defines npm test");
@@ -1464,10 +1525,13 @@ function slashDivides(token) {
 // that follows the } of a function or a ++ or -- after a non-null !, as in
 // function () {} as D<1> and a!++ as D<1>: TypeScript reads that as or
 // satisfies as an operator too, but neither token ends an operand here. Each
-// token has in typeArguments the number of type arguments open after it. The
-// array has unclosed set to true when the text ends inside a block comment, a
-// string or the text of a template, as a line of a module does when one of
-// these continues on the next line.
+// token has in typeArguments the number of type arguments open after it, and
+// in start and end the index of its first character and the index after its
+// last in the text without a byte order mark at its start: a template token
+// and a ${ start at the ` or } after which the text of their template starts.
+// The array has unclosed set to true when the text ends inside a block
+// comment, a string or the text of a template, as a line of a module does when
+// one of these continues on the next line.
 function moduleTokens(text, { expression = false } = {}) {
   const source = text.replace(/^\u{FEFF}/u, "");
   const tokens = [];
@@ -1516,6 +1580,7 @@ function moduleTokens(text, { expression = false } = {}) {
   // The number of type arguments open in a TypeScript type.
   let typeArguments = 0;
   while (i < source.length) {
+    const start = i;
     const c = source[i];
     const previous = tokens.at(-1);
     // A slash after the name right after let or var starts a regular
@@ -1610,6 +1675,8 @@ function moduleTokens(text, { expression = false } = {}) {
     if (tokens.at(-1) !== previous) {
       tokens.at(-1).open = brackets.length + substitutions.length;
       tokens.at(-1).typeArguments = typeArguments;
+      tokens.at(-1).start = start;
+      tokens.at(-1).end = i;
       previousEnd = i;
     }
   }
