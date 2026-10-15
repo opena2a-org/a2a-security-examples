@@ -151,12 +151,29 @@ test(".gitignore excludes environment, key and secrets files", () => {
   }
 });
 
+// The moduleResolution a tsconfig's compilerOptions set, in lower case, when
+// it is node10, its alias node, or classic: typescript@6.0.3 stops on each of
+// them with error TS5107. A tsconfig without moduleResolution sets none of
+// them: with module commonjs and no moduleResolution, typescript@6.0.3 resolves
+// modules as Bundler and compiles the example, as typescript@7.0.2 does.
+function deprecatedModuleResolution({ moduleResolution }) {
+  const resolution = (moduleResolution ?? "").toLowerCase();
+  return ["node", "node10", "classic"].includes(resolution) ? resolution : undefined;
+}
+
 test("the example's tsconfig.json uses a module resolution TypeScript 6 accepts", () => {
-  const { module, moduleResolution } = JSON.parse(readText("examples/validated-task-handler/tsconfig.json")).compilerOptions;
-  // Without moduleResolution, module commonjs resolves as node10, which
-  // TypeScript 6 rejects as it rejects its alias node.
-  const resolution = (moduleResolution ?? (/^commonjs$/i.test(module) ? "node10" : "")).toLowerCase();
-  assert.ok(!["node", "node10", "classic"].includes(resolution), `moduleResolution ${resolution} is deprecated`);
+  const resolution = deprecatedModuleResolution(JSON.parse(readText("examples/validated-task-handler/tsconfig.json")).compilerOptions);
+  assert.equal(resolution, undefined, `moduleResolution ${resolution} is deprecated`);
+});
+
+test("the module resolution check fails on a moduleResolution of node, node10 or classic, and passes module commonjs without moduleResolution", () => {
+  assert.equal(deprecatedModuleResolution({ module: "commonjs" }), undefined);
+  assert.equal(deprecatedModuleResolution({ module: "CommonJS" }), undefined);
+  assert.equal(deprecatedModuleResolution({ module: "Node16", moduleResolution: "Node16" }), undefined);
+  assert.equal(deprecatedModuleResolution({ module: "commonjs", moduleResolution: "Bundler" }), undefined);
+  assert.equal(deprecatedModuleResolution({ module: "commonjs", moduleResolution: "node" }), "node");
+  assert.equal(deprecatedModuleResolution({ module: "commonjs", moduleResolution: "Node10" }), "node10");
+  assert.equal(deprecatedModuleResolution({ module: "ES2022", moduleResolution: "Classic" }), "classic");
 });
 
 // The fields of package.json that npm install records in the lock file's root
