@@ -6,7 +6,7 @@
 
 [Website](https://opena2a.org) · [Discord](https://discord.gg/uRZa3KXgEn)
 
-Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in: a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. The examples follow the A2A specification version that their [agent card](./examples/secure-agent-card/agent-card.json) declares in `protocolVersion`, which is older than the [current A2A release](https://github.com/a2aproject/A2A/releases/latest): the handler answers the JSON-RPC method `message/send` and serves its agent card at `/.well-known/agent-card.json`.
+Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in: a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. The examples target A2A specifications [v1.0.1](https://github.com/a2aproject/A2A/releases/tag/v1.0.1) and [v0.3.0](https://github.com/a2aproject/A2A/releases/tag/v0.3.0): the handler answers the JSON-RPC method `SendMessage` of v1.0 to a request with the header `A2A-Version: 1.0` and `message/send` of v0.3.0 to one without it, and serves one [agent card](./examples/secure-agent-card/agent-card.json) with the fields of both at `/.well-known/agent-card.json`.
 
 ## Quick start
 
@@ -26,7 +26,7 @@ Secure A2A agent listening on port 3000
 Agent card: http://localhost:3000/.well-known/agent-card.json
 ```
 
-In a second terminal, send a message with the A2A JSON-RPC method `message/send`. The example accepts any bearer token RFC 6750 allows except `undefined` ([which characters](docs/validated-task-handler.md#bearer-tokens)); replace `isValidToken` in `handler.ts` with real token verification before you deploy it.
+In a second terminal, send a message with the A2A v0.3.0 JSON-RPC method `message/send`; an A2A v1.0 client sends `SendMessage` instead, as [docs/validated-task-handler.md](docs/validated-task-handler.md#a2a-v10-requests) shows. The example accepts any bearer token RFC 6750 allows except `undefined` ([which characters](docs/validated-task-handler.md#bearer-tokens)); replace `isValidToken` in `handler.ts` with real token verification before you deploy it.
 
 ```bash
 curl -s -X POST http://localhost:3000/ \
@@ -54,33 +54,37 @@ To run the repository's tests, run `npm test` from the repository root with Node
 
 | Example | What it shows | Language |
 |---|---|---|
-| [validated-task-handler](./examples/validated-task-handler/handler.ts) | A2A `message/send` endpoint with authentication, rate limiting, schema validation, injection filtering, and audit logging | TypeScript |
+| [validated-task-handler](./examples/validated-task-handler/handler.ts) | A2A endpoint for `SendMessage` (v1.0) and `message/send` (v0.3.0) with authentication, rate limiting, schema validation, injection filtering, and audit logging | TypeScript |
 | [secure-agent-card](./examples/secure-agent-card/agent-card.json) | Agent card that validated-task-handler serves, advertising only what it supports | JSON |
 
 [docs/input-validation.md](docs/input-validation.md) lists, in order, the checks validated-task-handler makes on each request and the status each failure gets.
 
 ## Secure agent card
 
-An agent card describes your agent's capabilities to other agents. Advertise only what you support. [handler.ts](./examples/validated-task-handler/handler.ts) serves [agent-card.json](./examples/secure-agent-card/agent-card.json) at `/.well-known/agent-card.json`; [docs/secure-agent-card.md](docs/secure-agent-card.md) gives the second path it serves and the `url` it sets. Its one skill is what the handler does: count the text parts of a message and the characters in them. Excerpt:
+An agent card describes your agent's capabilities to other agents. Advertise only what you support. [handler.ts](./examples/validated-task-handler/handler.ts) serves [agent-card.json](./examples/secure-agent-card/agent-card.json) at `/.well-known/agent-card.json`; [docs/secure-agent-card.md](docs/secure-agent-card.md) gives the second path it serves, the addresses it sets and which fields each A2A version reads. Its one skill is what the handler does: count the text parts of a message and the characters in them. Excerpt:
 
 ```json
 {
   "name": "TextPartCounterAgent",
-  "url": "https://your-agent.example.com",
+  "supportedInterfaces": [
+    { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" },
+    { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "0.3" }
+  ],
   "capabilities": {
     "streaming": false,
     "pushNotifications": false,
     "stateTransitionHistory": false
   },
   "securitySchemes": {
-    "bearer": { "type": "http", "scheme": "bearer" }
+    "bearer": { "httpAuthSecurityScheme": { "scheme": "Bearer" }, "type": "http", "scheme": "bearer" }
   },
+  "securityRequirements": [{ "schemes": { "bearer": { "list": [] } } }],
   "security": [{ "bearer": [] }]
 }
 ```
 
 - **Disable unused capabilities.** If you don't need streaming or push notifications, turn them off.
-- **Never embed credentials** in the agent card. `securitySchemes` says how a client authenticates, here with an HTTP bearer token; the token itself never appears in the card.
+- **Never embed credentials** in the agent card. `securitySchemes` says how a client authenticates, here with an HTTP bearer token, in the form of A2A v1.0 and of v0.3.0; the token itself never appears in the card.
 - **Minimal skill descriptions.** Don't leak internal implementation details in skill descriptions.
 - **Version your cards.** Include a version so clients can detect changes.
 
@@ -157,9 +161,9 @@ Before deploying an A2A agent to production:
 
 ## Documentation
 
-- [docs/validated-task-handler.md](docs/validated-task-handler.md) -- the bearer tokens the example accepts, its audit log, and the Node.js release `npm test` needs
+- [docs/validated-task-handler.md](docs/validated-task-handler.md) -- the request an A2A v1.0 client sends, the bearer tokens the example accepts, its audit log, and the Node.js release `npm test` needs
 - [docs/input-validation.md](docs/input-validation.md) -- the checks the handler makes on each request, in order
-- [docs/secure-agent-card.md](docs/secure-agent-card.md) -- the paths the card is served at, and the excerpt with its version fields
+- [docs/secure-agent-card.md](docs/secure-agent-card.md) -- the paths the card is served at, the fields each A2A version reads, and the excerpt with its version fields
 - [docs/testing-against-real-attacks.md](docs/testing-against-real-attacks.md) -- the scanner release the attack table was read from, the `/a2a/message` route, and when the test agents were checked
 - [A2A protocol specification](https://github.com/a2aproject/A2A) -- the Agent2Agent protocol
 - [Agent Hardening Guide](https://github.com/opena2a-org/agent-hardening-guide) -- general agent security practices

@@ -2,7 +2,9 @@
 
 The [README](../README.md#secure-agent-card) gives the rules for an agent card and an excerpt of [agent-card.json](../examples/secure-agent-card/agent-card.json). This page holds the paths the example serves the card at and the excerpt with the card's version fields.
 
-[handler.ts](../examples/validated-task-handler/handler.ts) serves [agent-card.json](../examples/secure-agent-card/agent-card.json) at `/.well-known/agent-card.json`, the path A2A v0.3.0 names, and at `/.well-known/agent.json`, the path earlier versions named, with `url` set to `AGENT_URL` or, when that is unset, `http://localhost:<port>`.
+[handler.ts](../examples/validated-task-handler/handler.ts) serves [agent-card.json](../examples/secure-agent-card/agent-card.json) at `/.well-known/agent-card.json`, the path A2A v0.3.0 and v1.0 name, and at `/.well-known/agent.json`, the path earlier versions named. It sets `url` and the `url` of each entry in `supportedInterfaces` to `AGENT_URL` or, when that is unset, `http://localhost:<port>`: the handler answers both versions at `POST /`.
+
+The card holds the fields of both versions. Section 5.7 of A2A v1.0 says an implementation should ignore a field it does not recognize, and the JSON Schema of A2A v0.3.0 allows fields it does not define. Of the fields only one version defines, an A2A v1.0 client reads `supportedInterfaces`, whose first entry is the agent's preferred interface, `httpAuthSecurityScheme` in each security scheme, and `securityRequirements`; an A2A v0.3.0 client reads `protocolVersion`, `url`, `preferredTransport`, `capabilities.stateTransitionHistory`, the `type` and `scheme` of each security scheme, and `security`.
 
 Excerpt:
 
@@ -10,6 +12,10 @@ Excerpt:
 {
   "protocolVersion": "0.3.0",
   "name": "TextPartCounterAgent",
+  "supportedInterfaces": [
+    { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" },
+    { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "0.3" }
+  ],
   "url": "https://your-agent.example.com",
   "version": "3.0.0",
   "capabilities": {
@@ -18,8 +24,9 @@ Excerpt:
     "stateTransitionHistory": false
   },
   "securitySchemes": {
-    "bearer": { "type": "http", "scheme": "bearer" }
+    "bearer": { "httpAuthSecurityScheme": { "scheme": "Bearer" }, "type": "http", "scheme": "bearer" }
   },
+  "securityRequirements": [{ "schemes": { "bearer": { "list": [] } } }],
   "security": [{ "bearer": [] }]
 }
 ```

@@ -2,6 +2,10 @@
   "protocolVersion": "0.3.0",
   "name": "TextPartCounterAgent",
   "description": "Validates each message it is sent and replies with the number of text parts it received and the total number of characters in them.",
+  "supportedInterfaces": [
+    { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" },
+    { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "0.3" }
+  ],
   "url": "https://your-agent.example.com",
   "preferredTransport": "JSONRPC",
   "version": "3.0.0",
@@ -16,8 +20,9 @@
     "stateTransitionHistory": false
   },
   "securitySchemes": {
-    "bearer": { "type": "http", "scheme": "bearer" }
+    "bearer": { "httpAuthSecurityScheme": { "scheme": "Bearer" }, "type": "http", "scheme": "bearer" }
   },
+  "securityRequirements": [{ "schemes": { "bearer": { "list": [] } } }],
   "security": [{ "bearer": [] }],
   "defaultInputModes": ["text/plain", "application/json", "application/pdf", "image/png", "image/jpeg"],
   "defaultOutputModes": ["text/plain"],
