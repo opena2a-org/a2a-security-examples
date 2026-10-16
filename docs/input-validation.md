@@ -9,6 +9,8 @@ Never trust data from another agent. [handler.ts](../examples/validated-task-han
 5. Prompt-injection patterns on every text part: 400 with the JSON-RPC error `-32602`. Pattern matching catches known phrasings only; treat it as one layer, not a complete defense.
 6. Processing errors return a generic 500 with the JSON-RPC error `-32603`. The detail goes to the audit log, not to the caller.
 
+`POST /message:send`, where the handler answers `SendMessage` in the HTTP+JSON binding of A2A v1.0, makes the same checks in the same order. Steps 1 and 2 answer it as they answer `POST /`. Step 3 also parses a body sent as `application/a2a+json`. In step 4, a request without the `A2A-Version` header, or with one that names any version but `1.0`, gets version not supported before its body is checked, and a patch number is not considered. The body is the `SendMessageRequest` itself, with no JSON-RPC request around it, and its message gets the checks a v1.0 message to `POST /` gets. Each error with a body from steps 3 to 6 is a `google.rpc.Status`, as section 11.6 of A2A v1.0 defines it, with the media type `application/a2a+json`: `code` is the HTTP status and `status` the `google.rpc.Code` name. A body step 3 rejects, the fields step 4 rejects (listed in a `google.rpc.BadRequest`) and a text part step 5 rejects get `INVALID_ARGUMENT` with the HTTP status they get at `POST /`; version not supported gets 400 `FAILED_PRECONDITION` and task not found 404 `NOT_FOUND`, the statuses section 5.4 gives them, each with a `google.rpc.ErrorInfo` that names it; step 6 gets 500 `INTERNAL`.
+
 ```typescript
 const MEDIA_TYPES = ["text/plain", "application/json", "application/pdf", "image/png", "image/jpeg"] as const;
 

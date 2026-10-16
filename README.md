@@ -6,7 +6,7 @@
 
 [Website](https://opena2a.org) · [Discord](https://discord.gg/uRZa3KXgEn)
 
-Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in: a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. The examples target A2A specifications [v1.0.1](https://github.com/a2aproject/A2A/releases/tag/v1.0.1) and [v0.3.0](https://github.com/a2aproject/A2A/releases/tag/v0.3.0): the handler answers the JSON-RPC method `SendMessage` of v1.0 to a request with the header `A2A-Version: 1.0` and `message/send` of v0.3.0 to one without it, and serves one [agent card](./examples/secure-agent-card/agent-card.json) with the fields of both at `/.well-known/agent-card.json`.
+Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in: a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. The examples target A2A specifications [v1.0.1](https://github.com/a2aproject/A2A/releases/tag/v1.0.1) and [v0.3.0](https://github.com/a2aproject/A2A/releases/tag/v0.3.0): the handler answers the method `SendMessage` of v1.0 to a request with the header `A2A-Version: 1.0`, in the JSON-RPC binding at `POST /` and in the HTTP+JSON binding at `POST /message:send`, and `message/send` of v0.3.0 at `POST /` to one without it, and serves one [agent card](./examples/secure-agent-card/agent-card.json) with the fields of both at `/.well-known/agent-card.json`.
 
 ## Quick start
 
@@ -72,6 +72,7 @@ An agent card describes your agent's capabilities to other agents. Advertise onl
   "name": "TextPartCounterAgent",
   "supportedInterfaces": [
     { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" },
+    { "url": "https://your-agent.example.com", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" },
     { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "0.3" }
   ],
   "capabilities": {
