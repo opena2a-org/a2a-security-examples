@@ -4,6 +4,7 @@
   "description": "Validates each message it is sent and replies with the number of text parts it received and the total number of characters in them.",
   "supportedInterfaces": [
     { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" },
+    { "url": "https://your-agent.example.com", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" },
     { "url": "https://your-agent.example.com", "protocolBinding": "JSONRPC", "protocolVersion": "0.3" }
   ],
   "url": "https://your-agent.example.com",

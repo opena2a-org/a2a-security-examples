@@ -165,7 +165,11 @@ test("the A2A specification releases the README header names are the ones the te
   const majorMinor = (release) => release.split(".").slice(0, 2).join(".");
   const card = JSON.parse(readText("examples/secure-agent-card/agent-card.json"));
   assert.ok(releases.includes(card.protocolVersion), `agent-card.json declares protocolVersion ${card.protocolVersion}, a release the header names`);
-  assert.deepEqual(card.supportedInterfaces.map((i) => i.protocolVersion).sort(), releases.map(majorMinor).sort(), "agent-card.json lists an interface for each release the header names, by Major.Minor");
+  // A version can have an interface in more than one binding, so each version
+  // counts once; the same binding of a version listed twice fails.
+  const interfaces = card.supportedInterfaces.map((i) => `${i.protocolBinding} ${i.protocolVersion}`);
+  assert.equal(new Set(interfaces).size, interfaces.length, "agent-card.json lists each binding of a version once");
+  assert.deepEqual([...new Set(card.supportedInterfaces.map((i) => i.protocolVersion))].sort(), releases.map(majorMinor).sort(), "agent-card.json lists an interface for each release the header names, by Major.Minor");
   // The JSON-RPC method the header says the handler answers for each version,
   // and the one each entry of the VERSIONS map in handler.ts parses.
   const named = Object.fromEntries([...header.matchAll(/`([^`\s]+)` of v(\d+\.\d+)(?:\.\d+)?\b/g)].map(([, method, version]) => [version, method]));

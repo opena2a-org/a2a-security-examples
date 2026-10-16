@@ -103,13 +103,14 @@ test("the agent card example validates against the A2A v0.3.0 AgentCard without 
   assert.equal(card.protocolVersion, "0.3.0");
 });
 
-test("the agent card example is an A2A v1.0.1 AgentCard without the fields only v0.3.0 defines, and lists a JSON-RPC interface for v1.0 and then one for v0.3", () => {
+test("the agent card example is an A2A v1.0.1 AgentCard without the fields only v0.3.0 defines, and lists a JSON-RPC and an HTTP+JSON interface for v1.0 and then a JSON-RPC interface for v0.3", () => {
   const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
   assert.deepEqual(protoErrors("AgentCard", withoutFields(card, v03Fields)), []);
   assert.deepEqual(
     card.supportedInterfaces.map((i) => [i.url, i.protocolBinding, i.protocolVersion]),
     [
       [card.url, "JSONRPC", "1.0"],
+      [card.url, "HTTP+JSON", "1.0"],
       [card.url, "JSONRPC", "0.3"],
     ]
   );

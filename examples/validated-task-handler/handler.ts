@@ -4,8 +4,10 @@
  * An agent written to A2A specifications v1.0 and v0.3.0. At POST / it answers
  * the JSON-RPC 2.0 method SendMessage of v1.0 to a request with the header
  * A2A-Version: 1.0, and the method message/send of v0.3.0 to a request with
- * A2A-Version: 0.3 or with no A2A-Version header. It serves one agent card,
- * with the fields of both versions, at /.well-known/agent-card.json. It also
+ * A2A-Version: 0.3 or with no A2A-Version header. At POST /message:send it
+ * answers SendMessage in the HTTP+JSON binding of v1.0 to a request with the
+ * header A2A-Version: 1.0. It serves one agent card, with the fields of both
+ * versions, at /.well-known/agent-card.json. It also
  * answers POST /a2a/message, a route neither version defines, which the a2a
  * target of the HackMyAgent scanner posts its payloads to.
  *
@@ -519,6 +521,37 @@ function toErrorV1({ code, message, data }: RpcError): WireError {
   return { code, message };
 }
 
+// The HTTP status and the google.rpc.Code name each error a request to POST
+// /message:send can get has in the HTTP+JSON binding of A2A v1.0. Task not
+// found and version not supported have those section 5.4 of v1.0 gives them.
+// A request the schema or the injection filter rejects has those of
+// INVALID_ARGUMENT, and a processing failure those of INTERNAL.
+const HTTP_ERRORS_V1 = new Map<number, [number, string]>([
+  [-32602, [400, "INVALID_ARGUMENT"]],
+  [-32001, [404, "NOT_FOUND"]],
+  [-32009, [400, "FAILED_PRECONDITION"]],
+  [-32603, [500, "INTERNAL"]],
+]);
+
+// An error response in the HTTP+JSON binding of A2A v1.0 (specification v1.0,
+// section 11.6): the google.rpc.Status JSON representation, whose code is the
+// HTTP status and whose status is the google.rpc.Code name, with the details
+// a JSON-RPC error of v1.0 carries in data.
+function sendStatusError(res: express.Response, status: number, name: string, message: string, details?: unknown[]) {
+  return res.status(status).json({ error: { code: status, status: name, message, ...(details && { details }) } });
+}
+
+// Check the SendMessageRequest that a request to POST /message:send holds as
+// its whole body, and return it in the form of message/send params. The
+// request has no id, and no reply on this route carries one.
+function parseSendMessageRequest(body: unknown): ParsedRequest {
+  const request = SendMessageRequestV1Schema.safeParse(body);
+  if (!request.success) {
+    return { id: null, error: { code: -32602, message: "Invalid request", data: fieldErrors(request.error.issues, bracketedPath) } };
+  }
+  return { id: null, params: request.data };
+}
+
 // Check the message HackMyAgent's a2a target sends and return it as the
 // message/send params of a user message with one text part. The message has
 // no request id, so the reply to it answers id null.
@@ -551,15 +584,23 @@ const parseJson = express.json({ limit: "11mb" });
 // escape, and the rest of the 64 KB is room for the rest of the message.
 const parseAgentMessageJson = express.json({ limit: "64kb" });
 
+// POST /message:send reads the message POST / reads, without the JSON-RPC
+// request around it, so its parser has the limit of POST /. It also reads a
+// body sent as application/a2a+json, the media type section 11.1 of A2A v1.0
+// says requests in the HTTP+JSON binding should use.
+const parseSendMessageJson = express.json({ limit: "11mb", type: ["application/json", "application/a2a+json"] });
+
 type Task = Awaited<ReturnType<typeof processTask>>;
 
 // What a route reads and answers: parse reads the body, reply gives the reply
-// to a message the agent accepts from the completed task, and error gives the
-// error object of a JSON-RPC error response.
+// to a message the agent accepts from the completed task, and sendError sends
+// the response to an error. status is the HTTP status a JSON-RPC route answers
+// the error with; POST /message:send answers each error with the status
+// HTTP_ERRORS_V1 gives it.
 interface MessageRoute {
   parse: (body: unknown) => ParsedRequest;
   reply: (id: RequestId, task: Task) => unknown;
-  error: (error: RpcError) => WireError;
+  sendError: (res: express.Response, status: number, id: RequestId, error: RpcError) => express.Response;
 }
 
 // The A2A versions POST / answers, by the Major.Minor an A2A-Version header
@@ -570,7 +611,7 @@ const VERSIONS = new Map<string, MessageRoute>([
     {
       parse: (body) => parseRequest(body, "message/send", MessageSendParamsSchema, dottedPath),
       reply: (id, task) => ({ jsonrpc: "2.0", id, result: task }),
-      error: (error) => error,
+      sendError,
     },
   ],
   [
@@ -578,10 +619,23 @@ const VERSIONS = new Map<string, MessageRoute>([
     {
       parse: (body) => parseRequest(body, "SendMessage", SendMessageRequestV1Schema, bracketedPath, UNSUPPORTED_METHODS_V1),
       reply: (id, task) => ({ jsonrpc: "2.0", id, result: { task: toTaskV1(task) } }),
-      error: toErrorV1,
+      sendError: (res, status, id, error) => sendError(res, status, id, toErrorV1(error)),
     },
   ],
 ]);
+
+// SendMessage in the HTTP+JSON binding of A2A v1.0: the body is the
+// SendMessageRequest, the reply is the SendMessageResponse, and an error is a
+// google.rpc.Status.
+const SEND_MESSAGE_V1_HTTP: MessageRoute = {
+  parse: parseSendMessageRequest,
+  reply: (_id, task) => ({ task: toTaskV1(task) }),
+  sendError: (res, _status, _id, error) => {
+    const [status, name] = HTTP_ERRORS_V1.get(error.code) ?? [500, "INTERNAL"];
+    const { message, data } = toErrorV1(error);
+    return sendStatusError(res, status, name, message, data);
+  },
+};
 
 // The version a request asks for in its A2A-Version header, as Major.Minor.
 // A request without the header, or with an empty one, asks for 0.3
@@ -605,6 +659,11 @@ function requestedVersion(req: express.Request): string {
 app.post("/", rateLimit, authenticate, parseJson, (req, res) => {
   const version = VERSIONS.get(requestedVersion(req));
   if (version) return handleMessage(req, res, version);
+  auditVersionNotSupported(req);
+  return sendError(res, 400, requestIdOf(req.body), toErrorV1({ code: -32009, message: "Version not supported" }));
+});
+
+function auditVersionNotSupported(req: express.Request): void {
   audit({
     timestamp: new Date().toISOString(),
     taskId: randomUUID(),
@@ -612,7 +671,26 @@ app.post("/", rateLimit, authenticate, parseJson, (req, res) => {
     action: "version_not_supported",
     details: {},
   });
-  return sendError(res, 400, requestIdOf(req.body), toErrorV1({ code: -32009, message: "Version not supported" }));
+}
+
+// The path a2a.proto binds SendMessage to in the HTTP+JSON binding of A2A
+// v1.0. A colon in a path string starts a route parameter in Express, so the
+// path is matched as a regular expression, which takes the colon as it is.
+const SEND_MESSAGE_PATH = /^\/message:send$/;
+
+// POST /message:send counts toward the rate limit of POST / and gets its
+// authentication, which answer it as they answer POST /. It answers only A2A
+// v1.0: a request without the A2A-Version header asks for 0.3 (section 3.6.2
+// of v1.0), and it and a request for any other version but 1.0 get
+// VersionNotSupportedError. The message then gets the checks a SendMessage
+// request to POST / gets. Each reply from this handler, and the reply to a
+// body the parser rejects, has the media type application/a2a+json, which
+// section 11.1 of v1.0 says responses in the HTTP+JSON binding should have.
+app.post(SEND_MESSAGE_PATH, rateLimit, authenticate, parseSendMessageJson, (req, res) => {
+  res.type("application/a2a+json");
+  if (requestedVersion(req) === "1.0") return handleMessage(req, res, SEND_MESSAGE_V1_HTTP);
+  auditVersionNotSupported(req);
+  return SEND_MESSAGE_V1_HTTP.sendError(res, 400, null, { code: -32009, message: "Version not supported" });
 });
 
 // HackMyAgent's a2a target (hackmyagent attack <url> --target-type a2a) posts
@@ -631,13 +709,13 @@ app.post("/a2a/message", rateLimit, authenticate, parseAgentMessageJson, (req, r
   handleMessage(req, res, {
     parse: parseAgentMessage,
     reply: (_id, task) => ({ content: task.status.message.parts[0].text }),
-    error: (error) => error,
+    sendError,
   })
 );
 
 // Check the body with the route's parse, run the message it gives through the
 // checks below, and answer with the completed task in the route's own reply
-// format or with a JSON-RPC error in the route's own error format.
+// format or with an error in the route's own error format.
 async function handleMessage(req: express.Request, res: express.Response, route: MessageRoute) {
   const clientIp = req.ip || "unknown";
   const requestId = randomUUID();
@@ -653,7 +731,7 @@ async function handleMessage(req: express.Request, res: express.Response, route:
       action: "validation_failed",
       details: { code: error.code, issues: error.data?.length ?? 0 },
     });
-    return sendError(res, 400, parsed.id, route.error(error));
+    return route.sendError(res, 400, parsed.id, error);
   }
 
   const { id, params } = parsed;
@@ -670,7 +748,7 @@ async function handleMessage(req: express.Request, res: express.Response, route:
       action: "task_not_found",
       details: { partCount: message.parts.length },
     });
-    return sendError(res, 400, id, route.error({ code: -32001, message: "Task not found" }));
+    return route.sendError(res, 400, id, { code: -32001, message: "Task not found" });
   }
 
   // Prompt injection check on all text parts
@@ -683,7 +761,7 @@ async function handleMessage(req: express.Request, res: express.Response, route:
         action: "injection_detected",
         details: { partCount: message.parts.length },
       });
-      return sendError(res, 400, id, route.error({ code: -32602, message: "Request rejected by security filter" }));
+      return route.sendError(res, 400, id, { code: -32602, message: "Request rejected by security filter" });
     }
   }
 
@@ -711,7 +789,7 @@ async function handleMessage(req: express.Request, res: express.Response, route:
       action: "task_failed",
       details: { error: error instanceof Error ? error.message : "unknown" },
     });
-    return sendError(res, 500, id, route.error({ code: -32603, message: "Task processing failed" }));
+    return route.sendError(res, 500, id, { code: -32603, message: "Task processing failed" });
   }
 }
 
@@ -722,9 +800,11 @@ async function handleMessage(req: express.Request, res: express.Response, route:
 // card the README shows and the card clients fetch are one file. Section 5.7
 // of v1.0 says an implementation should ignore a field it does not recognize,
 // and the JSON Schema of v0.3.0 allows fields it does not define. Only
-// the addresses clients send JSON-RPC requests to are replaced, with the one
-// this server answers both versions on: url, which v0.3.0 reads, and the url
-// of each interface in supportedInterfaces, which v1.0 reads. The card is
+// the addresses clients send requests to are replaced, with this server's
+// address: url, which v0.3.0 reads, and the url of each interface in
+// supportedInterfaces, which v1.0 reads. A JSON-RPC request goes to that
+// address, and a client of the HTTP+JSON interface appends /message:send to it
+// for SendMessage. The card is
 // public: securitySchemes says how to authenticate and never holds a
 // credential. The example's directory is this file's directory when tsx runs
 // handler.ts, and its parent when node runs the compiled dist/handler.js.
@@ -805,6 +885,16 @@ app.use(
         reason: rejectionReason(type, code),
       },
     });
+
+    // POST /message:send answers in the error format of the HTTP+JSON binding,
+    // with INVALID_ARGUMENT for a body the parser rejects and INTERNAL for any
+    // other failure.
+    if (SEND_MESSAGE_PATH.test(req.path)) {
+      const message = type === "entity.parse.failed" ? "Invalid JSON" : clientError ? "Invalid request body" : "Request failed";
+      res.type("application/a2a+json");
+      sendStatusError(res, responseStatus, clientError ? "INVALID_ARGUMENT" : "INTERNAL", message);
+      return;
+    }
 
     // No request id has been read, so the JSON-RPC error answers id null.
     if (type === "entity.parse.failed") {
