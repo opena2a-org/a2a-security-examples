@@ -6,7 +6,9 @@
 
 [Website](https://opena2a.org) · [Discord](https://discord.gg/uRZa3KXgEn)
 
-Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in: a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. The examples target A2A specifications [v1.0.1](https://github.com/a2aproject/A2A/releases/tag/v1.0.1) and [v0.3.0](https://github.com/a2aproject/A2A/releases/tag/v0.3.0): the handler answers the method `SendMessage` of v1.0 to a request with the header `A2A-Version: 1.0`, in the JSON-RPC binding at `POST /` and in the HTTP+JSON binding at `POST /message:send`, and `message/send` of v0.3.0 at `POST /` to one without it, and serves one [agent card](./examples/secure-agent-card/agent-card.json) with the fields of both at `/.well-known/agent-card.json`.
+Example code and configuration for [Agent2Agent (A2A) protocol](https://github.com/a2aproject/A2A) agents with security controls built in. The examples target A2A specifications [v1.0.1](https://github.com/a2aproject/A2A/releases/tag/v1.0.1) and [v0.3.0](https://github.com/a2aproject/A2A/releases/tag/v0.3.0): the handler answers the method `SendMessage` of v1.0 and `message/send` of v0.3.0, and serves one [agent card](./examples/secure-agent-card/agent-card.json) with the fields of both at `/.well-known/agent-card.json`.
+
+The controls are a minimal agent card, bearer authentication, per-client rate limiting, schema validation of task input, prompt-injection filtering, and audit logging. A request with the header `A2A-Version: 1.0` is read as v1.0, in the JSON-RPC binding at `POST /` and in the HTTP+JSON binding at `POST /message:send`; one without it as v0.3.0 at `POST /`.
 
 ## Quick start
 
@@ -65,7 +67,9 @@ To run the repository's tests, run `npm test` from the repository root with Node
 
 ## Secure agent card
 
-An agent card describes your agent's capabilities to other agents. Advertise only what you support. [handler.ts](./examples/validated-task-handler/handler.ts) serves [agent-card.json](./examples/secure-agent-card/agent-card.json) at `/.well-known/agent-card.json`; [docs/secure-agent-card.md](docs/secure-agent-card.md) gives the second path it serves, the addresses it sets and which fields each A2A version reads. Its one skill is what the handler does: count the text parts of a message and the characters in them. Excerpt:
+An agent card describes your agent's capabilities to other agents. Advertise only what you support. [handler.ts](./examples/validated-task-handler/handler.ts) serves [agent-card.json](./examples/secure-agent-card/agent-card.json) at `/.well-known/agent-card.json`; [docs/secure-agent-card.md](docs/secure-agent-card.md) gives the second path it serves, the addresses it sets and which fields each A2A version reads.
+
+Its one skill is what the handler does: count the text parts of a message and the characters in them. Excerpt:
 
 ```json
 {
@@ -89,61 +93,23 @@ An agent card describes your agent's capabilities to other agents. Advertise onl
 ```
 
 - **Disable unused capabilities.** If you don't need streaming or push notifications, turn them off.
-- **Never embed credentials** in the agent card. `securitySchemes` says how a client authenticates, here with an HTTP bearer token, in the form of A2A v1.0 and of v0.3.0; the token itself never appears in the card.
+- **Never embed credentials** in the agent card. `securitySchemes` says how a client authenticates; the token never appears in the card ([its form](docs/secure-agent-card.md)).
 - **Minimal skill descriptions.** Don't leak internal implementation details in skill descriptions.
 - **Version your cards.** Include a version so clients can detect changes.
 
 ## Testing against real attacks
 
-Run the A2A attack payloads from [HackMyAgent](https://github.com/opena2a-org/hackmyagent) against the running example, or against your own agent with its URL and token. At the default `active` intensity the command sends the eight `passive` and `active` payloads in the table; add `--intensity aggressive` to send all ten:
+Run the A2A attack payloads from [HackMyAgent](https://github.com/opena2a-org/hackmyagent) against the running example, or against your own agent with its URL and token. At the default `active` intensity the command sends the eight `passive` and `active` payloads in the [payload table](docs/testing-against-real-attacks.md#payloads); add `--intensity aggressive` to send all ten:
 
 ```bash
 npx hackmyagent attack http://localhost:3000 --target-type a2a --category a2a-attack -H "Authorization: Bearer demo-token"
 ```
 
-| Payload | Intensity | Description |
-|---|---|---|
-| A2A Agent Discovery | passive | Discovers available agents and their capabilities |
-| A2A Trust Probe | passive | Probes agent trust boundaries and authentication |
-| A2A Identity Spoofing - Admin | active | Claims to be an admin agent to gain elevated access |
-| A2A Identity Spoofing - Orchestrator | active | Claims to be the orchestrator to control workers |
-| A2A Delegation Abuse - Elevated Privileges | active | Requests task execution with elevated privileges |
-| A2A Delegation Abuse - Cross-boundary | active | Attempts to delegate tasks outside authorized scope |
-| A2A Embedded Prompt Injection | active | Embeds prompt injection attack in A2A message content |
-| A2A Data Exfiltration via Message | active | Attempts to extract system information through A2A responses |
-| A2A Chain Attack | aggressive | Chains multiple A2A agents to escalate privileges |
-| A2A Message Replay Probe | aggressive | Tests if agents accept replayed/stale messages |
-
-The table gives the scanner's own names and descriptions. With `--target-type a2a`, HackMyAgent posts each payload as `{"from", "to", "content"}` to `/a2a/message`, not as a `message/send` request, so the example answers `POST /a2a/message` too; [docs/testing-against-real-attacks.md](docs/testing-against-real-attacks.md) names the release the table was read from and the checks that route makes.
+With `--target-type a2a`, HackMyAgent posts each payload as `{"from", "to", "content"}` to `/a2a/message`, not as a `message/send` request, so the example answers `POST /a2a/message` too; [docs/testing-against-real-attacks.md](docs/testing-against-real-attacks.md) names the release the table was read from and the checks that route makes.
 
 ### Test agents
 
-The following agents are available for security testing. They simulate real-world A2A deployments across different industries and are designed as honeypots to test how your agent handles untrusted peers:
-
-| Agent | Domain | Industry |
-|---|---|---|
-| DevPipeline AI | [devpipeline-ai.dev](https://devpipeline-ai.dev) | Software Development |
-| DataBridge Labs | [databridge-labs.dev](https://databridge-labs.dev) | Data Engineering |
-| FinOps Agent | [finops-agent.dev](https://finops-agent.dev) | Financial Operations |
-| CloudOps Agent | [cloudops-agent.io](https://cloudops-agent.io) | Cloud Infrastructure |
-| BankingOps AI | [bankingops-ai.dev](https://bankingops-ai.dev) | Banking |
-| ClinicalOps Agent | [clinicalops-agent.io](https://clinicalops-agent.io) | Healthcare |
-| Compliance Agent Platform | [compliance-agent-platform.dev](https://compliance-agent-platform.dev) | Regulatory Compliance |
-| DefenseOps AI | [defenseops-ai.dev](https://defenseops-ai.dev) | Defense & Intelligence |
-| GovTech Agent | [govtech-agent.io](https://govtech-agent.io) | Government Technology |
-| HROps AI Platform | [hrops-ai-platform.io](https://hrops-ai-platform.io) | Human Resources |
-| InfraOps Platform | [infraops-platform.io](https://infraops-platform.io) | Infrastructure Monitoring |
-| LegalHQ AI | [legalhq-ai.io](https://legalhq-ai.io) | Legal Services |
-| MedTech Platform | [medtech-platform.dev](https://medtech-platform.dev) | Medical Technology |
-| Payroll AI Platform | [payroll-ai-platform.io](https://payroll-ai-platform.io) | Payroll Processing |
-| RxOps AI | [rxops-ai.dev](https://rxops-ai.dev) | Pharmaceutical Operations |
-| SalesOps Agent | [salesops-agent.dev](https://salesops-agent.dev) | Sales Automation |
-| TradingDesk Labs | [tradingdesk-labs.io](https://tradingdesk-labs.io) | Financial Trading |
-| VoiceOps Platform | [voiceops-platform.io](https://voiceops-platform.io) | Voice & Communications |
-| MCP Server Registry | [mcp-servers.org](https://mcp-servers.org) | Developer Tools |
-| Agent Documentation Hub | [agent-docs.io](https://agent-docs.io) | Documentation |
-| LLM Tools Guide | [llm-tools-guide.dev](https://llm-tools-guide.dev) | Developer Education |
-| AI SDK Reference | [ai-sdk-reference.dev](https://ai-sdk-reference.dev) | Developer Reference |
+The 22 agents in the [test agent table](docs/testing-against-real-attacks.md#test-agents) simulate real-world A2A deployments across different industries and are designed as honeypots to test how your agent handles untrusted peers.
 
 Each test agent except CloudOps Agent exposes a standard A2A agent card at `/.well-known/agent.json`. Use them to test your agent's behavior when interacting with unknown peers. To see which agents serve a card right now, run `npm run check:test-agents`, which exits 1 when any agent fails its check ([what it checks](docs/testing-against-real-attacks.md#test-agents)).
 
@@ -151,25 +117,14 @@ Each test agent except CloudOps Agent exposes a standard A2A agent card at `/.we
 
 ## Security checklist for A2A agents
 
-Before deploying an A2A agent to production:
-
-- [ ] Agent card exposes only necessary capabilities
-- [ ] All incoming task messages validated against strict schema
-- [ ] Text content scanned for prompt injection patterns
-- [ ] Authentication required for all endpoints (bearer tokens or mTLS)
-- [ ] Rate limiting applied per client
-- [ ] Credentials never appear in agent card, task messages, or responses
-- [ ] All tool executions sandboxed with resource limits
-- [ ] Comprehensive audit logging enabled
-- [ ] Error responses don't leak internal details
-- [ ] Agent tested against [agentpwn.com](https://agentpwn.com) attack patterns
+Before deploying an A2A agent to production, make the ten checks in [docs/security-checklist.md](docs/security-checklist.md).
 
 ## Documentation
 
-- [docs/validated-task-handler.md](docs/validated-task-handler.md) -- the request an A2A v1.0 client sends, the bearer tokens the example accepts, its audit log, and the Node.js release `npm test` needs
+- [docs/validated-task-handler.md](docs/validated-task-handler.md) -- the A2A v1.0 request, the bearer tokens it accepts, its audit log, and the Node.js release `npm test` needs
 - [docs/input-validation.md](docs/input-validation.md) -- the checks the handler makes on each request, in order
-- [docs/secure-agent-card.md](docs/secure-agent-card.md) -- the paths the card is served at, the fields each A2A version reads, and the excerpt with its version fields
-- [docs/testing-against-real-attacks.md](docs/testing-against-real-attacks.md) -- the scanner release the attack table was read from, the `/a2a/message` route, and when the test agents were checked
+- [docs/secure-agent-card.md](docs/secure-agent-card.md) -- the card's paths, the fields and security scheme each A2A version reads, and the excerpt with version fields
+- [docs/testing-against-real-attacks.md](docs/testing-against-real-attacks.md) -- the payload and test agent tables, the scanner release, the `/a2a/message` route, and when the agents were checked
 - [A2A protocol specification](https://github.com/a2aproject/A2A) -- the Agent2Agent protocol
 - [Agent Hardening Guide](https://github.com/opena2a-org/agent-hardening-guide) -- general agent security practices
 - [MCP Security Checklist](https://github.com/opena2a-org/mcp-security-checklist) -- MCP-specific security

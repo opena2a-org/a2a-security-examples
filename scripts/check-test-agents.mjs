@@ -1,5 +1,5 @@
-// Fetches the agent card and the home page of every test agent the README
-// lists, and reports each agent that serves no JSON card at
+// Fetches the agent card and the home page of every test agent
+// docs/testing-against-real-attacks.md lists, and reports each agent that serves no JSON card at
 // /.well-known/agent.json or whose home page calls it by another name than the
 // table does. Run with: npm run check:test-agents (exits 1 if any agent fails).
 import { readFileSync } from "node:fs";
@@ -16,9 +16,10 @@ export const maxTitleAttributes = 256;
 export const maxTitleText = 1024;
 const titleText = new RegExp(`([^<]{0,${maxTitleText}})</title>`, "iy");
 
-// The name and host of each row of the README's test agent table.
-export function testAgents(readme) {
-  const section = readme.split(/^### Test agents$/m)[1]?.split(/^#{1,3} /m)[0] ?? "";
+// The name and host of each row of the test agent table on
+// docs/testing-against-real-attacks.md.
+export function testAgents(page) {
+  const section = page.split(/^## Test agents$/m)[1]?.split(/^#{1,3} /m)[0] ?? "";
   const row = /^\| ([^|]+?) \| \[([^\]]+)\]\(https:\/\/([^/)]+)\/?\) \| [^|]+ \|$/gm;
   return [...section.matchAll(row)].map((m) => ({ name: m[1], host: m[3] }));
 }
@@ -279,9 +280,9 @@ export async function checkAgent({ name, host }, fetchImpl = fetch) {
 
 async function main() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const agents = testAgents(readFileSync(join(root, "README.md"), "utf8"));
+  const agents = testAgents(readFileSync(join(root, "docs/testing-against-real-attacks.md"), "utf8"));
   if (agents.length === 0) {
-    console.error("FAIL no rows found in the README's test agent table");
+    console.error("FAIL no rows found in the test agent table on docs/testing-against-real-attacks.md");
     process.exitCode = 1;
     return;
   }

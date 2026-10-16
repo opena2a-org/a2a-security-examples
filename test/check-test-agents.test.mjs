@@ -10,6 +10,8 @@ import { checkAgent, maxBodyBytes, maxTitleAttributes, maxTitleText, siteName, t
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readme = readFileSync(join(root, "README.md"), "utf8");
+// The page that holds the test agent table the README links.
+const agentPage = readFileSync(join(root, "docs/testing-against-real-attacks.md"), "utf8");
 
 // The title element of each test agent's home page. Checked 2026-10-11.
 const homePageTitles = {
@@ -62,25 +64,27 @@ const noTitleInBounds =
   "the home page has no title the check can read, which needs a title tag with at most 256 characters of attributes and at most 1024 characters of text without a <, closed by </title>";
 const noTitleInBoundsOrRead = `${noTitleInBounds}, ending in its first 256 KB`;
 
-test("the test agent check reads every row of the README's test agent table", () => {
-  const section = readme.split(/^### Test agents$/m)[1]?.split(/^#{1,3} /m)[0] ?? "";
+test("the test agent check reads every row of the test agent table on docs/testing-against-real-attacks.md, and the README gives its number of rows", () => {
+  const section = agentPage.split(/^## Test agents$/m)[1]?.split(/^#{1,3} /m)[0] ?? "";
   const rows = section.split("\n").filter((line) => line.startsWith("| ") && !line.startsWith("| Agent |"));
-  const agents = testAgents(readme);
-  assert.ok(agents.length > 0, "the README lists test agents");
+  const agents = testAgents(agentPage);
+  assert.ok(agents.length > 0, "docs/testing-against-real-attacks.md lists test agents");
   assert.equal(agents.length, rows.length, "every row of the table gives a name and an https link to a host");
   assert.deepEqual(agents.find((agent) => agent.host === "cloudops-agent.io"), { name: "CloudOps Agent", host: "cloudops-agent.io" });
+  const count = `The ${agents.length} agents in the [test agent table](docs/testing-against-real-attacks.md#test-agents)`;
+  assert.ok(readme.includes(count), `README says: ${count}`);
 });
 
 test("every name in the test agent table is the name its home page gives", () => {
-  const agents = testAgents(readme);
+  const agents = testAgents(agentPage);
   assert.deepEqual(agents.map((agent) => agent.host).sort(), Object.keys(homePageTitles).sort(), "homePageTitles holds a title for each listed host");
   for (const { name, host } of agents) {
-    assert.equal(name, siteName(homePageTitles[host]), `the README calls ${host} "${name}", and its home page calls it "${siteName(homePageTitles[host])}"`);
+    assert.equal(name, siteName(homePageTitles[host]), `docs/testing-against-real-attacks.md calls ${host} "${name}", and its home page calls it "${siteName(homePageTitles[host])}"`);
   }
 });
 
 test("the README says each test agent exposes an agent card except the agents recorded as serving none", () => {
-  const names = testAgents(readme).filter((agent) => hostsWithoutCard.includes(agent.host)).map((agent) => agent.name);
+  const names = testAgents(agentPage).filter((agent) => hostsWithoutCard.includes(agent.host)).map((agent) => agent.name);
   assert.equal(names.length, hostsWithoutCard.length, "the table lists every host recorded as serving no card");
   const agents = names.length > 0 ? `Each test agent except ${names.join(" and ")}` : "Each test agent";
   const claim = `${agents} exposes a standard A2A agent card at \`/.well-known/agent.json\``;
