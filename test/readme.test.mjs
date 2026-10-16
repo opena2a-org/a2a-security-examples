@@ -23,7 +23,7 @@ const readme = readText("README.md");
 const lines = readme.split("\n");
 
 // The pages under docs/ that hold what the README links instead of saying.
-const docsPages = ["docs/validated-task-handler.md", "docs/input-validation.md", "docs/secure-agent-card.md", "docs/testing-against-real-attacks.md"];
+const docsPages = ["docs/validated-task-handler.md", "docs/input-validation.md", "docs/secure-agent-card.md", "docs/testing-against-real-attacks.md", "docs/security-checklist.md"];
 const handlerPage = readText("docs/validated-task-handler.md");
 const handlerPageLines = handlerPage.split("\n");
 const inputValidation = readText("docs/input-validation.md");
@@ -2401,16 +2401,23 @@ function attackSection(text) {
   return (text.split(/^## Testing against real attacks$/m)[1] ?? "").split(/^##+ /m)[0];
 }
 
-// What the attack section says against the payload list: the rows of its
-// table and the number of payloads the command sends. The version the list was
-// read from is on docs/testing-against-real-attacks.md.
-function checkAttackSection(section, payloads) {
+// The part of docs/testing-against-real-attacks.md between the payload heading
+// and the next heading, which holds the payload table.
+function payloadSection(text) {
+  return (text.split(/^## Payloads$/m)[1] ?? "").split(/^##+ /m)[0];
+}
+
+// What the README's attack section and the payload table on
+// docs/testing-against-real-attacks.md say against the payload list: the rows
+// of the table and the number of payloads the command sends. The version the
+// list was read from is on docs/testing-against-real-attacks.md.
+function checkAttackSection(section, table, payloads) {
   const number = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
   const command = codeBlocks(section).find((b) => b.body.includes("hackmyagent attack "));
   assert.ok(command, "the section has a hackmyagent attack command");
   assert.match(command.body, /--category a2a-attack\b/, "the command runs the a2a-attack category");
   assert.doesNotMatch(command.body, /--intensity\b/, "the command runs at the default intensity, active");
-  const rows = section.split("\n").filter((l) => l.startsWith("|")).slice(2);
+  const rows = table.split("\n").filter((l) => l.startsWith("|")).slice(2);
   const cells = rows.map((row) => row.split("|").slice(1, -1).map((cell) => cell.trim()));
   assert.deepEqual(cells, payloads, "the table lists each payload of the a2a-attack category with its intensity and description");
   const sent = payloads.filter(([, intensity]) => intensity !== "aggressive").length;
@@ -2425,28 +2432,30 @@ function checkAttackSection(section, payloads) {
 }
 
 test("the attack table lists the payloads of the scanner's a2a-attack category, and the sentence above the command counts those it sends", () => {
-  checkAttackSection(attackSection(readme), a2aAttackPayloads);
+  checkAttackSection(attackSection(readme), payloadSection(attackPage), a2aAttackPayloads);
   assert.match(attackPage, /`a2a-attack` category of hackmyagent 0\.33\.2\b/, "docs/testing-against-real-attacks.md names the scanner version the table was read from");
   assert.ok(attackSection(readme).includes("[docs/testing-against-real-attacks.md](docs/testing-against-real-attacks.md) names the release the table was read from"), "the attack section links the page that names the scanner version");
+  assert.ok(attackSection(readme).includes("](docs/testing-against-real-attacks.md#payloads)"), "the attack section links the payload table");
 });
 
 test("the attack table check fails for a table with an attack the category lacks, a missing payload or another intensity, and for a sentence that miscounts the payloads the command sends", () => {
   const section = attackSection(readme);
+  const table = payloadSection(attackPage);
   assert.throws(
-    () => checkAttackSection(section.replace("| A2A Trust Probe | passive |", "| Response poisoning | passive |"), a2aAttackPayloads),
+    () => checkAttackSection(section, table.replace("| A2A Trust Probe | passive |", "| Response poisoning | passive |"), a2aAttackPayloads),
     /the table lists each payload/
   );
   assert.throws(
-    () => checkAttackSection(section.replace(/^\| A2A Chain Attack \|.*\n/m, ""), a2aAttackPayloads),
+    () => checkAttackSection(section, table.replace(/^\| A2A Chain Attack \|.*\n/m, ""), a2aAttackPayloads),
     /the table lists each payload/
   );
   assert.throws(
-    () => checkAttackSection(section.replace("| A2A Message Replay Probe | aggressive |", "| A2A Message Replay Probe | active |"), a2aAttackPayloads),
+    () => checkAttackSection(section, table.replace("| A2A Message Replay Probe | aggressive |", "| A2A Message Replay Probe | active |"), a2aAttackPayloads),
     /the table lists each payload/
   );
   const noneAggressive = a2aAttackPayloads.map(([name, intensity, description]) => [name, intensity.replace("aggressive", "active"), description]);
   assert.throws(
-    () => checkAttackSection(section.replace(/\| aggressive \|/g, "| active |"), noneAggressive),
+    () => checkAttackSection(section, table.replace(/\| aggressive \|/g, "| active |"), noneAggressive),
     /README says the command sends the ten passive and active payloads/
   );
 });
