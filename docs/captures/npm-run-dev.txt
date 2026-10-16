@@ -1,0 +1,8 @@
+
+> a2a-validated-task-handler@1.0.0 dev
+> tsx handler.ts
+
+Secure A2A agent listening on port 3000
+Agent card: http://localhost:3000/.well-known/agent-card.json
+{"timestamp":"2026-10-16T00:27:08.433Z","taskId":"b07fef79-46bb-48da-9b78-3d1c381a9595","clientIp":"::ffff:127.0.0.1","action":"task_accepted","details":{"partCount":1,"hasMetadata":false}}
+{"timestamp":"2026-10-16T00:27:08.454Z","taskId":"a10aa8fb-81ff-466b-971a-424f8559f11d","clientIp":"::ffff:127.0.0.1","action":"injection_detected","details":{"partCount":1}}

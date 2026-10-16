@@ -1,0 +1,21 @@
+{
+  "command": "npm run dev",
+  "before": [
+    "git clone https://github.com/opena2a-org/a2a-security-examples.git",
+    "cd a2a-security-examples/examples/validated-task-handler",
+    "npm install"
+  ],
+  "run": {
+    "repository": "https://github.com/opena2a-org/a2a-security-examples.git",
+    "commit": "4131cfa5edf33b11ca8e3d5edc8e70d547608af1",
+    "image": "node:22",
+    "node": "v22.23.3",
+    "npm": "10.9.9",
+    "capturedAt": "2026-10-16T00:27:03Z"
+  },
+  "stop": "The server ran while the requests of message-send.json and message-send-injection.json were sent, then SIGINT was sent to the process group of npm.",
+  "exitStatus": 130,
+  "outputs": {
+    "capture": "docs/captures/npm-run-dev.txt"
+  }
+}
