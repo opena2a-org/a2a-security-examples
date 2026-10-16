@@ -443,18 +443,25 @@ type ParsedRequest =
 
 // Check the JSON-RPC request, its method, then its params with schema, and
 // return the params in the form of message/send params or the error for the
-// first check that fails. name gives the name of a field that fails.
+// first check that fails. name gives the name of a field that fails, and
+// unsupported gives the error for each method the agent answers with an error
+// of its own in place of Method not found, without checking its params.
 function parseRequest(
   body: unknown,
   method: string,
   schema: z.ZodType<MessageSendParams, z.ZodTypeDef, unknown>,
-  name: (path: FieldPath) => string
+  name: (path: FieldPath) => string,
+  unsupported: ReadonlyMap<string, RpcError> = new Map()
 ): ParsedRequest {
   const request = JsonRpcRequestSchema.safeParse(body);
   if (!request.success) {
     return { id: requestIdOf(body), error: { code: -32600, message: "Invalid Request", data: fieldErrors(request.error.issues, name) } };
   }
   const { id } = request.data;
+  const unsupportedError = unsupported.get(request.data.method);
+  if (unsupportedError) {
+    return { id, error: unsupportedError };
+  }
   if (request.data.method !== method) {
     return { id, error: { code: -32601, message: "Method not found" } };
   }
@@ -469,7 +476,31 @@ function parseRequest(
 // the error's name in upper snake case without the Error suffix.
 const ERROR_REASONS_V1 = new Map([
   [-32001, "TASK_NOT_FOUND"],
+  [-32003, "PUSH_NOTIFICATION_NOT_SUPPORTED"],
+  [-32004, "UNSUPPORTED_OPERATION"],
   [-32009, "VERSION_NOT_SUPPORTED"],
+]);
+
+const unsupportedOperation: RpcError = { code: -32004, message: "This operation is not supported" };
+const pushNotificationNotSupported: RpcError = { code: -32003, message: "Push Notification is not supported" };
+
+// The A2A v1.0 methods that need a capability the agent card does not
+// declare: the card sets capabilities.streaming and
+// capabilities.pushNotifications to false and does not set
+// capabilities.extendedAgentCard. Section 3.3.4 of v1.0 says the agent must
+// then answer SendStreamingMessage and SubscribeToTask with
+// UnsupportedOperationError, the four push notification configuration methods
+// with PushNotificationNotSupportedError, and GetExtendedAgentCard with
+// UnsupportedOperationError. Any other method but SendMessage gets Method not
+// found.
+const UNSUPPORTED_METHODS_V1 = new Map<string, RpcError>([
+  ["SendStreamingMessage", unsupportedOperation],
+  ["SubscribeToTask", unsupportedOperation],
+  ["CreateTaskPushNotificationConfig", pushNotificationNotSupported],
+  ["GetTaskPushNotificationConfig", pushNotificationNotSupported],
+  ["ListTaskPushNotificationConfigs", pushNotificationNotSupported],
+  ["DeleteTaskPushNotificationConfig", pushNotificationNotSupported],
+  ["GetExtendedAgentCard", unsupportedOperation],
 ]);
 
 // A JSON-RPC error as A2A v1.0 sends one (specification v1.0, section 9.5):
@@ -545,7 +576,7 @@ const VERSIONS = new Map<string, MessageRoute>([
   [
     "1.0",
     {
-      parse: (body) => parseRequest(body, "SendMessage", SendMessageRequestV1Schema, bracketedPath),
+      parse: (body) => parseRequest(body, "SendMessage", SendMessageRequestV1Schema, bracketedPath, UNSUPPORTED_METHODS_V1),
       reply: (id, task) => ({ jsonrpc: "2.0", id, result: { task: toTaskV1(task) } }),
       error: toErrorV1,
     },

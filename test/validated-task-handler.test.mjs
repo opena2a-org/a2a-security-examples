@@ -12,7 +12,7 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { schemaErrors } from "./a2a-schema.mjs";
-import { protoErrors, v03Fields, v1Fields, withoutFields } from "./a2a-proto.mjs";
+import { protoErrors, protoText, v03Fields, v1Fields, withoutFields } from "./a2a-proto.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const example = join(root, "examples/validated-task-handler");
@@ -1307,6 +1307,44 @@ test("a SendMessage request the agent rejects gets a JSON-RPC error with the req
       const lines = (await waitForAudit(seen + 1, audited)).slice(seen);
       assert.deepEqual(lines.map((l) => l.action), [action], name);
     }
+  });
+});
+
+test("an A2A v1.0 request for a method that needs a capability the agent card does not declare gets the error section 3.3.4 of A2A v1.0 names, with the request's id, and an audit line", async () => {
+  const card = JSON.parse(readFileSync(cardFile, "utf8"));
+  const rpcs = [...protoText.matchAll(/^\s*rpc (\w+)\(/gm)].map((m) => m[1]);
+  const unsupported = { code: -32004, message: "This operation is not supported", data: errorInfo("UNSUPPORTED_OPERATION") };
+  const pushNotSupported = { code: -32003, message: "Push Notification is not supported", data: errorInfo("PUSH_NOTIFICATION_NOT_SUPPORTED") };
+  const cases = [
+    ["SendStreamingMessage", "streaming", unsupported],
+    ["SubscribeToTask", "streaming", unsupported],
+    ["CreateTaskPushNotificationConfig", "pushNotifications", pushNotSupported],
+    ["GetTaskPushNotificationConfig", "pushNotifications", pushNotSupported],
+    ["ListTaskPushNotificationConfigs", "pushNotifications", pushNotSupported],
+    ["DeleteTaskPushNotificationConfig", "pushNotifications", pushNotSupported],
+    ["GetExtendedAgentCard", "extendedAgentCard", unsupported],
+  ];
+  await withOwnServer(async (serverPort, audited) => {
+    for (const [method, capability, error] of cases) {
+      assert.ok(rpcs.includes(method), `${method} is a method of the A2A v1.0.1 proto`);
+      assert.notEqual(card.capabilities[capability], true, `the agent card does not declare ${capability}`);
+      // The params of SendStreamingMessage are those of SendMessage. The other
+      // methods' params are not checked, so an empty object stands for them.
+      const params = method === "SendStreamingMessage" ? sendMessageV1([{ text: "Hello" }]).params : {};
+      const seen = audited().length;
+      const res = await postTask(v1Headers, JSON.stringify({ jsonrpc: "2.0", id: "r-9", method, params }), serverPort);
+      assert.equal(res.status, 400, method);
+      assert.deepEqual(await res.json(), { jsonrpc: "2.0", id: "r-9", error }, method);
+      const lines = (await waitForAudit(seen + 1, audited)).slice(seen);
+      assert.deepEqual(lines.map((l) => [l.action, l.details.code]), [["validation_failed", error.code]], method);
+    }
+    // A request read as A2A v0.3.0 names its methods otherwise, so a v1.0
+    // method name sent without the header is not one it answers.
+    const seen = audited().length;
+    const res = await postTask({ Authorization: "Bearer demo-token" }, JSON.stringify({ ...sendMessageV1([{ text: "Hello" }]), method: "SendStreamingMessage" }), serverPort);
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } });
+    await waitForAudit(seen + 1, audited);
   });
 });
 
