@@ -74,6 +74,85 @@ test("the quick start runs a script the example defines", () => {
   assert.doesNotMatch(clone.body, /^npm start$/m, "npm start needs npm run build first; the quick start runs from source");
 });
 
+// The label above an output block in the README: the command whose output the
+// block shows, ", trimmed" when the block leaves lines of it out, and the file
+// under docs/captures/ that holds all of it. The .json file of the same name
+// says how the output was taken.
+const captureLabel = /What `([^`]+)` prints(, trimmed)? \(\[full output\]\((docs\/captures\/[a-z0-9-]+)\.txt\)\):$/;
+
+// A version number or a date, as the README length check counts them.
+const versionOrDate = /v?[0-9]+\.[0-9]+\.[0-9]+|20[0-9]{2}-[0-9]{2}-[0-9]{2}/;
+
+// Fenced code blocks in document order, each with the text between it and the
+// block before it.
+function blocksWithLead(text) {
+  const blocks = [];
+  let end = 0;
+  for (const m of text.matchAll(/^```(\S*)\n([\s\S]*?)^```$/gm)) {
+    blocks.push({ lang: m[1], body: m[2], lead: text.slice(end, m.index) });
+    end = m.index + m[0].length;
+  }
+  return blocks;
+}
+
+// The commands of a command block, with a line that ends in a backslash joined
+// to the next one by a space.
+function shellCommands(body) {
+  return body.replace(/[ \t]*\\\n[ \t]*/g, " ").split("\n").filter((line) => line.length > 0);
+}
+
+test("each output block in the README is labelled with its command and links its full output under docs/captures/, which holds the block's lines in order, with a .json file that names the command the README runs and the run it came from", () => {
+  const blocks = blocksWithLead(readme);
+  const outputs = blocks.filter((b) => b.lang === "text");
+  assert.ok(outputs.length > 0, "README shows output blocks");
+  for (const block of outputs) {
+    const first = JSON.stringify(block.body.split("\n")[0]);
+    const label = block.lead.trim().match(captureLabel);
+    assert.ok(label, `the text above the output block that starts ${first} ends with What \`<command>\` prints[, trimmed] ([full output](docs/captures/<name>.txt)):`);
+    const [, command, trimmed, name] = label;
+    const shown = block.body.replace(/\n$/, "").split("\n");
+    const full = readText(`${name}.txt`).replace(/\n$/, "").split("\n");
+    const at = full.findIndex((_, k) => shown.every((line, j) => full[k + j] === line));
+    assert.ok(at >= 0, `the output block that starts ${first} is a run of lines of ${name}.txt`);
+    if (trimmed) assert.ok(shown.length < full.length, `the label above ${first} says trimmed, and the block shows every line of ${name}.txt`);
+    else assert.equal(shown.length, full.length, `the output block that starts ${first} leaves out lines of ${name}.txt, and its label does not say trimmed`);
+    for (const line of shown) assert.doesNotMatch(line, versionOrDate, `the output block that starts ${first} shows a version or a date; start the excerpt below that line or end it above`);
+    const sidecar = JSON.parse(readText(`${name}.json`));
+    assert.equal(sidecar.outputs?.capture, `${name}.txt`, `${name}.json names ${name}.txt as its capture`);
+    assert.ok(sidecar.command === command || sidecar.command?.startsWith(`${command} `), `${name}.json runs ${command}, as the label says`);
+    assert.match(sidecar.run?.commit ?? "", /^[0-9a-f]{40}$/, `${name}.json names the commit the run cloned`);
+    assert.match(sidecar.run?.capturedAt ?? "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/, `${name}.json says when the run took it`);
+    // The command block above the output holds the command as one of its
+    // lines, after the lines the run ran before it, or is the command, with
+    // the message text that the paragraph above the output names, if it names
+    // one, in place of the block's.
+    const source = blocks.slice(0, blocks.indexOf(block)).reverse().find((b) => b.lang === "bash");
+    assert.ok(source, `a command block comes before the output block that starts ${first}`);
+    const commands = shellCommands(source.body);
+    if (commands.length > 1) {
+      const k = commands.indexOf(sidecar.command);
+      assert.ok(k >= 0, `${name}.json runs ${sidecar.command}, a line of the command block above its output`);
+      assert.deepEqual(sidecar.before, commands.slice(0, k), `${name}.json ran the lines of the command block above ${sidecar.command} before it`);
+    } else {
+      const named = block.lead.match(/with the text `([^`]+)`/);
+      const expected = named ? commands[0].replace(/"text":"[^"]*"/, () => `"text":${JSON.stringify(named[1])}`) : commands[0];
+      assert.equal(sidecar.command, expected, `${name}.json runs the command the README gives for it`);
+    }
+  }
+});
+
+test("the capture label check reads a label, its trimmed mark and its file, and the commands of a block with lines joined by a backslash", () => {
+  assert.deepEqual([..."What `npm run dev` prints, trimmed ([full output](docs/captures/npm-run-dev.txt)):".match(captureLabel)].slice(1), ["npm run dev", ", trimmed", "docs/captures/npm-run-dev"]);
+  assert.deepEqual([..."The handler rejects it. What `curl` prints ([full output](docs/captures/message-send.txt)):".match(captureLabel)].slice(1), ["curl", undefined, "docs/captures/message-send"]);
+  assert.equal("What `curl` prints ([full output](docs/message-send.txt)):".match(captureLabel), null, "a file outside docs/captures/ is not a capture");
+  assert.equal("What `curl` prints ([full output](docs/captures/message-send.txt)).".match(captureLabel), null, "a label ends with a colon");
+  assert.deepEqual(shellCommands("curl -s \\\n  -H \"A: b\" \\\n  -d 'x'\n"), ["curl -s -H \"A: b\" -d 'x'"]);
+  assert.deepEqual(shellCommands("git clone x\ncd y\nnpm install\n"), ["git clone x", "cd y", "npm install"]);
+  assert.match("> a2a-validated-task-handler@1.0.0 dev", versionOrDate);
+  assert.match("{\"timestamp\":\"2026-10-16T00:27:08.433Z\"}", versionOrDate);
+  assert.doesNotMatch("{\"id\":\"b07fef79-46bb-48da-9b78-3d1c381a9595\"}", versionOrDate);
+});
+
 test("every relative link points to a file in the repository", () => {
   const links = [...readme.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]);
   const relative = links.filter((href) => !/^(https?:|mailto:|#)/.test(href));
