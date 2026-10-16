@@ -153,6 +153,30 @@ test("the capture label check reads a label, its trimmed mark and its file, and 
   assert.doesNotMatch("{\"id\":\"b07fef79-46bb-48da-9b78-3d1c381a9595\"}", versionOrDate);
 });
 
+test("the A2A specification releases the README header names are the ones the tests check against, agent-card.json declares and handler.ts answers", () => {
+  const header = lines.find((line) => line.startsWith("Example code and configuration for "));
+  assert.ok(header, "the README has a header description");
+  const linked = [...header.matchAll(/\[v(\d+\.\d+\.\d+)\]\(https:\/\/github\.com\/a2aproject\/A2A\/releases\/tag\/v([^)\s]+)\)/g)];
+  assert.ok(linked.length > 0, "the header description links the A2A specification releases the examples target");
+  for (const [, text, tag] of linked) assert.equal(tag, text, `the link to v${text} is at the tag of that release`);
+  const releases = linked.map((m) => m[1]).sort();
+  const checked = readdirSync(join(root, "test/schema")).map((f) => f.match(/^a2a-v(\d+\.\d+\.\d+)\.(?:json|proto)$/)?.[1]).filter(Boolean).sort();
+  assert.deepEqual(releases, checked, "the header names the releases whose schema or protocol definition the tests check against under test/schema/");
+  const majorMinor = (release) => release.split(".").slice(0, 2).join(".");
+  const card = JSON.parse(readText("examples/secure-agent-card/agent-card.json"));
+  assert.ok(releases.includes(card.protocolVersion), `agent-card.json declares protocolVersion ${card.protocolVersion}, a release the header names`);
+  assert.deepEqual(card.supportedInterfaces.map((i) => i.protocolVersion).sort(), releases.map(majorMinor).sort(), "agent-card.json lists an interface for each release the header names, by Major.Minor");
+  // The JSON-RPC method the header says the handler answers for each version,
+  // and the one each entry of the VERSIONS map in handler.ts parses.
+  const named = Object.fromEntries([...header.matchAll(/`([^`\s]+)` of v(\d+\.\d+)(?:\.\d+)?\b/g)].map(([, method, version]) => [version, method]));
+  const handler = readText("examples/validated-task-handler/handler.ts");
+  const answered = Object.fromEntries([...handler.matchAll(/\[\s*"(\d+\.\d+)",\s*\{\s*parse: \(body\) => parseRequest\(body, "([^"]+)"/g)].map(([, version, method]) => [version, method]));
+  assert.deepEqual(Object.keys(named).sort(), releases.map(majorMinor).sort(), "the header names a JSON-RPC method for each release it links");
+  assert.deepEqual(named, answered, "handler.ts answers, for each version, the JSON-RPC method the header names");
+  assert.ok(header.endsWith("at `/.well-known/agent-card.json`."), "the header says the agent card is served at /.well-known/agent-card.json");
+  assert.match(handler, /app\.get\(\["\/\.well-known\/agent-card\.json"/, "handler.ts serves its agent card at /.well-known/agent-card.json");
+});
+
 test("every relative link points to a file in the repository", () => {
   const links = [...readme.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]);
   const relative = links.filter((href) => !/^(https?:|mailto:|#)/.test(href));
