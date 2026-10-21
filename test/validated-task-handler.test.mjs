@@ -2773,17 +2773,18 @@ function documentedHackMyAgentRelease() {
   return release[1];
 }
 
-// Run command with args in the repository root and resolve with its exit
-// status and its stdout and stderr together. On POSIX it leads a process group
-// of its own, so stopServer reaches the processes it starts. When it has not
-// exited within ms, stop it and fail with its output so far. On Windows npx is
-// npx.cmd, which this starts through a shell with each argument in double
-// quotes.
-async function runInRoot(command, args, ms) {
+// Run command with args in the repository root, with the environment env, and
+// resolve with its exit status and its stdout and stderr together. On POSIX it
+// leads a process group of its own, so stopServer reaches the processes it
+// starts. When it has not exited within ms, stop it and fail with its output so
+// far. On Windows npx is npx.cmd, which this starts through a shell with each
+// argument in double quotes.
+async function runInRoot(command, args, ms, env) {
   const windows = process.platform === "win32";
   assert.ok(!windows || args.every((a) => !a.includes('"')), "no argument has a double quote for the shell to read");
   const proc = spawn(windows ? `${command}.cmd` : command, windows ? args.map((a) => `"${a}"`) : args, {
     cwd: root,
+    env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: !windows,
     shell: windows,
@@ -2811,7 +2812,7 @@ async function runInRoot(command, args, ms) {
 // not true there) it exits with ERR_REQUIRE_ESM before it sends a payload, and
 // the test is skipped.
 const requireModule = process.features.require_module === true;
-test("the README's npx hackmyagent attack command, run against the example with the hackmyagent release the payload table was read from, exits 0 with at least one payload answered, and the example writes a task_accepted audit line for each answered payload", {
+test("the README's npx hackmyagent attack command, run against the example with the hackmyagent release the payload table was read from, with telemetry off and a home directory of its own, exits 0 with at least one payload answered, sends no usage event and writes its files in that home directory, and the example writes a task_accepted audit line for each answered payload", {
   skip: !requireModule && `Node.js ${process.version} cannot require() an ES module, which the hackmyagent release package.json pins needs`,
 }, async () => {
   const release = documentedHackMyAgentRelease();
@@ -2826,14 +2827,53 @@ test("the README's npx hackmyagent attack command, run against the example with 
     // The README's command with the port of this test's server.
     const target = new URL(args[2]);
     target.port = String(serverPort);
-    const { status, out } = await runInRoot(command, [args[0], args[1], target.origin, ...args.slice(3)], 120000);
-    const attacks = out.match(/^Attacks: (\d+) sent \| (\d+) answered\b/m);
-    assert.ok(attacks, `the output has an Attacks line:\n${out}`);
-    const answered = Number(attacks[2]);
-    assert.ok(answered >= 1, `at least one payload is answered:\n${out}`);
-    assert.equal(status, 0, `the command exits 0:\n${out}`);
-    const accepted = () => audited().filter((l) => l.action === "task_accepted");
-    assert.equal((await waitForAudit(answered, accepted)).length, answered, `the example accepts each answered payload:\n${out}`);
+    // hackmyagent 0.33.2 sends a usage event for the command unless
+    // OPENA2A_TELEMETRY is off, and it and the telemetry package it loads write
+    // files in the home directory: .nanomind/integrity-events.jsonl, and
+    // telemetry.json in XDG_CONFIG_HOME or in .config. So the command runs with
+    // telemetry off, with usage events sent to a listener on 127.0.0.1 that
+    // counts the connections made to it, and with a home directory of its own
+    // (HOME, and USERPROFILE on Windows). Outside CI, npx checks the npm
+    // registry for a newer npm when its cache holds no record of a recent
+    // check, as a cache in a new home directory does, so that check is off.
+    const home = makeTempDir("a2a-home-");
+    let telemetryConnections = 0;
+    const telemetry = createServer((socket) => {
+      telemetryConnections++;
+      socket.destroy();
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        telemetry.once("error", reject);
+        telemetry.listen(0, "127.0.0.1", resolve);
+      });
+      const env = {
+        ...process.env,
+        OPENA2A_TELEMETRY: "off",
+        OPENA2A_TELEMETRY_URL: `http://127.0.0.1:${telemetry.address().port}/`,
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: join(home, ".config"),
+        npm_config_update_notifier: "false",
+      };
+      const { status, out } = await runInRoot(command, [args[0], args[1], target.origin, ...args.slice(3)], 120000, env);
+      const attacks = out.match(/^Attacks: (\d+) sent \| (\d+) answered\b/m);
+      assert.ok(attacks, `the output has an Attacks line:\n${out}`);
+      const answered = Number(attacks[2]);
+      assert.ok(answered >= 1, `at least one payload is answered:\n${out}`);
+      assert.equal(status, 0, `the command exits 0:\n${out}`);
+      const accepted = () => audited().filter((l) => l.action === "task_accepted");
+      assert.equal((await waitForAudit(answered, accepted)).length, answered, `the example accepts each answered payload:\n${out}`);
+      assert.equal(telemetryConnections, 0, `the command sends no usage event:\n${out}`);
+      // The files are in the home directory the test gave the command, so the
+      // command did not write them in the user's.
+      for (const file of [".nanomind/integrity-events.jsonl", ".config/opena2a/telemetry.json"]) {
+        assert.ok(existsSync(join(home, file)), `the command writes ${file} in the home directory the test gives it`);
+      }
+    } finally {
+      await new Promise((resolve) => telemetry.close(resolve));
+      removeTempDir(home);
+    }
   });
 });
 
