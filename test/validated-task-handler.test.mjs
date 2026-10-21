@@ -380,10 +380,19 @@ function liveGroups() {
   return new Set(rows.filter(([, stat]) => !stat.startsWith("Z")).map(([group]) => Number(group)));
 }
 
-before(async () => {
-  assert.ok(existsSync(tsx), "run npm ci in examples/validated-task-handler first");
-  port = await freePort();
-  server = await startServer(port, (chunk) => (output += chunk));
+// When this hook fails, the TAP reporter of Node.js 18.17.1 prints the failure
+// without the message of its error, which says why it failed, as when TMPDIR
+// is too long for the socket tsx binds. That reporter prints diagnostics, so
+// report each line of the message as one as well.
+before(async (t) => {
+  try {
+    assert.ok(existsSync(tsx), "run npm ci in examples/validated-task-handler first");
+    port = await freePort();
+    server = await startServer(port, (chunk) => (output += chunk));
+  } catch (err) {
+    for (const line of err.message.split("\n")) t.diagnostic(line);
+    throw err;
+  }
 });
 
 after(() => {
@@ -2135,6 +2144,39 @@ test(
         `that line names the temporary directory and the socket tsx binds:\n${log}`
       );
       assert.doesNotMatch(log, /listen EINVAL/, `the run's output does not have the listen error of tsx:\n${log}`);
+    } finally {
+      removeTempDir(dir);
+    }
+  }
+);
+
+test(
+  "with the TAP reporter, a test run whose temporary directory is too long for the socket tsx binds has the line that names TMPDIR as a diagnostic, which the TAP reporter of Node.js 18.17.1 prints, though it leaves that line out of the failed before() hook",
+  { skip: socketPathLimit === undefined && "the tests do not check the length of a socket path on this platform" },
+  () => {
+    const dir = makeTempDir("a2a-long-");
+    try {
+      // A TMPDIR too long for the socket tsx binds, as in the test above.
+      const long = join(dir, "t".repeat(Math.max(1, socketPathLimit - Buffer.byteLength(dir) - 1)));
+      mkdirSync(long);
+      const env = { ...process.env, TMPDIR: long };
+      // Left set, the nested run reports to this run instead of running on its own.
+      delete env.NODE_TEST_CONTEXT;
+      const run = spawnSync(
+        process.execPath,
+        ["--test", "--test-reporter=tap", "--test-name-pattern=^package-lock.json pins", fileURLToPath(import.meta.url)],
+        { env, encoding: "utf8", timeout: 60000 }
+      );
+      const log = run.stdout + run.stderr;
+      assert.equal(run.status, 1, `the run fails:\n${log}`);
+      // A TAP diagnostic is a line that starts with #.
+      const line = log.split("\n").find((l) => /^\s*# /.test(l) && l.includes("Set TMPDIR to a shorter directory."));
+      assert.ok(line, `the run's output has a diagnostic that says to set TMPDIR to a shorter directory:\n${log}`);
+      const socketDir = join(long, `tsx-${process.geteuid()}`);
+      assert.ok(
+        line.includes(`# The temporary directory ${long} is too long: tsx binds its socket at ${socketDir}`),
+        `that diagnostic names the temporary directory and the socket tsx binds:\n${log}`
+      );
     } finally {
       removeTempDir(dir);
     }
