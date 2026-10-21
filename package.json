@@ -7,7 +7,7 @@
     "node": ">=18.17.0"
   },
   "scripts": {
-    "test": "npm ci --ignore-scripts --no-audit --no-fund && npm ci --prefix examples/validated-task-handler --no-audit --no-fund && node --test test/readme.test.mjs test/examples.test.mjs test/validated-task-handler.test.mjs test/check-test-agents.test.mjs",
+    "test": "node scripts/install-root.mjs && npm ci --prefix examples/validated-task-handler --no-audit --no-fund && node --test test/readme.test.mjs test/examples.test.mjs test/validated-task-handler.test.mjs test/check-test-agents.test.mjs",
     "check:test-agents": "node scripts/check-test-agents.mjs"
   },
   "devDependencies": {

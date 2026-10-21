@@ -1,7 +1,7 @@
 // validated-task-handler checks. npm test at the repository root installs the
 // repository's and the example's dependencies and runs every test file. To run
 // this file alone:
-//   npm ci --ignore-scripts
+//   node scripts/install-root.mjs
 //   (cd examples/validated-task-handler && npm ci)
 //   node --test test/validated-task-handler.test.mjs
 import { test, before, after } from "node:test";
@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { canRunHackMyAgent } from "../scripts/install-root.mjs";
 import { schemaErrors } from "./a2a-schema.mjs";
 import { protoErrors, protoText, v03Fields, v1Fields, withoutFields } from "./a2a-proto.mjs";
 
@@ -2810,8 +2811,10 @@ async function runInRoot(command, args, ms, env) {
 // hackmyagent 0.33.2 loads an ES module with require(), so on a Node.js
 // release without require() of ES modules (process.features.require_module is
 // not true there) it exits with ERR_REQUIRE_ESM before it sends a payload, and
-// the test is skipped.
-const requireModule = process.features.require_module === true;
+// the test is skipped. canRunHackMyAgent tells those releases apart for this
+// test and for scripts/install-root.mjs, the step of npm test that installs
+// hackmyagent, which installs nothing on them.
+const requireModule = canRunHackMyAgent();
 test("the README's npx hackmyagent attack command, run against the example with the hackmyagent release the payload table was read from, with telemetry off and a home directory of its own, exits 0 with at least one payload answered, sends no usage event and writes its files in that home directory, and the example writes a task_accepted audit line for each answered payload", {
   skip: !requireModule && `Node.js ${process.version} cannot require() an ES module, which the hackmyagent release package.json pins needs`,
 }, async () => {
