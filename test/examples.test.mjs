@@ -42,7 +42,7 @@ const unreachable = [
   "https://agentpwn.com/attacks/a2a-attack/response-poisoning",
 ];
 
-test("README, its docs pages and example sources link no private repository or missing page", () => {
+test("README, its docs pages and example sources contain none of the three URLs listed in unreachable", () => {
   const files = ["README.md", ...[...filesUnder(join(root, "docs")), ...filesUnder(join(root, "examples"))].map((path) => path.slice(root.length + 1))];
   for (const file of files) {
     const text = readText(file);
