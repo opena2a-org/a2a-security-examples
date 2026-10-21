@@ -4,10 +4,13 @@
 //   node --test test/examples.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, posix } from "node:path";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canRunHackMyAgent, rootInstallCommand } from "../scripts/install-root.mjs";
 import { contentSha256, publishedSha256, schema, schemaErrors, unknownKeywords } from "./a2a-schema.mjs";
 import { protoErrors, protoText, publishedSha256 as protoSha256, readProto, textSha256, unknownTypes, v03Fields, v1Fields, withoutFields } from "./a2a-proto.mjs";
 
@@ -825,6 +828,78 @@ test("npm test at the repository root installs every example and runs every test
     .map((name) => `test/${name}`)
     .sort();
   assert.deepEqual(listed, present, "npm test runs every file in test/");
+});
+
+// Run the first step of npm test, the one that installs the repository root, as
+// npm runs it: through a shell, here in a new temporary directory that holds a
+// copy of the root's package.json, package-lock.json and scripts/. node on the
+// path is the Node.js release that runs this file, and env is added to the
+// environment. npm runs offline there with a cache of its own that holds
+// nothing, so an npm ci there fails at the first package it fetches. Return the
+// step's exit status and output, and whether it made a node_modules directory.
+function runRootInstallStep(env) {
+  const script = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts?.test ?? "";
+  const step = script.split(" && ")[0];
+  const dir = mkdtempSync(join(tmpdir(), "a2a-root-install-"));
+  try {
+    for (const file of ["package.json", "package-lock.json"]) copyFileSync(join(root, file), join(dir, file));
+    mkdirSync(join(dir, "scripts"));
+    for (const file of readdirSync(join(root, "scripts")).filter((name) => statSync(join(root, "scripts", name)).isFile())) {
+      copyFileSync(join(root, "scripts", file), join(dir, "scripts", file));
+    }
+    // On Windows the variable can be named Path.
+    const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+    const result = spawnSync(step, {
+      cwd: dir,
+      shell: true,
+      encoding: "utf8",
+      timeout: 120000,
+      env: {
+        ...process.env,
+        [pathKey]: [dirname(process.execPath), process.env[pathKey]].filter(Boolean).join(delimiter),
+        npm_config_offline: "true",
+        npm_config_cache: join(dir, "npm-cache"),
+        ...env,
+      },
+    });
+    assert.ifError(result.error);
+    return { status: result.status, out: `${result.stdout}${result.stderr}`, installed: existsSync(join(dir, "node_modules")) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("on a Node.js release that cannot require() an ES module, where the npx hackmyagent attack test is skipped, the step of npm test that installs the repository root exits 0 and installs nothing, so npm's engine-strict setting does not stop it at a package that needs a later release", () => {
+  // The release that runs this file, with require() of ES modules turned off
+  // where it is on.
+  const nodeOptions = [process.env.NODE_OPTIONS, process.features.require_module === true && "--no-experimental-require-module"]
+    .filter(Boolean)
+    .join(" ");
+  const { status, out, installed } = runRootInstallStep({ NODE_OPTIONS: nodeOptions, npm_config_engine_strict: "true" });
+  assert.equal(status, 0, `the step exits 0:\n${out}`);
+  assert.equal(installed, false, `the step installs nothing:\n${out}`);
+  assert.match(out, /^Skipping npm ci in the repository root: Node\.js v\d+\.\d+\.\d+ cannot require\(\) an ES module\b/m, `the step says why it installs nothing:\n${out}`);
+});
+
+test("on a Node.js release that can require() an ES module, where the npx hackmyagent attack test runs, the step of npm test that installs the repository root runs npm ci there and fails when npm ci fails", {
+  skip: !canRunHackMyAgent() && `Node.js ${process.version} cannot require() an ES module`,
+}, () => {
+  // The release that runs this file, with require() of ES modules turned on as
+  // it is here.
+  const nodeOptions = [process.env.NODE_OPTIONS, "--experimental-require-module"].filter(Boolean).join(" ");
+  const { status, out } = runRootInstallStep({ NODE_OPTIONS: nodeOptions });
+  // Offline, with a cache that holds nothing, npm ci fails at the first
+  // package it fetches.
+  assert.match(out, /\bENOTCACHED\b/, `npm ci runs and finds no copy of a package in the cache:\n${out}`);
+  assert.notEqual(status, 0, `the step fails when npm ci fails:\n${out}`);
+});
+
+test("the step of npm test that installs the repository root is node scripts/install-root.mjs, which runs npm ci without install scripts where process.features.require_module is true and nothing where it is false or not set", () => {
+  const script = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts?.test ?? "";
+  assert.equal(script.split(" && ")[0], "node scripts/install-root.mjs", "npm test installs the repository root through scripts/install-root.mjs first");
+  assert.equal(rootInstallCommand({ require_module: true }), "npm ci --ignore-scripts --no-audit --no-fund");
+  assert.equal(rootInstallCommand({ require_module: false }), null);
+  assert.equal(rootInstallCommand({}), null, "a release without the require_module feature, as Node.js 18.17.1 is, installs nothing");
 });
 
 // The names each module imports and never reads, as the TypeScript compiler
