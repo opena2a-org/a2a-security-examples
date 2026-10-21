@@ -317,9 +317,12 @@ function limiterOptionKeys(handler) {
 // right after a ++ or -- that follows such a ! or run of them, where in
 // TypeScript the ++ or -- is then a postfix operator and a slash divides, as
 // in a!++ / 2, or right after a > that moduleTokens() marks as the end of the
-// type arguments of a TypeScript type, or a run of ! after it, where a slash
-// divides too, as in 60 as D<1> / 2. A regular expression right after a > that
-// ends type arguments and has no such mark, as in a!++ as D<1> / 2, is not
+// type arguments of a TypeScript type or a name it marks as a name of such a
+// type, or a run of ! after either, where a slash divides too, as in
+// 60 as D<1> / 2 and f() as void / 2. moduleTokens() reads a slash right after
+// the name void as one right after the void operator. A regular expression
+// right after a > that ends type arguments, or after a name of a type, that
+// has no such mark, as in a!++ as D<1> / 2 and a!++ as void / 2, is not
 // such a slash, so a comma that ends the value can be hidden there. A ! right
 // after the ) that closes the parentheses after if, for, for await or while
 // negates, as a statement starts there, so when the line holds the ( of that )
@@ -358,11 +361,11 @@ function slashMayBeMisread(tokens, i) {
     let before = last;
     while (is(tokens[before], "punct", "!")) before--;
     if (tokens[before]?.block === true) return false;
-    if (before === last) return last === i - 1 && (is(tokens[before], "punct", "}") || tokens[before]?.endsTypeArguments === true);
+    if (before === last) return last === i - 1 && (is(tokens[before], "punct", "}") || tokens[before]?.endsTypeArguments === true || tokens[before]?.typeName === true);
     // moduleTokens() reads a slash right after a ) as division, so a ) found
     // here has a ! between it and the regular expression.
     if (is(tokens[before], "punct", ")") && afterKeyword(before) === true) return false;
-    return is(tokens[before], "punct", "}") || slashDivides(tokens[before]) || tokens[before]?.endsTypeArguments === true;
+    return is(tokens[before], "punct", "}") || slashDivides(tokens[before]) || tokens[before]?.endsTypeArguments === true || tokens[before]?.typeName === true;
   }
   const close = tokens[i - 1]?.postfix ? i - 2 : i - 1;
   if (!is(tokens[i], "punct", "/") || !is(tokens[close], "punct", ")")) return false;
@@ -462,6 +465,10 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     // it here is an operator and the slash right after that > starts a regular
     // expression.
     "  keyPrefix: a as D <= b > /x/.test(s) ? 'a' : 'b',",
+    // A slash right after void as an operator, not a type, starts a regular
+    // expression, as at the start of a value or after a || that ends a type.
+    "  keyPrefix: void /x/.test(s) ? 'a' : 'b',",
+    "  keyPrefix: a as A || void /x/.test(s) ? 'a' : 'b',",
   ]) {
     assert.deepEqual(limiterOptionKeys(add(line)), ["points", "duration", "keyPrefix"], `${line.trim()} is read as one key: value pair`);
   }
@@ -548,6 +555,14 @@ test("the limiter options reader reads a key in either quote, skips a comment an
     "  blockDuration: { a: 60 } satisfies D<1> / 2, keyPrefix: 'rl' + 4 / 2,",
     "  blockDuration: 60 as A | D<1> / 2, keyPrefix: 'rl' + 4 / 2,",
     "  blockDuration: x as typeof f<1> / 2, keyPrefix: 'rl' + 4 / 2,",
+    // A slash right after void as the type after as or satisfies, or as a
+    // later type in a union, or right after a ! that follows that void,
+    // divides too, but moduleTokens() reads it as the start of a regular
+    // expression, as it does a slash right after the void operator.
+    "  blockDuration: f() as void / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: f() satisfies void / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: f() as A | void / 2, keyPrefix: 'rl' + 4 / 2,",
+    "  blockDuration: f() as void! / 2, keyPrefix: 'rl' + 4 / 2,",
     // A ! right after the ) of await (...) is a non-null assertion too, as
     // only the await of for await comes before the parentheses of a loop.
     "  blockDuration: await (b)! / 2, keyPrefix: 'rl' + 4 / 2,",
@@ -1621,10 +1636,11 @@ function slashDivides(token) {
 // first, as in let x, y.
 // Any other slash starts a regular expression if one closes on the same
 // line, and is read as a punctuator if not, though in TypeScript one right
-// after the ! of a non-null assertion, as in a! / 2, or right after the > that
-// ends the type arguments of a type, as in 60 as D<1> / 2, divides, and so
-// does one right after a ++ or -- that follows that !, as in a!++ / 2, which
-// is read as a prefix operator.
+// after the ! of a non-null assertion, as in a! / 2, right after the > that
+// ends the type arguments of a type, as in 60 as D<1> / 2, or right after void
+// as the name of a type, as in f() as void / 2, divides, and so does one right
+// after a ++ or -- that follows that !, as in a!++ / 2, which is read as a
+// prefix operator.
 // A ! has nonNull set to true when TypeScript reads it as a non-null
 // assertion: when it follows a token that ends an operand on the same line
 // and does not start != or !==. A token ends an operand when a slash divides
