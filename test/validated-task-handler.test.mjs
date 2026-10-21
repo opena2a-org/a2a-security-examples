@@ -1563,6 +1563,58 @@ test("a request to POST /message:send the agent rejects gets a google.rpc.Status
   assert.ok(handlerSource.includes('[-32603, [500, "INTERNAL"]],'), "handler.ts gives a processing failure 500 INTERNAL at POST /message:send");
 });
 
+test("each pair of a type and a subtype from the allowed media types that is not itself allowed, such as image/json, text/pdf or application/png, gets 400 naming it in a message/send file part, in a SendMessage raw part, and in a raw part sent to POST /message:send", async () => {
+  // The pairs of the types and the subtypes the allowed media types are made
+  // of, less the allowed media types themselves.
+  const allowed = JSON.parse(handlerSource.match(/^const MEDIA_TYPES = (\[[^\]]+\]) as const;$/m)[1]);
+  const types = new Set(allowed.map((mediaType) => mediaType.split("/")[0]));
+  const subtypes = new Set(allowed.map((mediaType) => mediaType.split("/")[1]));
+  const pairs = [...types].flatMap((type) => [...subtypes].map((subtype) => `${type}/${subtype}`)).filter((pair) => !allowed.includes(pair));
+  assert.equal(pairs.length, 10, "3 types and 5 subtypes make 15 pairs, 5 of which are allowed");
+  const description = (pair) => `Invalid enum value. Expected ${allowed.map((mediaType) => `'${mediaType}'`).join(" | ")}, received '${pair}'`;
+  const badRequest = (field, pair) => [{ "@type": "type.googleapis.com/google.rpc.BadRequest", fieldViolations: [{ field, description: description(pair) }] }];
+  const routes = [
+    {
+      name: "message/send at POST /",
+      request: (pair) => sendMessage([{ kind: "file", file: { bytes: "aGk=", mimeType: pair } }]),
+      specErrors: (request) => schemaErrors("SendMessageRequest", request),
+      post: (request, serverPort) => postTask({ Authorization: "Bearer demo-token" }, JSON.stringify(request), serverPort),
+      reply: (pair) => ({
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32602, message: "Invalid params", data: [{ field: "params.message.parts.0.file.mimeType", message: description(pair) }] },
+      }),
+    },
+    {
+      name: "SendMessage at POST /",
+      request: (pair) => sendMessageV1([{ raw: "aGk=", mediaType: pair }]),
+      specErrors: (request) => protoErrors("SendMessageRequest", request.params),
+      post: (request, serverPort) => postTask(v1Headers, JSON.stringify(request), serverPort),
+      reply: (pair) => ({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Invalid params", data: badRequest("params.message.parts[0].mediaType", pair) } }),
+    },
+    {
+      name: "SendMessage at POST /message:send",
+      request: (pair) => sendMessageV1([{ raw: "aGk=", mediaType: pair }]).params,
+      specErrors: (request) => protoErrors("SendMessageRequest", request),
+      post: (request, serverPort) => postSendMessage(v1Headers, JSON.stringify(request), serverPort),
+      reply: (pair) => statusError(400, "INVALID_ARGUMENT", "Invalid request", badRequest("message.parts[0].mediaType", pair)),
+    },
+  ];
+  // Each route gets a server of its own, so the requests to the three routes
+  // do not count toward one rate limit.
+  for (const { name, request, specErrors, post, reply } of routes) {
+    await withOwnServer(async (serverPort) => {
+      for (const pair of pairs) {
+        const body = request(pair);
+        assert.deepEqual(specErrors(body), [], `the ${name} request with ${pair} is one the A2A specification accepts`);
+        const res = await post(body, serverPort);
+        assert.equal(res.status, 400, `${name} with ${pair}`);
+        assert.deepEqual(await res.json(), reply(pair), `${name} with ${pair}`);
+      }
+    });
+  }
+});
+
 test("requests to POST /message:send and to POST / count toward one rate limit, before authentication reads them", async () => {
   await withOwnServer(async (serverPort) => {
     for (let i = 1; i <= rateLimitPoints; i++) {
