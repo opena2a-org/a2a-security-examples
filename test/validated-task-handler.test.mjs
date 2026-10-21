@@ -1,5 +1,7 @@
 // validated-task-handler checks. npm test at the repository root installs the
-// example's dependencies and runs every test file. To run this file alone:
+// repository's and the example's dependencies and runs every test file. To run
+// this file alone:
+//   npm ci --ignore-scripts
 //   (cd examples/validated-task-handler && npm ci)
 //   node --test test/validated-task-handler.test.mjs
 import { test, before, after } from "node:test";
@@ -2707,6 +2709,79 @@ test("the README's HackMyAgent command reaches the example, which answers each p
       const lines = (await waitForAudit(seen + 1, audited)).slice(seen);
       assert.deepEqual(lines.map((l) => [l.action, l.taskId]), [["task_accepted", answer.match(text)[1]]]);
     }
+  });
+});
+
+// The hackmyagent release docs/testing-against-real-attacks.md reads the
+// payload table from.
+function documentedHackMyAgentRelease() {
+  const page = readFileSync(join(root, "docs/testing-against-real-attacks.md"), "utf8");
+  const release = page.match(/`a2a-attack` category of hackmyagent (\d+\.\d+\.\d+)\b/);
+  assert.ok(release, "docs/testing-against-real-attacks.md names the hackmyagent release it read the payload table from");
+  return release[1];
+}
+
+// Run command with args in the repository root and resolve with its exit
+// status and its stdout and stderr together. On POSIX it leads a process group
+// of its own, so stopServer reaches the processes it starts. When it has not
+// exited within ms, stop it and fail with its output so far. On Windows npx is
+// npx.cmd, which this starts through a shell with each argument in double
+// quotes.
+async function runInRoot(command, args, ms) {
+  const windows = process.platform === "win32";
+  assert.ok(!windows || args.every((a) => !a.includes('"')), "no argument has a double quote for the shell to read");
+  const proc = spawn(windows ? `${command}.cmd` : command, windows ? args.map((a) => `"${a}"`) : args, {
+    cwd: root,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: !windows,
+    shell: windows,
+  });
+  let out = "";
+  proc.stdout.on("data", (chunk) => (out += chunk));
+  proc.stderr.on("data", (chunk) => (out += chunk));
+  const closed = new Promise((resolve, reject) => {
+    proc.once("error", reject);
+    proc.once("close", resolve);
+  });
+  try {
+    return { status: await within(closed, ms, `${command} did not exit within ${ms / 1000} seconds`), out };
+  } catch (err) {
+    stopServer(proc);
+    await closedWithin(proc, closed.catch(() => {}), 10000, `${command} did not exit within 10 seconds of being stopped`);
+    throw new Error(`${err.message}:\n${out}`);
+  }
+}
+
+// npm test installs the hackmyagent release package.json pins, and npx runs
+// that install. The command sends its eight payloads one second apart.
+// hackmyagent 0.33.2 loads an ES module with require(), so on a Node.js
+// release without require() of ES modules (process.features.require_module is
+// not true there) it exits with ERR_REQUIRE_ESM before it sends a payload, and
+// the test is skipped.
+const requireModule = process.features.require_module === true;
+test("the README's npx hackmyagent attack command, run against the example with the hackmyagent release the payload table was read from, exits 0 with at least one payload answered, and the example writes a task_accepted audit line for each answered payload", {
+  skip: !requireModule && `Node.js ${process.version} cannot require() an ES module, which the hackmyagent release package.json pins needs`,
+}, async () => {
+  const release = documentedHackMyAgentRelease();
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.equal(pkg.devDependencies?.hackmyagent, release, "package.json pins the hackmyagent release docs/testing-against-real-attacks.md names");
+  const installed = join(root, "node_modules/hackmyagent/package.json");
+  assert.ok(existsSync(installed), "run npm ci --ignore-scripts at the repository root first");
+  assert.equal(JSON.parse(readFileSync(installed, "utf8")).version, release, "run npm ci --ignore-scripts at the repository root to install the release package.json pins");
+  const [command, ...args] = readmeAttackArgs();
+  assert.deepEqual([command, args[0], args[1]], ["npx", "hackmyagent", "attack"]);
+  await withOwnServer(async (serverPort, audited) => {
+    // The README's command with the port of this test's server.
+    const target = new URL(args[2]);
+    target.port = String(serverPort);
+    const { status, out } = await runInRoot(command, [args[0], args[1], target.origin, ...args.slice(3)], 120000);
+    const attacks = out.match(/^Attacks: (\d+) sent \| (\d+) answered\b/m);
+    assert.ok(attacks, `the output has an Attacks line:\n${out}`);
+    const answered = Number(attacks[2]);
+    assert.ok(answered >= 1, `at least one payload is answered:\n${out}`);
+    assert.equal(status, 0, `the command exits 0:\n${out}`);
+    const accepted = () => audited().filter((l) => l.action === "task_accepted");
+    assert.equal((await waitForAudit(answered, accepted)).length, answered, `the example accepts each answered payload:\n${out}`);
   });
 });
 
