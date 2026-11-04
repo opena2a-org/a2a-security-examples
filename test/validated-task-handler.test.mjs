@@ -170,23 +170,6 @@ function removeTsxSocket(pid) {
   if (socket) rmSync(socket, { force: true });
 }
 
-// The longest path a Unix socket binds at, in bytes: the size of sun_path in
-// the socket address of macOS and of Linux. The tests do not check the length
-// of a socket path on another platform.
-const socketPathLimit = { darwin: 104, linux: 108 }[process.platform];
-
-// Why the tsx process pid cannot bind its socket, in one line that says what
-// to change, or undefined when the socket's path is no longer than a Unix
-// socket path may be here. Where Node.js refuses a longer path, tsx exits with
-// listen EINVAL and a stack trace.
-function socketPathTooLong(pid) {
-  const socket = tsxSocket(pid);
-  if (socket === undefined || socketPathLimit === undefined) return undefined;
-  const bytes = Buffer.byteLength(socket);
-  if (bytes <= socketPathLimit) return undefined;
-  return `The temporary directory ${tmpdir()} is too long: tsx binds its socket at ${socket}, a path of ${bytes} bytes, and a Unix socket path holds at most ${socketPathLimit} bytes here. Set TMPDIR to a shorter directory.`;
-}
-
 // Start tsx and the example, or Node with args instead. On POSIX the process
 // leads a process group of its own, so stopServer reaches the server tsx starts
 // without tsx passing a signal on.
@@ -242,6 +225,80 @@ if (process.platform !== "win32") {
       }
     });
   }
+}
+
+// Listen on a Unix socket at path and close it again. Resolves with whether the
+// socket was at that path while the server listened and, when the server could
+// not listen, with the error's code.
+function bindSocket(path) {
+  return new Promise((resolve) => {
+    const probe = createServer();
+    probe.once("error", (err) => resolve({ bound: false, code: err.code }));
+    probe.listen(path, () => {
+      const bound = existsSync(path);
+      probe.close(() => resolve({ bound }));
+    });
+  });
+}
+
+// The longest length from 0 to most for which fits(length) resolves to true,
+// where it does for every length up to some limit and for none above it. A
+// binary search, which calls fits with lengths from 1 to most only.
+async function longestFit(fits, most) {
+  // Every length up to shortest fits, and no length above longest does.
+  let shortest = 0;
+  let longest = most;
+  while (shortest < longest) {
+    const length = Math.ceil((shortest + longest) / 2);
+    if (await fits(length)) shortest = length;
+    else longest = length - 1;
+  }
+  return shortest;
+}
+
+// The longest path, in bytes, at which a Unix socket binds here, at that path
+// and not at a shorter one. It depends on the libuv of the Node.js release. On
+// macOS, for paths of 1 to 255 bytes: Node.js 24.22.1, with libuv 1.52.1,
+// binds those of up to 104 bytes and refuses longer ones with EINVAL; Node.js
+// 22.23.3, with libuv 1.51.0, binds those of up to 104 bytes and listens at a
+// longer one without an error, but not at that path; and Node.js 26.12.1 built
+// with libuv 1.53.0 binds those of up to 253 bytes. So the tests measure it.
+// The paths are relative to a directory of their own, whose length does not
+// count, so a temporary directory too long for a socket path does not stop
+// the measurement. They are file names of 1 to 255 bytes, as macOS refuses a
+// name of 256 bytes with ENAMETOOLONG.
+async function measureSocketPathLimit() {
+  const dir = makeTempDir("a2a-socket-");
+  const cwd = process.cwd();
+  process.chdir(dir);
+  try {
+    return await longestFit(async (bytes) => {
+      const { bound, code } = await bindSocket("s".repeat(bytes));
+      // A release that binds the socket at a shorter path can leave it there,
+      // where a shorter path tried next would find it in use.
+      for (const name of readdirSync(".")) rmSync(name, { force: true });
+      if (code !== undefined && code !== "EINVAL") throw new Error(`listen ${code} on a Unix socket at a path of ${bytes} bytes`);
+      return bound;
+    }, 255);
+  } finally {
+    process.chdir(cwd);
+    removeTempDir(dir);
+  }
+}
+
+// On Windows tsx binds a named pipe, and there is no socket path to measure.
+const socketPathLimit = process.platform === "win32" ? undefined : await measureSocketPathLimit();
+
+// Why the tsx process pid cannot bind its socket, in one line that says what
+// to change, or undefined when the socket's path is no longer than a Unix
+// socket path may be here. Where Node.js refuses a longer path, tsx exits with
+// listen EINVAL and a stack trace.
+function socketPathTooLong(pid) {
+  const socket = tsxSocket(pid);
+  if (socket === undefined || socketPathLimit === undefined) return undefined;
+  const bytes = Buffer.byteLength(socket);
+  if (bytes <= socketPathLimit) return undefined;
+  return `The temporary directory ${tmpdir()} is too long: tsx binds its socket at ${socket}, a path of ${bytes} bytes, and a Unix socket path holds at most ${socketPathLimit} bytes here. Set TMPDIR to a shorter directory.`;
 }
 
 // Wait for promise, and fail with message after ms instead of waiting forever.
@@ -2157,45 +2214,43 @@ test(
   }
 );
 
-// Listen on a Unix socket at path and close it again. Resolves with whether the
-// socket was at that path while the server listened and, when the server could
-// not listen, with the error's code.
-function bindSocket(path) {
-  return new Promise((resolve) => {
-    const probe = createServer();
-    probe.once("error", (err) => resolve({ bound: false, code: err.code }));
-    probe.listen(path, () => {
-      const bound = existsSync(path);
-      probe.close(() => resolve({ bound }));
-    });
-  });
-}
-
 test(
-  "a Unix socket does not bind at a path one byte longer than the tests take as the longest, and binds at one of that length where Node.js refuses the longer one with EINVAL",
-  { skip: socketPathLimit === undefined && "the tests do not check the length of a socket path on this platform" },
+  "a Unix socket binds at an absolute path as long as the tests take as the longest, and not at one a byte longer",
+  { skip: socketPathLimit === undefined && "on Windows tsx binds a named pipe, not a Unix socket" },
   async () => {
     const dir = makeTempDir("a2a-");
     try {
       assert.ok(Buffer.byteLength(dir) + 2 <= socketPathLimit, `a path of ${socketPathLimit} bytes fits in ${dir}`);
       const pathOf = (bytes) => join(dir, "s".repeat(bytes - Buffer.byteLength(dir) - 1));
-      // A Node.js release that binds a path as given refuses a longer one with
-      // EINVAL. One whose libuv shortens the path instead, as libuv documents
-      // for uv_pipe_bind, binds a shorter path and gives no error.
+      // The tests measure the limit with relative paths, and tsx binds its
+      // socket at an absolute one. The longer path goes second: a release
+      // that binds it at a shorter path can leave the socket there.
+      assert.deepEqual(await bindSocket(pathOf(socketPathLimit)), { bound: true }, `a socket binds at a path of ${socketPathLimit} bytes`);
       const longer = await bindSocket(pathOf(socketPathLimit + 1));
       assert.equal(longer.bound, false, `no socket binds at a path of ${socketPathLimit + 1} bytes`);
-      if (longer.code === "EINVAL") {
-        assert.deepEqual(await bindSocket(pathOf(socketPathLimit)), { bound: true }, `a socket binds at a path of ${socketPathLimit} bytes`);
-      }
     } finally {
       removeTempDir(dir);
     }
   }
 );
 
+test("longestFit finds the longest length that fits for each limit from 0 to the most it searches, and tries lengths from 1 to that most only", async () => {
+  // A length of 0 would be an empty path, which listen() reads as a port and
+  // refuses with ERR_SOCKET_BAD_PORT.
+  for (let limit = 0; limit <= 255; limit++) {
+    const tried = [];
+    const fits = async (bytes) => {
+      tried.push(bytes);
+      return bytes <= limit;
+    };
+    assert.equal(await longestFit(fits, 255), limit, `a limit of ${limit} bytes`);
+    assert.deepEqual(tried.filter((bytes) => bytes < 1 || bytes > 255), [], `the lengths tried for a limit of ${limit} bytes`);
+  }
+});
+
 test(
   "a test run whose temporary directory is too long for the socket tsx binds fails with one line that names TMPDIR, not with the listen error of tsx",
-  { skip: socketPathLimit === undefined && "the tests do not check the length of a socket path on this platform" },
+  { skip: socketPathLimit === undefined && "on Windows tsx binds a named pipe, not a Unix socket" },
   () => {
     const dir = makeTempDir("a2a-long-");
     try {
@@ -2230,7 +2285,7 @@ test(
 
 test(
   "with the TAP reporter, a test run whose temporary directory is too long for the socket tsx binds has the line that names TMPDIR as a diagnostic, which the TAP reporter of Node.js 18.17.1 prints, though it leaves that line out of the failed before() hook",
-  { skip: socketPathLimit === undefined && "the tests do not check the length of a socket path on this platform" },
+  { skip: socketPathLimit === undefined && "on Windows tsx binds a named pipe, not a Unix socket" },
   () => {
     const dir = makeTempDir("a2a-long-");
     try {
