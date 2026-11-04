@@ -260,8 +260,7 @@ async function within(promise, ms, message) {
 // Poll check every interval ms until it holds or ms have passed, and resolve
 // with whether it holds. The wait is bounded by time, not by a count of polls:
 // a server stops some seconds after its signal on a busy host, and a wait that
-// gave up after 100 polls, 5 seconds, failed there while every other wait in
-// this file allows 10.
+// gave up after 100 polls, 5 seconds, failed there.
 async function settled(check, ms, interval = 50) {
   const deadline = Date.now() + ms;
   while (!check()) {
