@@ -3,8 +3,8 @@
 // JSON-RPC code and the audit line the handler answers it with today.
 // test/handler-attack-table.test.mjs sends each row to the handler. This file
 // is data: it starts no server and runs no test, so a script can import it,
-// for one to render the statuses and codes of docs/input-validation.md from
-// the rows of each step.
+// as scripts/generate-input-validation.mjs does to write the table of the
+// statuses and codes of docs/input-validation.md from the rows of each step.
 //
 // A row has:
 //   tag: "contract" for behaviour the example teaches, which a rebuild keeps,

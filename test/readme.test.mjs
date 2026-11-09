@@ -721,7 +721,7 @@ test("step 1 is the rate limit, which every request that reaches it counts towar
   assert.deepEqual(limiterOptionKeys(handler), ["points", "duration"], "handler.ts creates the limiter with an options object of key: value pairs and comments, and gives it no option but points and duration");
   const step = inputValidationLines.find((l) => l.startsWith("1. "));
   assert.ok(step, "docs/input-validation.md lists a step 1");
-  assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: 429. Every request that reaches the limiter counts, including one that then fails authentication; a request answered 431 for too many header lines (see step 2) is not counted.`), "README lists the rate limit as step 1 and says a request that fails authentication counts and one answered 431 does not");
+  assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: a request over the limit gets the error \`Too many requests\`. Every request that reaches the limiter counts, including one that then fails authentication; a request answered 431 for too many header lines (see step 2) is not counted.`), "README lists the rate limit as step 1 and says a request that fails authentication counts and one answered 431 does not");
   assert.doesNotMatch(step, /Every request counts/, "step 1 does not say that every request counts, as one answered 431 never reaches the limiter");
   assert.ok(step.includes("The limiter counts a client's requests for 60 seconds from its first one and starts again with its first request after those 60 seconds have ended"), "step 1 says the 60 seconds start with a client's first request and the count starts again after they have ended");
 });
@@ -810,22 +810,24 @@ function received(header) {
   return Buffer.from(header, "utf8").toString("latin1");
 }
 
-// The headers the 401 sentence of step 2 gives as examples of another scheme,
-// or null when step 2 has no such sentence. The capture runs lazily to the
-// comma before "gets 401", as a scheme name and a token can each hold a period,
-// and must be a list of backticked headers joined by ", " or " or ", so a claim
-// the handler does not make cannot stand between "such as" and "gets 401".
+// The headers the sentence of step 2 on a request without credentials gives as
+// examples of another scheme, or null when step 2 has no such sentence. The
+// capture runs lazily to the comma before "gets the error `Authentication
+// required`", as a scheme name and a token can each hold a period, and must be
+// a list of backticked headers joined by ", " or " or ", so a claim the
+// handler does not make cannot stand between "such as" and that error.
 function otherSchemeExamples(rejected) {
-  const other = rejected.match(/A request without the header, or whose header names another scheme, such as (.+?), gets 401\./);
+  const other = rejected.match(/A request without the header, or whose header names another scheme, such as (.+?), gets the error `Authentication required`\./);
   if (!other) return null;
-  assert.match(other[1], /^`[^`]+`(?:(?:, | or )`[^`]+`)*$/, `step 2 gives only backticked headers joined by ", " or " or " between "such as" and ", gets 401.", not: ${other[1]}`);
+  assert.match(other[1], /^`[^`]+`(?:(?:, | or )`[^`]+`)*$/, `step 2 gives only backticked headers joined by ", " or " or " between "such as" and ", gets the error \`Authentication required\`.", not: ${other[1]}`);
   return [...other[1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
 }
 
-test("step 2 gives 401 for a missing header or another scheme, and 400 for a Bearer header that is not followed by one token", () => {
+test("step 2 gives Authentication required for a missing header or another scheme, and Malformed Authorization header for a Bearer header that is not followed by one token", () => {
   // RFC 6750, section 3.1: a request with no bearer credentials gets 401 and a
-  // malformed one gets 400. The handler answers 400 to a header such as Bearer
-  // demo token, which names the Bearer scheme but holds two tokens.
+  // malformed one gets 400. The handler answers 400, with the error Malformed
+  // Authorization header, to a header such as Bearer demo token, which names
+  // the Bearer scheme but holds two tokens.
   const scheme = bearerSchemePattern();
   const credentials = credentialsPattern();
   const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
@@ -834,14 +836,18 @@ test("step 2 gives 401 for a missing header or another scheme, and 400 for a Bea
   const [rejected, invalid = ""] = step.split("; an invalid token ");
   assert.match(rejected, /one or more spaces and one token/, "step 2 says what follows Bearer in a header that passes");
   const named = otherSchemeExamples(rejected);
-  assert.ok(named, "step 2 gives 401 for a missing header and for one that names another scheme");
+  assert.ok(named, "step 2 gives the error Authentication required for a missing header and for one that names another scheme");
   assert.ok(named.length > 0, "step 2 gives a header that names another scheme");
   for (const header of named) {
     assert.doesNotMatch(received(header), scheme, `handler.ts reads ${header} as another scheme`);
   }
-  assert.match(rejected, /As RFC 6750, section 3\.1, suggests, a request that sends the header more than once gets 400, and so does one whose header names the `Bearer` scheme in any other form: /, "step 2 gives 400 for a malformed Bearer header");
+  assert.match(
+    rejected,
+    /As RFC 6750, section 3\.1, suggests, a request that sends the header more than once gets the error `More than one Authorization header`, and one whose header names the `Bearer` scheme in any other form gets the error `Malformed Authorization header`: /,
+    "step 2 gives the error Malformed Authorization header for a malformed Bearer header"
+  );
   const examples = [...rejected.matchAll(/`(Bearer [^`]+)`/g)].map((m) => m[1]);
-  assert.ok(examples.length >= 2, "step 2 gives Bearer headers that have a token in them and get 400");
+  assert.ok(examples.length >= 2, "step 2 gives Bearer headers that have a token in them and get the error Malformed Authorization header");
   for (const header of examples) {
     assert.match(received(header), scheme, `handler.ts reads ${header} as the Bearer scheme`);
     assert.doesNotMatch(received(header), credentials, `handler.ts answers 400 to ${header}`);
@@ -850,19 +856,19 @@ test("step 2 gives 401 for a missing header or another scheme, and 400 for a Bea
   const sent = readme.match(/-H "Authorization: ([^"]+)"/);
   assert.ok(sent, "the quick start sends an Authorization header");
   assert.match(sent[1], credentials, `handler.ts reads a token from ${sent[1]}`);
-  assert.match(invalid, /^gets 401\./, "step 2 gives 401 for an invalid token");
+  assert.match(invalid, /^gets the error `Invalid or expired token`\./, "step 2 gives the error Invalid or expired token for an invalid token");
   assert.doesNotMatch(step, /\b403\b/, "step 2 gives no 403");
 });
 
-test("step 2 names each form of a Bearer header that gets 400, with a header of each form that the handler answers 400 to", () => {
+test("step 2 names each form of a Bearer header that gets the error Malformed Authorization header, with a header of each form that the handler answers 400 to", () => {
   // test/validated-task-handler.test.mjs sends headers of each form.
   const scheme = bearerSchemePattern();
   const credentials = credentialsPattern();
   const { made, ending } = tokenCharacters(credentials);
   const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   const [rejected] = step.split("; an invalid token ");
-  const forms = rejected.match(/names the `Bearer` scheme in any other form: (.+)$/);
-  assert.ok(forms, "step 2 gives 400 for a header that names the Bearer scheme in any form but Bearer, one or more spaces and one token");
+  const forms = rejected.match(/names the `Bearer` scheme in any other form gets the error `Malformed Authorization header`: (.+)$/);
+  assert.ok(forms, "step 2 gives the error Malformed Authorization header for a header that names the Bearer scheme in any form but Bearer, one or more spaces and one token");
   const token = (header) => received(header).replace(/^Bearer +/, "");
   const kinds = {
     "no token": (header) => header === "Bearer",
@@ -873,7 +879,7 @@ test("step 2 names each form of a Bearer header that gets 400, with a header of 
   };
   for (const [kind, isKind] of Object.entries(kinds)) {
     const start = forms[1].indexOf(`with ${kind} (`);
-    assert.ok(start >= 0, `step 2 gives 400 for a Bearer header with ${kind}, and an example`);
+    assert.ok(start >= 0, `step 2 gives the error Malformed Authorization header for a Bearer header with ${kind}, and an example`);
     const listed = forms[1].slice(start + `with ${kind} (`.length).split(")")[0];
     const examples = [...listed.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
     assert.ok(examples.length > 0, `step 2 gives a Bearer header with ${kind}`);
@@ -902,13 +908,14 @@ test("step 2 names each form of a Bearer header that gets 400, with a header of 
   for (const c of ["\t", ",", ":"]) {
     assert.ok(!tchar.test(c), `a scheme name cannot hold ${JSON.stringify(c)}`);
   }
-  // The 401 sentence gives a header whose scheme name only starts with Bearer.
+  // The sentence on a request without credentials gives a header whose scheme
+  // name only starts with Bearer.
   const named = otherSchemeExamples(rejected);
-  assert.ok(named, "step 2 gives 401 for a header that names another scheme");
+  assert.ok(named, "step 2 gives the error Authentication required for a header that names another scheme");
   assert.ok(named.some((header) => /^Bearer[^ ]/.test(header)), "step 2 gives a header whose scheme name starts with Bearer as another scheme");
 });
 
-test("the 401 examples of step 2 are read whole when a header holds a period, and end at the first comma before gets 401", () => {
+test("the examples of another scheme in step 2 are read whole when a header holds a period, and end at the first comma before the error they get", () => {
   // The handler answers 401 to these headers, so step 2 could give them.
   const scheme = bearerSchemePattern();
   const headers = ["Bearerx demo.token", "Bearer.x demo-token"];
@@ -916,16 +923,17 @@ test("the 401 examples of step 2 are read whole when a header holds a period, an
   for (const header of [...headers, later]) {
     assert.doesNotMatch(received(header), scheme, `handler.ts reads ${header} as another scheme`);
   }
-  const sentence = `A request without the header, or whose header names another scheme, such as \`${headers[0]}\` or \`${headers[1]}\`, gets 401.`;
-  assert.deepEqual(otherSchemeExamples(sentence), headers, "the checks of step 2 read each 401 example whole");
-  // A later clause that also ends with ", gets 401." gives no example of the
-  // 401 sentence, so a capture that runs past the first one fails here.
-  const followed = `${sentence} A request whose header names a scheme such as \`${later}\`, gets 401.`;
-  assert.deepEqual(otherSchemeExamples(followed), headers, "the checks of step 2 read the 401 examples of the first clause only");
+  const sentence = `A request without the header, or whose header names another scheme, such as \`${headers[0]}\` or \`${headers[1]}\`, gets the error \`Authentication required\`.`;
+  assert.deepEqual(otherSchemeExamples(sentence), headers, "the checks of step 2 read each example of another scheme whole");
+  // A later clause that also ends with ", gets the error `Authentication
+  // required`." gives no example of the first one, so a capture that runs past
+  // the first one fails here.
+  const followed = `${sentence} A request whose header names a scheme such as \`${later}\`, gets the error \`Authentication required\`.`;
+  assert.deepEqual(otherSchemeExamples(followed), headers, "the checks of step 2 read the examples of another scheme in the first clause only");
 });
 
-test("the 401 examples of step 2 are only backticked headers joined by \", \" or \" or \"", () => {
-  const sentence = (list) => `A request without the header, or whose header names another scheme, such as ${list}, gets 401.`;
+test("the examples of another scheme in step 2 are only backticked headers joined by \", \" or \" or \"", () => {
+  const sentence = (list) => `A request without the header, or whose header names another scheme, such as ${list}, gets the error \`Authentication required\`.`;
   assert.deepEqual(otherSchemeExamples(sentence("`Basic demo`")), ["Basic demo"]);
   assert.deepEqual(otherSchemeExamples(sentence("`Basic demo`, `Bearerx demo.token` or `Token x`")), ["Basic demo", "Bearerx demo.token", "Token x"]);
   const claims = [
@@ -952,31 +960,32 @@ test("step 2 says Bearer in any letter case and one or more spaces, and the hand
   assert.doesNotMatch("Bearerdemo-token", credentials, "handler.ts reads no token when no space follows the scheme");
 });
 
-test("step 2 gives 400 for a request with more than one Authorization header, which the handler counts", () => {
+test("step 2 gives the error More than one Authorization header for a request with more than one Authorization header, which the handler counts", () => {
   // req.headers holds the first Authorization line of a request and none of
   // the later ones, so the handler can only see a second line in rawHeaders.
   // test/validated-task-handler.test.mjs sends such requests.
   const handler = readText("examples/validated-task-handler/handler.ts");
   assert.match(handler, /req\.rawHeaders/, "handler.ts counts the Authorization header lines of a request");
   const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
-  assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once gets 400/, "step 2 gives 400 for a header sent more than once");
+  assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once gets the error `More than one Authorization header`/, "step 2 gives the error More than one Authorization header for a header sent more than once");
 });
 
-test("step 2 gives 400 to a header sent more than once whatever scheme it names, as the handler counts the lines before it reads the scheme", () => {
-  // A single header that names another scheme gets 401, so step 2 says which
-  // answer two such lines get. test/validated-task-handler.test.mjs sends them.
+test("step 2 gives the error More than one Authorization header to a header sent more than once whatever scheme it names, as the handler counts the lines before it reads the scheme", () => {
+  // A single header that names another scheme gets Authentication required,
+  // so step 2 says which answer two such lines get.
+  // test/validated-task-handler.test.mjs sends them.
   const handler = readText("examples/validated-task-handler/handler.ts");
   const counted = handler.indexOf("authorizationLines(req) > 1");
   const read = handler.indexOf("bearerScheme.test(authHeader)");
   assert.ok(counted !== -1 && read !== -1, "handler.ts counts the Authorization header lines and reads the scheme");
   assert.ok(counted < read, "handler.ts counts the Authorization header lines before it reads the scheme");
   const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
-  const repeated = step.split("; an invalid token ")[0].match(/, and so do two `Authorization: ([^`]+)` lines: the handler counts the header lines before it reads the scheme, so a repeated header gets 400 whatever scheme it names$/);
-  assert.ok(repeated, "step 2 gives 400 to two Authorization lines that name another scheme");
-  assert.doesNotMatch(received(repeated[1]), bearerSchemePattern(), `handler.ts reads ${repeated[1]} as another scheme, which gets 401 when sent once`);
+  const repeated = step.split("; an invalid token ")[0].match(/ Two `Authorization: ([^`]+)` lines get `More than one Authorization header` too: the handler counts the header lines before it reads the scheme, so a repeated header gets that error whatever scheme it names$/);
+  assert.ok(repeated, "step 2 gives the error More than one Authorization header to two Authorization lines that name another scheme");
+  assert.doesNotMatch(received(repeated[1]), bearerSchemePattern(), `handler.ts reads ${repeated[1]} as another scheme, which gets Authentication required when sent once`);
 });
 
-test("step 2 names the challenges the handler's 400 and 401 responses carry and the header line count at which it answers 431", () => {
+test("step 2 names the challenges the handler's authentication errors carry and the header line count at which it answers 431", () => {
   // test/validated-task-handler.test.mjs sends requests that get these answers.
   const handler = readText("examples/validated-task-handler/handler.ts");
   const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
@@ -985,13 +994,20 @@ test("step 2 names the challenges the handler's 400 and 401 responses carry and 
   // RFC 6750, section 3: the Bearer scheme is followed by one or more auth-params.
   assert.match(challenge[1], /^Bearer [a-z_]+="[^"]*"/, "the challenge has an auth-param after Bearer");
   assert.match(handler, /status\(401\)\.set\("WWW-Authenticate", bearerChallenge\)/, "handler.ts sets the challenge on a 401 response");
-  assert.ok(step.includes(`Each 401 carries the challenge \`WWW-Authenticate: ${challenge[1]}\``), "step 2 names the challenge");
+  assert.ok(step.includes(`Each of these errors carries the challenge \`WWW-Authenticate: ${challenge[1]}\``), "step 2 names the challenge");
   const invalid = handler.match(/status\(401\)\.set\("WWW-Authenticate", `\$\{bearerChallenge\}([^`]+)`\)\.json\(\{ error: "Invalid or expired token" \}\)/);
   assert.ok(invalid, "handler.ts adds an error code to the challenge for an invalid token");
-  assert.ok(step.includes(`the one for an invalid token adds the error code from RFC 6750, section 3.1: \`WWW-Authenticate: ${challenge[1]}${invalid[1]}\``), "step 2 names the challenge for an invalid token");
+  assert.ok(step.includes(`\`Invalid or expired token\` adds the error code from RFC 6750, section 3.1: \`WWW-Authenticate: ${challenge[1]}${invalid[1]}\``), "step 2 names the challenge for an invalid token");
   const malformed = handler.match(/status\(400\)\.set\("WWW-Authenticate", `\$\{bearerChallenge\}([^`]+)`\)/);
   assert.ok(malformed, "handler.ts adds an error code to the challenge for a malformed Authorization header");
-  assert.ok(step.includes(`Each 400 in this step adds the error code for a malformed request: \`WWW-Authenticate: ${challenge[1]}${malformed[1]}\``), "step 2 names the challenge for a malformed Authorization header");
+  // The errors of the function that sets that challenge, in the order
+  // handler.ts gives them.
+  const malformedErrors = [...handler.matchAll(/rejectMalformed\(req, res, "([^"]+)", /g)].map((m) => `\`${m[1]}\``);
+  assert.ok(malformedErrors.length > 0, "handler.ts rejects a malformed Authorization header with an error of its own");
+  assert.ok(
+    step.includes(`${malformedErrors.join(" and ")} add the error code for a malformed request: \`WWW-Authenticate: ${challenge[1]}${malformed[1]}\``),
+    "step 2 names the challenge for a malformed Authorization header and each error that carries it"
+  );
   const limit = handler.match(/const maxHeaderLines = (\d+);/);
   assert.ok(limit, "handler.ts sets the number of header lines at which a request gets 431");
   const count = Number(limit[1]).toLocaleString("en-US");
@@ -1078,7 +1094,7 @@ test("step 3 limits the Invalid JSON reply to a non-empty body sent as applicati
   // as JSON, so both fail schema validation in step 4, not JSON parsing.
   const step = inputValidationLines.find((l) => l.startsWith("3. JSON parsing:"));
   assert.ok(step, "docs/input-validation.md lists JSON parsing as step 3");
-  const [claim, exceptions = ""] = step.split('`{"code":-32700,"message":"Invalid JSON"}`');
+  const [claim, exceptions = ""] = step.split("the JSON-RPC error `Invalid JSON`");
   assert.ok(claim.includes("non-empty body sent as `application/json`"), "step 3 applies to a non-empty body sent as application/json");
   assert.ok(claim.includes("not a JSON object or array"), "step 3 names a body that is not a JSON object or array");
   assert.match(exceptions, /empty body/, "docs/input-validation.md says an empty body does not get the Invalid JSON reply");
@@ -1094,13 +1110,14 @@ test("step 3 says a body the parser cannot read gets Invalid request body, not I
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const step = inputValidationLines.find((l) => l.startsWith("3. JSON parsing:"));
   assert.ok(step, "docs/input-validation.md lists JSON parsing as step 3");
-  assert.ok(step.includes('`{"code":-32600,"message":"Invalid request body"}`'), "step 3 names the Invalid request body reply");
+  assert.ok(step.includes("with the JSON-RPC error `Invalid request body`: "), "step 3 names the Invalid request body reply");
   assert.match(step, /the parser cannot read[^.]*whatever it contains/, "step 3 says the reply does not depend on what the body contains");
-  assert.match(step, new RegExp(`\\b413\\b[^,]*over ${limit[1]} MB`), "step 3 gives 413 for a body over the size limit");
-  assert.match(step, /\b415\b[^,]*unsupported encoding or charset/, "step 3 gives 415 for an unsupported encoding or charset");
-  assert.match(step, /\b400\b[^,]*compressed body that does not inflate/, "step 3 gives 400 for a compressed body that does not inflate");
-  assert.match(step, /bare HTTP 400 with no body when the client closes the connection before the whole body arrives/, "step 3 limits the bare 400 to a client that closes the connection");
-  assert.match(step, /bare HTTP 408 with no body when the upload stalls until Node's request timeout/, "step 3 names the bare 408 for a stalled upload");
+  const unread = step.split("with the JSON-RPC error `Invalid request body`: ")[1]?.split(". ")[0] ?? "";
+  assert.ok(unread.startsWith(`a body over ${limit[1]} MB `), "step 3 gives Invalid request body for a body over the size limit");
+  assert.match(unread, /, one with an unsupported encoding or charset,/, "step 3 gives Invalid request body for an unsupported encoding or charset");
+  assert.match(unread, /, and a compressed body that does not inflate$/, "step 3 gives Invalid request body for a compressed body that does not inflate");
+  assert.match(step, /A client that closes the connection before the whole body arrives gets at most a bare reply with no body/, "step 3 limits the bare reply that may not arrive to a client that closes the connection");
+  assert.match(step, /an upload that stalls until Node's request timeout gets a bare reply with no body/, "step 3 names the bare reply for a stalled upload");
 });
 
 test("step 3 says the body limit leaves room for the file parts step 4 allows when their bytes are written without JSON escapes", () => {
