@@ -12,7 +12,10 @@
 //     handler does it today.
 //   step: the step of docs/input-validation.md that answers the request, 1 to
 //     6, or null for a request no step rejects: one the handler accepts, the
-//     agent card, an unknown route, or the handler's own 431.
+//     agent card, an unknown route, or one Node.js answers itself.
+//   answeredBy: "node" for a request the row expects Node.js to answer before
+//     any handler runs, on the releases the engines field of the example's
+//     package.json admits. The test skips such a row on any other release.
 //   name: what the row sends, in one line.
 //   request: method (POST unless given), path (/ unless given), authorization
 //     (the Authorization header value; undefined sends Bearer demo-token, null
@@ -22,9 +25,9 @@
 //     giving one of those when the row is sent), declaredLength (a
 //     Content-Length to send in place of the body's length), closeAfter (end
 //     the connection that many milliseconds after sending), awaitServer (keep
-//     the connection open until the server ends it), repeat (send a request
-//     that many times before the one the row checks: the row's own request,
-//     or the row's request with the fields of repeated in place of its own).
+//     the connection open until the server ends it), repeat (send the row's
+//     request that many times before the one the row checks, each of them
+//     answered 200 with one audit line).
 //   server: options for a server of the row's own: requestTimeout (a Node.js
 //     request timeout in milliseconds, in place of the default 300 seconds),
 //     fault (true runs a copy of the example whose processTask throws).
@@ -35,11 +38,9 @@
 //     reply with no body), reply ("optional" when the client may get no reply
 //     at all), headerLines (lines the response headers hold), contentType (a
 //     pattern the Content-Type header matches), v03 (the name of the A2A
-//     v0.3.0 schema the body validates against), repeatStatus (the status
-//     each repeated request gets, 200 unless given), repeatAudit (the audit
-//     lines each repeated request writes, 1 unless given), audit (the audit
-//     lines the checked request writes, each an action and, when given, the
-//     details of the line).
+//     v0.3.0 schema the body validates against), audit (the audit lines the
+//     checked request writes, each an action and, when given, the details of
+//     the line).
 
 // The rate limit handler.ts gives its limiter: requests per client IP in the
 // seconds that start with the client's first request.
@@ -51,8 +52,10 @@ export const limits = { parts: 10, textChars: 10000, fileBytesChars: 1048576, ag
 // The body limits of the two JSON parsers of handler.ts, in bytes.
 export const bodyLimits = { "/": 11 * 1024 * 1024, "/a2a/message": 64 * 1024 };
 
-// The header lines at which the handler answers 431.
-export const maxHeaderLines = 1000;
+// The most header lines of a request that the releases the example's engines
+// field admits pass on to the handler. The rows marked answeredBy "node"
+// expect them to answer a request with more with a bare 431.
+export const nodeHeaderLines = 1000;
 
 const text = (value) => [{ kind: "text", text: value }];
 
@@ -526,40 +529,46 @@ export const attackTable = [
     })
   ),
 
-  // Header lines: the handler's 431.
+  // Header lines: a request of 1,000 header lines reaches the handler with
+  // each of its lines, a second Authorization header among them, and the rows
+  // marked answeredBy "node" expect a request with more to get a bare 431
+  // before any handler runs.
   {
     tag: "transport",
     step: null,
-    name: `${maxHeaderLines} header lines`,
-    request: { headers: filler(maxHeaderLines - 5), body: hello },
-    expect: { status: 431, code: null, json: { error: "Too many header lines" }, audit: [] },
-  },
-  {
-    tag: "transport",
-    step: null,
-    name: `${maxHeaderLines - 1} header lines`,
-    request: { headers: filler(maxHeaderLines - 6), body: hello },
+    name: `${nodeHeaderLines} header lines`,
+    request: { headers: filler(nodeHeaderLines - 5), body: hello },
     expect: completedV03,
   },
   {
     tag: "transport",
-    step: null,
-    name: `a valid Authorization header, ${maxHeaderLines + 100} other lines and an invalid Authorization header`,
-    request: { authorization: "Bearer demo-token", headers: [...filler(maxHeaderLines + 100), "Authorization: Bearer undefined"], body: hello },
-    expect: { status: 431, code: null, audit: [] },
+    step: 2,
+    name: `a valid Authorization header, ${nodeHeaderLines - 6} other lines and an invalid Authorization header, ${nodeHeaderLines} lines in all`,
+    request: { authorization: "Bearer demo-token", headers: [...filler(nodeHeaderLines - 6), "Authorization: Bearer undefined"], body: hello },
+    expect: repeatedHeader,
   },
   {
     tag: "transport",
     step: null,
-    name: `an invalid Authorization header, ${maxHeaderLines + 100} other lines and a valid Authorization header`,
-    request: { authorization: "Bearer undefined", headers: [...filler(maxHeaderLines + 100), "Authorization: Bearer demo-token"], body: hello },
-    expect: { status: 431, code: null, audit: [] },
+    answeredBy: "node",
+    name: `${nodeHeaderLines + 1} header lines`,
+    request: { headers: filler(nodeHeaderLines - 4), body: hello },
+    expect: { status: 431, code: null, body: "none", audit: [] },
   },
   {
     tag: "transport",
     step: null,
-    name: `a valid request after ${rateLimit.requests + 10} requests answered 431, which the limiter does not count`,
-    request: { body: hello, repeat: rateLimit.requests + 10, repeated: { headers: filler(maxHeaderLines - 5) } },
-    expect: { ...completedV03, repeatStatus: 431, repeatAudit: 0 },
+    answeredBy: "node",
+    name: `a valid Authorization header, ${nodeHeaderLines + 100} other lines and an invalid Authorization header`,
+    request: { authorization: "Bearer demo-token", headers: [...filler(nodeHeaderLines + 100), "Authorization: Bearer undefined"], body: hello },
+    expect: { status: 431, code: null, body: "none", audit: [] },
+  },
+  {
+    tag: "transport",
+    step: null,
+    answeredBy: "node",
+    name: `an invalid Authorization header, ${nodeHeaderLines + 100} other lines and a valid Authorization header`,
+    request: { authorization: "Bearer undefined", headers: [...filler(nodeHeaderLines + 100), "Authorization: Bearer demo-token"], body: hello },
+    expect: { status: 431, code: null, body: "none", audit: [] },
   },
 ];

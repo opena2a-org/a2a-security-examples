@@ -13,13 +13,40 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { schemaErrors } from "./a2a-schema.mjs";
-import { attackTable, bodyLimits, limits, maxHeaderLines, rateLimit } from "./handler-attack-table.mjs";
+import { attackTable, bodyLimits, limits, nodeHeaderLines, rateLimit } from "./handler-attack-table.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const example = join(root, "examples/validated-task-handler");
 const tsx = join(example, "node_modules/tsx/dist/cli.mjs");
 const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
 const handlerSource = readFileSync(join(example, "handler.ts"), "utf8");
+const engines = JSON.parse(readFileSync(join(example, "package.json"), "utf8")).engines?.node;
+
+// Whether range, an engines range of alternatives joined by ||, each ^X.Y.Z
+// (X.Y.Z or a later release of major X) or >=X.Y.Z, admits version, as
+// process.versions.node gives one. A range of another form throws, so that an
+// engines field this function cannot read fails the run instead of skipping
+// rows.
+function admits(range, version) {
+  const release = version.split(".").map(Number);
+  const alternatives = range.split("||").map((alternative) => {
+    const match = alternative.trim().match(/^(\^|>=)(\d+)\.(\d+)\.(\d+)$/);
+    if (!match) throw new Error(`the engines range ${JSON.stringify(range)} has ${JSON.stringify(alternative.trim())}, which is neither ^X.Y.Z nor >=X.Y.Z`);
+    return { sameMajor: match[1] === "^", floor: match.slice(2).map(Number) };
+  });
+  return alternatives.some(({ sameMajor, floor }) => {
+    const index = release.findIndex((part, i) => part !== floor[i]);
+    const atOrAbove = index === -1 || release[index] > floor[index];
+    return atOrAbove && (!sameMajor || release[0] === floor[0]);
+  });
+}
+
+// Why a row is skipped on this release, or false: a row Node.js answers itself
+// runs only on a release the example's engines field admits.
+function skipReason(row) {
+  if (row.answeredBy !== "node" || admits(engines, process.versions.node)) return false;
+  return `Node.js ${process.versions.node} is outside the example's engines range (${engines}); the row expects only a release in it to answer this request before any handler runs`;
+}
 
 // The number a line of handler.ts matching pattern holds.
 function handlerNumber(pattern) {
@@ -38,7 +65,41 @@ test("the limits the table gives are those handler.ts sets", () => {
   assert.equal(limits.agentMessageChars, limits.textChars);
   assert.equal(bodyLimits["/"], handlerNumber(/express\.json\(\{ limit: "(\d+)mb" \}\)/) * 1024 * 1024);
   assert.equal(bodyLimits["/a2a/message"], handlerNumber(/express\.json\(\{ limit: "(\d+)kb" \}\)/) * 1024);
-  assert.equal(maxHeaderLines, handlerNumber(/const maxHeaderLines = (\d+);/));
+});
+
+test("handler.ts leaves the header line limit to Node.js: it sets no maxHeadersCount and reads no rawHeaders", () => {
+  assert.doesNotMatch(handlerSource, /maxHeadersCount/, "handler.ts sets no limit on the header lines Node.js reads");
+  assert.doesNotMatch(handlerSource, /rawHeaders/, "handler.ts counts no header lines of its own");
+  assert.match(handlerSource, /req\.headersDistinct\.authorization/, "handler.ts reads the value of each Authorization header line from req.headersDistinct");
+});
+
+// Releases measured on 2026-11-09 with a node:http server on 127.0.0.1 that
+// was sent requests of 999, 1,000, 1,001, 1,100 and 1,104 header lines, the
+// last with an Authorization header first and another after 1,100 other
+// lines. Each passed the requests of 999 and 1,000 lines on to its handler
+// with every line. Those in passOn also passed the longer requests on, without
+// their lines past the 1,000th (20.x: past the 1,023rd), the second
+// Authorization header among them; those in answer431 answered each of them
+// with a bare 431 before the handler ran.
+const measured = {
+  passOn: ["20.18.3", "20.19.0", "20.20.0", "24.13.1", "24.14.0", "24.14.1", "24.15.0", "24.16.0", "24.17.0", "24.18.0"],
+  answer431: ["22.23.3", "24.18.1", "24.19.0", "24.20.0", "24.21.0", "24.22.0", "24.22.1", "26.12.1", "26.13.0"],
+};
+
+test("the engines field of the example's package.json admits each release measured to answer more than 1,000 header lines with 431, and none measured to pass them on", () => {
+  assert.equal(typeof engines, "string", "examples/validated-task-handler/package.json sets engines.node");
+  for (const version of measured.answer431) assert.ok(admits(engines, version), `${engines} admits Node.js ${version}`);
+  for (const version of measured.passOn) assert.ok(!admits(engines, version), `${engines} does not admit Node.js ${version}`);
+  assert.equal(nodeHeaderLines, 1000, "the rows send requests of 1,000 header lines and of more, as the measured requests were");
+});
+
+test("admits reads ^X.Y.Z and >=X.Y.Z alternatives joined by || and throws for any other form", () => {
+  const range = "^22.23.3 || >=26.12.1";
+  for (const version of ["22.23.3", "22.24.0", "26.12.1", "26.13.0", "27.0.0"]) assert.ok(admits(range, version), `${range} admits ${version}`);
+  for (const version of ["20.20.0", "22.23.2", "23.0.0", "24.18.1", "26.12.0"]) assert.ok(!admits(range, version), `${range} does not admit ${version}`);
+  for (const other of [">=22", "~22.23.3", "22.x", "^22.23.3 || 24"]) {
+    assert.throws(() => admits(other, "22.23.3"), /is neither \^X\.Y\.Z nor >=X\.Y\.Z/, `${other} is not read`);
+  }
 });
 
 test("every row has a tag, a step, a name of its own, a request and the status, code and audit lines it expects", () => {
@@ -46,6 +107,7 @@ test("every row has a tag, a step, a name of its own, a request and the status, 
   for (const row of attackTable) {
     assert.ok(["contract", "transport"].includes(row.tag), `${row.name} is tagged contract or transport`);
     assert.ok(row.step === null || [1, 2, 3, 4, 5, 6].includes(row.step), `${row.name} names a step of docs/input-validation.md or null`);
+    assert.ok(row.answeredBy === undefined || (row.answeredBy === "node" && row.step === null), `${row.name} is answered by the handler, or by Node.js with no step`);
     assert.ok(typeof row.name === "string" && row.name.length > 0 && !names.has(row.name), `${row.name} is a name no other row has`);
     names.add(row.name);
     assert.equal(typeof row.request, "object", `${row.name} has a request`);
@@ -389,16 +451,12 @@ async function checkRow(row, server) {
   const audited = server.audit;
   let seen = audited().length;
   if (request.repeat) {
-    const repeated = { ...request, ...request.repeated };
-    delete repeated.repeat;
-    delete repeated.repeated;
     for (let i = 1; i <= request.repeat; i++) {
-      const res = await send(server.port, repeated);
-      assert.equal(res.status, expect.repeatStatus ?? 200, `repeated request ${i} of ${request.repeat}:\n${res.raw}`);
+      const res = await send(server.port, request);
+      assert.equal(res.status, 200, `repeated request ${i} of ${request.repeat}:\n${res.raw}`);
     }
-    const written = request.repeat * (expect.repeatAudit ?? 1);
-    const lines = await waitForAudit(audited, seen + written);
-    assert.equal(lines.length, seen + written, `the ${request.repeat} repeated requests wrote ${written} audit lines:\n${server.log()}`);
+    const lines = await waitForAudit(audited, seen + request.repeat);
+    assert.equal(lines.length, seen + request.repeat, `the ${request.repeat} repeated requests wrote ${request.repeat} audit lines:\n${server.log()}`);
     seen = lines.length;
   }
   const res = await send(server.port, request);
@@ -503,14 +561,14 @@ for (const [i, rows] of batches.entries()) {
   test(`rows ${rows[0].name} to ${rows.at(-1).name} on server ${i + 1} of ${batches.length}`, async (t) => {
     await withServer({}, async (server) => {
       for (const row of rows) {
-        await t.test(`${row.tag}: ${row.name}`, () => checkRow(row, server));
+        await t.test(`${row.tag}: ${row.name}`, { skip: skipReason(row) }, () => checkRow(row, server));
       }
     });
   });
 }
 
 for (const row of ownServer) {
-  test(`${row.tag}: ${row.name}, on a server of its own`, async () => {
+  test(`${row.tag}: ${row.name}, on a server of its own`, { skip: skipReason(row) }, async () => {
     await withServer(row.server ?? {}, (server) => checkRow(row, server));
   });
 }

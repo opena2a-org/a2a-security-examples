@@ -237,35 +237,6 @@ function audit(entry: AuditEntry): void {
   console.log(JSON.stringify(entry));
 }
 
-// --- Header Line Limit ---
-
-// The number of header lines at which a request gets 431. Node.js 22.23.2,
-// 24.18.1, 26.5.1 and later releases of those three lines answer a request
-// with more than that with a bare HTTP 431 before any handler runs. Node.js 18
-// and 20, and Node.js 22, 24 and 26 releases before those, instead pass the
-// request on. There, req.headers is built from the first 1,000 lines only, and
-// req.rawHeaders holds the first 1,000 or, on releases such as 18.20.8,
-// 20.20.2, 22.0.0 and 24.0.0, up to the first 1,023, so a later line, such as
-// a second Authorization header, may be in neither. A request that has this
-// many may have had more, so it gets 431 here whichever release runs the
-// example.
-const maxHeaderLines = 1000;
-
-function limitHeaderLines(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction
-): void {
-  // rawHeaders holds the name and then the value of each header line.
-  if (req.rawHeaders.length >= maxHeaderLines * 2) {
-    res.status(431).json({ error: "Too many header lines" });
-    return;
-  }
-  next();
-}
-
-app.use(limitHeaderLines);
-
 // --- Authentication Middleware ---
 
 // The challenge each 401 response, and each 400 response to a malformed
@@ -280,11 +251,6 @@ const bearerChallenge = 'Bearer realm="a2a"';
 // character, if there is one, is not one a longer scheme name could hold
 // (sections 5.6.2 and 11.4), so Bearerx names another scheme.
 const bearerScheme = /^bearer(?![!#$%&'*+.^_`|~0-9a-z-])/i;
-
-// The number of Authorization header lines in a request.
-function authorizationLines(req: express.Request): number {
-  return req.rawHeaders.filter((name, i) => i % 2 === 0 && name.toLowerCase() === "authorization").length;
-}
 
 // RFC 6750, section 3.1: a request that repeats a parameter or is otherwise
 // malformed gets 400 and the error code invalid_request in the challenge.
@@ -310,11 +276,17 @@ function authenticate(
   res: express.Response,
   next: express.NextFunction
 ): void {
-  // Node.js keeps the first Authorization header line of a request and drops
-  // the rest, so the first line alone would decide the answer. A request with
-  // more than one is rejected whichever comes first: a server in front of
-  // this one may have read another line.
-  if (authorizationLines(req) > 1) {
+  // req.headers keeps the first Authorization header line of a request and
+  // drops the rest, so the first line alone would decide the answer, though a
+  // server in front of this one may have read another. req.headersDistinct
+  // keeps the value of each line, so a request with more than one is rejected
+  // whichever comes first. A line Node.js has not read is in neither: Node.js
+  // 20.20.0 and 24.18.0 pass a request of 1,100 header lines on without its
+  // lines past the 1,023rd and the 1,000th, while 22.23.3, 24.18.1 and 26.12.1
+  // answer a request of more than 1,000 with 431 before any handler runs. The
+  // engines field of package.json admits those three releases and the later
+  // ones of their lines.
+  if ((req.headersDistinct.authorization?.length ?? 0) > 1) {
     rejectMalformed(req, res, "More than one Authorization header", "repeated_header");
     return;
   }
@@ -651,11 +623,10 @@ function requestedVersion(req: express.Request): string {
 // Every request that reaches the limiter counts toward the rate limit before
 // authentication reads it, so a client that guesses tokens gets 429, not a 401
 // for each guess, once it has used up the requests the limiter allows it in
-// the 60 seconds that started with its first request. A request that
-// limitHeaderLines answers 431 never reaches the limiter and is not counted.
-// A request for a version this agent does not answer gets the JSON-RPC error
-// A2A v1.0 defines for it, VersionNotSupportedError, before the JSON-RPC
-// request in its body is checked.
+// the 60 seconds that started with its first request. A request for a version
+// this agent does not answer gets the JSON-RPC error A2A v1.0 defines for it,
+// VersionNotSupportedError, before the JSON-RPC request in its body is
+// checked.
 app.post("/", rateLimit, authenticate, parseJson, (req, res) => {
   const version = VERSIONS.get(requestedVersion(req));
   if (version) return handleMessage(req, res, version);
@@ -990,11 +961,6 @@ const server = app.listen(port, () => {
   console.log(`Secure A2A agent listening on port ${port}`);
   console.log(`Agent card: http://localhost:${port}/.well-known/agent-card.json`);
 });
-// Node.js builds req.headers from at most 1,000 header lines when this is
-// unset. Setting it keeps the limit Node.js applies and the one the handler
-// checks the same. While maxHeaderLines is 1,000 the line changes nothing; it
-// takes effect once maxHeaderLines is changed.
-server.maxHeadersCount = maxHeaderLines;
 
 // Without a listener, a port that is already taken ends the process with the
 // stack trace of an unhandled 'error' event. The listener also receives errors

@@ -12,7 +12,7 @@ The controls are a minimal agent card, bearer authentication, per-client rate li
 
 ## Quick start
 
-Requires Node.js 18 or later.
+Requires Node.js 22.23.3 or a later 22 release, 24.18.1 or a later 24 release, or 26.12.1 or later ([why those releases](docs/validated-task-handler.md#nodejs-releases)).
 
 ```bash
 git clone https://github.com/opena2a-org/a2a-security-examples.git

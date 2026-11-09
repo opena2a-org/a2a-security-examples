@@ -2442,57 +2442,6 @@ test("a request with more than one Authorization header gets 400 and invalid_req
   });
 });
 
-test("a request with 1,000 or more header lines gets 431, so an Authorization header past the lines Node.js reads is not ignored", async () => {
-  await withOwnServer(async (serverPort, audited) => {
-    // Node.js 18 and 20, and Node.js 22, 24 and 26 releases before 22.23.2,
-    // 24.18.1 and 26.5.1, stop reading the header lines of a request at about
-    // 1,000 and pass the request on without the rest, so the handler would
-    // read only the first Authorization line of these requests. Node.js
-    // 22.23.2, 24.18.1, 26.5.1 and later releases of those three lines answer
-    // them with a bare 431 before the handler runs.
-    const valid = "Authorization: Bearer demo-token";
-    const invalid = "Authorization: Bearer undefined";
-    const filler = (count) => Array(count).fill("a:");
-    for (const sent of [[valid, ...filler(1100), invalid], [invalid, ...filler(1100), valid]]) {
-      const res = await postRaw(serverPort, sent);
-      assert.equal(res.status, 431, `${sent[0]}, 1,100 other lines and ${sent.at(-1)} get 431`);
-    }
-    // postRaw sends four header lines besides the given ones, so these
-    // requests have 1,000 and 999 header lines.
-    const atLimit = await postRaw(serverPort, [valid, ...filler(995)]);
-    assert.equal(atLimit.status, 431, "a request with 1,000 header lines gets 431");
-    assert.deepEqual(JSON.parse(atLimit.body), { error: "Too many header lines" });
-    const belowLimit = await postRaw(serverPort, [valid, ...filler(994)]);
-    assert.equal(belowLimit.status, 200, "a request with 999 header lines is accepted");
-    assert.equal(JSON.parse(belowLimit.body).result.status.state, "completed");
-    // The accepted request wrote the only audit line, so each 431 wrote none.
-    await waitForAudit(1, audited);
-    assert.deepEqual(audited().map((a) => a.action), ["task_accepted"]);
-  });
-});
-
-test("a request answered 431 for too many header lines does not count toward the rate limit, as the header lines are checked before the limiter runs", async () => {
-  await withOwnServer(async (serverPort, audited) => {
-    // postRaw sends four header lines besides the given ones, so each of these
-    // requests has 1,000 header lines. More of them than the limiter allows
-    // all get 431, not 429 once the limit would be used up.
-    const valid = "Authorization: Bearer demo-token";
-    const sent = rateLimitPoints + 10;
-    for (let i = 1; i <= sent; i++) {
-      const res = await postRaw(serverPort, [valid, ...Array(995).fill("a:")]);
-      assert.equal(res.status, 431, `request ${i} of ${sent} with 1,000 header lines gets 431`);
-      assert.deepEqual(JSON.parse(res.body), { error: "Too many header lines" });
-    }
-    // None of them used up a point of the limiter, so a valid request is
-    // accepted after them.
-    const after = await postRaw(serverPort, [valid]);
-    assert.equal(after.status, 200, `a valid request after ${sent} requests answered 431 is accepted, not answered 429`);
-    assert.equal(JSON.parse(after.body).result.status.state, "completed");
-    await waitForAudit(1, audited);
-    assert.deepEqual(audited().map((a) => a.action), ["task_accepted"]);
-  });
-});
-
 // Copy the example into validated-task-handler in a new temporary directory,
 // with handler.ts changed by edit, and copy the files of
 // examples/secure-agent-card into secure-agent-card beside it, as the two sit
@@ -2521,54 +2470,6 @@ function exampleCopy(edit) {
   }
   return { top, dir };
 }
-
-test("with maxHeaderLines raised to 1,500, a request with 1,106 header lines, two of them Authorization headers, gets 400 and one with 1,500 gets the handler's 431, so server.maxHeadersCount follows maxHeaderLines", async () => {
-  // While maxHeaderLines is 1,000, server.maxHeadersCount changes nothing, so
-  // the test runs a copy of the example with a higher limit. If
-  // server.maxHeadersCount is not set from maxHeaderLines, Node.js reads no
-  // more header lines than its default of about 1,000 while the handler checks
-  // for 1,500. Node.js 22.23.2, 24.18.1, 26.5.1 and later releases of those
-  // three lines then answer each request below with a bare 431, and earlier
-  // releases pass it on without its later lines, so the handler would read only
-  // the first Authorization line of the first request and accept its token.
-  const { top, dir } = exampleCopy((source) => {
-    const raised = source.replace("const maxHeaderLines = 1000;", "const maxHeaderLines = 1500;");
-    assert.notEqual(raised, source, "handler.ts sets maxHeaderLines to 1000");
-    return raised;
-  });
-  try {
-    await withOwnServer(async (serverPort, audited) => {
-      const valid = "Authorization: Bearer demo-token";
-      const invalid = "Authorization: Bearer undefined";
-      const filler = (count) => Array(count).fill("a:");
-      // postRaw sends four header lines besides the given ones, so these
-      // requests have 1,106 header lines.
-      for (const sent of [[valid, ...filler(1100), invalid], [invalid, ...filler(1100), valid]]) {
-        const res = await postRaw(serverPort, sent);
-        assert.equal(res.status, 400, `${sent[0]}, 1,100 other lines and ${sent.at(-1)} get 400`);
-        assert.deepEqual(JSON.parse(res.body), { error: "More than one Authorization header" });
-        assert.ok(res.headers.includes('WWW-Authenticate: Bearer realm="a2a", error="invalid_request"'), `the 400 to ${sent[0]}, 1,100 other lines and ${sent.at(-1)} carries the Bearer challenge with invalid_request`);
-      }
-      // postRaw sends four header lines besides the given ones, so these
-      // requests have 1,500 and 1,499 header lines.
-      const atLimit = await postRaw(serverPort, [valid, ...filler(1495)]);
-      assert.equal(atLimit.status, 431, "a request with 1,500 header lines gets 431");
-      assert.deepEqual(JSON.parse(atLimit.body), { error: "Too many header lines" });
-      const belowLimit = await postRaw(serverPort, [valid, ...filler(1494)]);
-      assert.equal(belowLimit.status, 200, "a request with 1,499 header lines is accepted");
-      assert.equal(JSON.parse(belowLimit.body).result.status.state, "completed");
-      // Each of the two 400s wrote an auth_failed line before the accepted
-      // request wrote its line, and the 431 wrote none.
-      await waitForAudit(3, audited);
-      assert.deepEqual(audited().map((a) => a.action), ["auth_failed", "auth_failed", "task_accepted"]);
-      for (const line of audited().slice(0, 2)) {
-        assert.deepEqual(line.details, { status: 400, reason: "repeated_header" });
-      }
-    }, dir);
-  } finally {
-    removeTempDir(top);
-  }
-});
 
 test("an agent card file that is not JSON or is missing, for handler.ts and for a build that is not one directory below the example, exits with one line naming the file", async () => {
   const { top, dir } = exampleCopy((source) => source);
