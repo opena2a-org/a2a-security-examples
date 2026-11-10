@@ -13,13 +13,40 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { schemaErrors } from "./a2a-schema.mjs";
-import { attackTable, bodyLimits, limits, maxHeaderLines, rateLimit } from "./handler-attack-table.mjs";
+import { attackTable, bodyLimits, limits, nodeHeaderLines, rateLimit } from "./handler-attack-table.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const example = join(root, "examples/validated-task-handler");
 const tsx = join(example, "node_modules/tsx/dist/cli.mjs");
 const card = JSON.parse(readFileSync(join(root, "examples/secure-agent-card/agent-card.json"), "utf8"));
 const handlerSource = readFileSync(join(example, "handler.ts"), "utf8");
+const engines = JSON.parse(readFileSync(join(example, "package.json"), "utf8")).engines?.node;
+
+// Whether range, an engines range of alternatives joined by ||, each ^X.Y.Z
+// (X.Y.Z or a later release of major X) or >=X.Y.Z, admits version, as
+// process.versions.node gives one. A range of another form throws, so that an
+// engines field this function cannot read fails the run instead of skipping
+// rows.
+function admits(range, version) {
+  const release = version.split(".").map(Number);
+  const alternatives = range.split("||").map((alternative) => {
+    const match = alternative.trim().match(/^(\^|>=)(\d+)\.(\d+)\.(\d+)$/);
+    if (!match) throw new Error(`the engines range ${JSON.stringify(range)} has ${JSON.stringify(alternative.trim())}, which is neither ^X.Y.Z nor >=X.Y.Z`);
+    return { sameMajor: match[1] === "^", floor: match.slice(2).map(Number) };
+  });
+  return alternatives.some(({ sameMajor, floor }) => {
+    const index = release.findIndex((part, i) => part !== floor[i]);
+    const atOrAbove = index === -1 || release[index] > floor[index];
+    return atOrAbove && (!sameMajor || release[0] === floor[0]);
+  });
+}
+
+// Why a row is skipped on this release, or false: a row Node.js answers itself
+// runs only on a release the example's engines field admits.
+function skipReason(row) {
+  if (row.answeredBy !== "node" || admits(engines, process.versions.node)) return false;
+  return `Node.js ${process.versions.node} is outside the example's engines range (${engines}); the row expects only a release in it to answer this request before any handler runs`;
+}
 
 // The number a line of handler.ts matching pattern holds.
 function handlerNumber(pattern) {
@@ -36,9 +63,63 @@ test("the limits the table gives are those handler.ts sets", () => {
   assert.equal(limits.fileBytesChars, handlerNumber(/bytes: z\.string\(\)\.max\((\d+)\)/));
   assert.ok(handlerSource.includes("content: TextPartSchema.shape.text,"), "the content of an agent message has the bounds of a text part");
   assert.equal(limits.agentMessageChars, limits.textChars);
-  assert.equal(bodyLimits["/"], handlerNumber(/express\.json\(\{ limit: "(\d+)mb" \}\)/) * 1024 * 1024);
-  assert.equal(bodyLimits["/a2a/message"], handlerNumber(/express\.json\(\{ limit: "(\d+)kb" \}\)/) * 1024);
-  assert.equal(maxHeaderLines, handlerNumber(/const maxHeaderLines = (\d+);/));
+  assert.equal(bodyLimits["/"], handlerNumber(/const parseJson = express\.json\(\{ limit: "(\d+)mb", inflate: false, type: "application\/json" \}\);/) * 1024 * 1024);
+  assert.equal(bodyLimits["/a2a/message"], handlerNumber(/const parseAgentMessageJson = express\.json\(\{ limit: "(\d+)kb", inflate: false, type: "application\/json" \}\);/) * 1024);
+});
+
+test("handler.ts leaves the header line limit to Node.js: it sets no maxHeadersCount and reads no rawHeaders", () => {
+  assert.doesNotMatch(handlerSource, /maxHeadersCount/, "handler.ts sets no limit on the header lines Node.js reads");
+  assert.doesNotMatch(handlerSource, /rawHeaders/, "handler.ts counts no header lines of its own");
+  assert.match(handlerSource, /req\.headersDistinct\.authorization/, "handler.ts reads the value of each Authorization header line from req.headersDistinct");
+});
+
+test("handler.ts leaves body transport to the parser: each express.json parser sets limit, inflate and type, and no branch of its own answers a timed-out, closed or compressed request", () => {
+  const parsers = [...handlerSource.matchAll(/express\.json\((.*)\)/g)].map((match) => match[1]);
+  assert.equal(parsers.length, 3, "handler.ts has three JSON parsers");
+  for (const options of parsers) {
+    assert.match(
+      options,
+      /^\{ limit: "\d+(?:mb|kb)", inflate: false, type: (?:"application\/json"|\["application\/json", "application\/a2a\+json"\]) \}$/,
+      `the parser express.json(${options}) sets limit, inflate false and type, and nothing else`
+    );
+  }
+  assert.doesNotMatch(handlerSource, /\b408\b|ERR_HTTP_REQUEST_TIMEOUT|socket\.errored|requestTimedOut/, "handler.ts has no branch for a request Node.js has timed out");
+  assert.doesNotMatch(handlerSource, /\bZ_|inflate\.failed|rejectionReason/, "handler.ts maps no zlib error of its own");
+  assert.doesNotMatch(handlerSource, /aborted|closes the connection|stalls/, "handler.ts has no branch for a connection closed before the whole body arrives");
+});
+
+test("handler.ts reads PORT in lines of its own, not in a parsePort function, and keeps the line it exits with for a value that is not a port", () => {
+  assert.doesNotMatch(handlerSource, /parsePort/, "handler.ts has no parsePort function");
+  assert.match(handlerSource, /PORT must be a number from 1 to 65535/, "handler.ts keeps the line that names PORT");
+});
+
+// Releases measured on 2026-11-09 with a node:http server on 127.0.0.1 that
+// was sent requests of 999, 1,000, 1,001, 1,100 and 1,104 header lines, the
+// last with an Authorization header first and another after 1,100 other
+// lines. Each passed the requests of 999 and 1,000 lines on to its handler
+// with every line. Those in passOn also passed the longer requests on, without
+// their lines past the 1,000th (20.x: past the 1,023rd), the second
+// Authorization header among them; those in answer431 answered each of them
+// with a bare 431 before the handler ran.
+const measured = {
+  passOn: ["20.18.3", "20.19.0", "20.20.0", "24.13.1", "24.14.0", "24.14.1", "24.15.0", "24.16.0", "24.17.0", "24.18.0"],
+  answer431: ["22.23.3", "24.18.1", "24.19.0", "24.20.0", "24.21.0", "24.22.0", "24.22.1", "26.12.1", "26.13.0"],
+};
+
+test("the engines field of the example's package.json admits each release measured to answer more than 1,000 header lines with 431, and none measured to pass them on", () => {
+  assert.equal(typeof engines, "string", "examples/validated-task-handler/package.json sets engines.node");
+  for (const version of measured.answer431) assert.ok(admits(engines, version), `${engines} admits Node.js ${version}`);
+  for (const version of measured.passOn) assert.ok(!admits(engines, version), `${engines} does not admit Node.js ${version}`);
+  assert.equal(nodeHeaderLines, 1000, "the rows send requests of 1,000 header lines and of more, as the measured requests were");
+});
+
+test("admits reads ^X.Y.Z and >=X.Y.Z alternatives joined by || and throws for any other form", () => {
+  const range = "^22.23.3 || >=26.12.1";
+  for (const version of ["22.23.3", "22.24.0", "26.12.1", "26.13.0", "27.0.0"]) assert.ok(admits(range, version), `${range} admits ${version}`);
+  for (const version of ["20.20.0", "22.23.2", "23.0.0", "24.18.1", "26.12.0"]) assert.ok(!admits(range, version), `${range} does not admit ${version}`);
+  for (const other of [">=22", "~22.23.3", "22.x", "^22.23.3 || 24"]) {
+    assert.throws(() => admits(other, "22.23.3"), /is neither \^X\.Y\.Z nor >=X\.Y\.Z/, `${other} is not read`);
+  }
 });
 
 test("every row has a tag, a step, a name of its own, a request and the status, code and audit lines it expects", () => {
@@ -46,6 +127,7 @@ test("every row has a tag, a step, a name of its own, a request and the status, 
   for (const row of attackTable) {
     assert.ok(["contract", "transport"].includes(row.tag), `${row.name} is tagged contract or transport`);
     assert.ok(row.step === null || [1, 2, 3, 4, 5, 6].includes(row.step), `${row.name} names a step of docs/input-validation.md or null`);
+    assert.ok(row.answeredBy === undefined || (row.answeredBy === "node" && row.step === null), `${row.name} is answered by the handler, or by Node.js with no step`);
     assert.ok(typeof row.name === "string" && row.name.length > 0 && !names.has(row.name), `${row.name} is a name no other row has`);
     names.add(row.name);
     assert.equal(typeof row.request, "object", `${row.name} has a request`);
@@ -139,28 +221,6 @@ if (process.platform !== "win32") {
   }
 }
 
-// A CommonJS file that gives the server Node.js creates a request timeout of
-// ms milliseconds, a headers timeout below it, and a short interval between
-// the checks that find a connection whose timeout has expired, in place of
-// Node's 300 seconds, 60 seconds and 30 seconds.
-function timeoutPreload(ms) {
-  return `const http = require("node:http");
-const createServer = http.createServer;
-http.createServer = function (...args) {
-  const options = typeof args[0] === "function" ? {} : args.shift();
-  return createServer({ ...options, connectionsCheckingInterval: 100, headersTimeout: ${Math.ceil(ms / 2)}, requestTimeout: ${ms} }, ...args);
-};
-`;
-}
-
-// NODE_OPTIONS that keep the existing value and load file before the example
-// starts. NODE_OPTIONS is split on spaces, so the path is quoted, and inside
-// quotes a backslash escapes the next character.
-function requireOptions(file) {
-  const quoted = `"${file.replace(/[\\"]/g, "\\$&")}"`;
-  return [process.env.NODE_OPTIONS, `--require=${quoted}`].filter(Boolean).join(" ");
-}
-
 // A copy of the example in a temporary directory, with the secure-agent-card
 // directory beside it as in the repository and the example's node_modules
 // linked in, whose processTask throws. Resolves with the temporary directory,
@@ -189,11 +249,11 @@ function faultCopy() {
   return { top, dir };
 }
 
-// Start the example on a free port, with the server options a row asks for,
-// and resolve with its port and the readers of its log once it is listening.
-// A port another process takes between the pick and the listen is picked
-// again, three times at most.
-async function startServer({ requestTimeout, fault } = {}) {
+// Start the example on a free port, or the copy a row asks for, and resolve
+// with its port and the readers of its log once it is listening. A port
+// another process takes between the pick and the listen is picked again,
+// three times at most.
+async function startServer({ fault } = {}) {
   assert.ok(existsSync(tsx), "run npm ci in examples/validated-task-handler first");
   const dirs = [];
   let cwd = example;
@@ -204,13 +264,6 @@ async function startServer({ requestTimeout, fault } = {}) {
   }
   const env = { ...process.env };
   delete env.AGENT_URL;
-  if (requestTimeout !== undefined) {
-    const dir = makeTempDir("a2a-attack-table-preload-");
-    dirs.push(dir);
-    const file = join(dir, "preload.cjs");
-    writeFileSync(file, timeoutPreload(requestTimeout));
-    env.NODE_OPTIONS = requireOptions(file);
-  }
   const cleanup = () => {
     for (const dir of dirs) removeTempDir(dir);
   };
@@ -285,22 +338,40 @@ async function withServer(options, fn) {
 }
 
 // The body of a reply sent with Transfer-Encoding: chunked, with the chunks
-// joined.
+// joined. Throws, naming the byte of the body it stopped at, for a chunk size
+// line that is not hexadecimal, for chunk data not followed by CRLF, and for a
+// body that ends before the empty line after its last chunk and trailer fields,
+// as a reply cut short does. Every pass of either loop throws, returns or
+// advances the offset it reads from, so neither loop runs without end.
 function dechunk(body) {
   const chunks = [];
   let at = 0;
   for (;;) {
     const lineEnd = body.indexOf("\r\n", at);
-    const size = parseInt(body.subarray(at, lineEnd).toString("latin1"), 16);
+    if (lineEnd === -1) throw new Error(`the chunked body ends at byte ${body.length}, before the CRLF that ends the chunk size line at byte ${at}`);
+    // The size in hexadecimal digits, then any chunk extensions after a semicolon.
+    const hex = /^([0-9a-f]+)(?:[ \t]*;.*)?$/i.exec(body.toString("latin1", at, lineEnd))?.[1];
+    if (hex === undefined) throw new Error(`the chunk size line at byte ${at} is not a hexadecimal size`);
+    const size = parseInt(hex, 16);
+    at = lineEnd + 2;
     if (size === 0) break;
-    chunks.push(body.subarray(lineEnd + 2, lineEnd + 2 + size));
-    at = lineEnd + 2 + size + 2;
+    if (body.length < at + size + 2) throw new Error(`the chunked body ends at byte ${body.length}, inside the ${size} bytes of chunk data at byte ${at} and the CRLF after them`);
+    if (body.toString("latin1", at + size, at + size + 2) !== "\r\n") throw new Error(`the ${size} bytes of chunk data at byte ${at} are not followed by CRLF`);
+    chunks.push(body.subarray(at, at + size));
+    at += size + 2;
   }
-  return Buffer.concat(chunks);
+  // The trailer field lines, if any, and the empty line that ends the body.
+  for (;;) {
+    const lineEnd = body.indexOf("\r\n", at);
+    if (lineEnd === -1) throw new Error(`the chunked body ends at byte ${body.length}, before the CRLF that ends it`);
+    if (lineEnd === at) return Buffer.concat(chunks);
+    at = lineEnd + 2;
+  }
 }
 
 // The status, header lines and body of the reply in raw, as the server wrote
-// them. An empty raw is a connection closed with no reply.
+// them. An empty raw is a connection closed with no reply. Throws for a
+// chunked body dechunk cannot read.
 function parseReply(raw) {
   if (raw.length === 0) return { status: undefined, headers: [], body: "", raw: "" };
   const end = raw.indexOf("\r\n\r\n");
@@ -317,7 +388,7 @@ function parseReply(raw) {
 // closed. The header lines are written as Latin-1, as Node.js reads them, so a
 // header value outside ASCII reaches the handler as it is written here.
 function send(port, request) {
-  const { method = "POST", path = "/", authorization, contentType = "application/json", headers = [], declaredLength, closeAfter, awaitServer } = request;
+  const { method = "POST", path = "/", authorization, contentType = "application/json", headers = [] } = request;
   const body = typeof request.body === "function" ? request.body() : request.body;
   const payload = body === undefined ? undefined : Buffer.isBuffer(body) ? body : Buffer.from(typeof body === "string" ? body : JSON.stringify(body));
   const lines = [`${method} ${path} HTTP/1.1`, "Host: 127.0.0.1"];
@@ -325,7 +396,7 @@ function send(port, request) {
   for (const value of credentials) lines.push(`Authorization: ${value}`);
   if (payload !== undefined && contentType !== null) lines.push(`Content-Type: ${contentType}`);
   lines.push(...headers);
-  if (payload !== undefined) lines.push(`Content-Length: ${declaredLength ?? payload.length}`);
+  if (payload !== undefined) lines.push(`Content-Length: ${payload.length}`);
   lines.push("Connection: close", "", "");
   const head = Buffer.from(lines.join("\r\n"), "latin1");
   return new Promise((resolve, reject) => {
@@ -334,17 +405,26 @@ function send(port, request) {
     const socket = connect(port, "127.0.0.1", () => {
       socket.write(head);
       if (payload !== undefined) socket.write(payload);
-      if (closeAfter !== undefined) setTimeout(() => socket.end(), closeAfter);
     });
-    socket.setTimeout(awaitServer ? 15000 : 60000, () => socket.destroy(new Error("no reply within the time allowed")));
+    socket.setTimeout(60000, () => socket.destroy(new Error("no reply within the time allowed")));
     socket.on("data", (chunk) => chunks.push(chunk));
     // A server that answers before it has read the whole body may close the
     // connection while the body is still being written, which ends the write
     // with an error after the reply has arrived.
     socket.on("error", (err) => (failure = err));
     socket.on("close", () => {
-      if (chunks.length === 0 && failure) reject(failure);
-      else resolve(parseReply(Buffer.concat(chunks)));
+      if (chunks.length === 0 && failure) {
+        reject(failure);
+        return;
+      }
+      // When parseReply cannot read the reply, as for a chunked reply cut
+      // short, reject with the reply, so the row fails with it in its message.
+      const raw = Buffer.concat(chunks);
+      try {
+        resolve(parseReply(raw));
+      } catch (err) {
+        reject(new Error(`${err.message}, in the reply:\n${raw.toString("latin1")}`));
+      }
     });
   });
 }
@@ -361,40 +441,34 @@ async function checkRow(row, server) {
   const audited = server.audit;
   let seen = audited().length;
   if (request.repeat) {
-    const repeated = { ...request, ...request.repeated };
-    delete repeated.repeat;
-    delete repeated.repeated;
     for (let i = 1; i <= request.repeat; i++) {
-      const res = await send(server.port, repeated);
-      assert.equal(res.status, expect.repeatStatus ?? 200, `repeated request ${i} of ${request.repeat}:\n${res.raw}`);
+      const res = await send(server.port, request);
+      assert.equal(res.status, 200, `repeated request ${i} of ${request.repeat}:\n${res.raw}`);
     }
-    const written = request.repeat * (expect.repeatAudit ?? 1);
-    const lines = await waitForAudit(audited, seen + written);
-    assert.equal(lines.length, seen + written, `the ${request.repeat} repeated requests wrote ${written} audit lines:\n${server.log()}`);
+    const lines = await waitForAudit(audited, seen + request.repeat);
+    assert.equal(lines.length, seen + request.repeat, `the ${request.repeat} repeated requests wrote ${request.repeat} audit lines:\n${server.log()}`);
     seen = lines.length;
   }
   const res = await send(server.port, request);
-  if (!(expect.reply === "optional" && res.status === undefined)) {
-    assert.equal(res.status, expect.status, `the status, in the reply:\n${res.raw}`);
-    if (expect.body === "none") assert.equal(res.body, "", `a reply with no body:\n${res.raw}`);
-    if (expect.contentType) assert.match(contentTypeOf(res.headers) ?? "", expect.contentType, "the Content-Type of the reply");
-    for (const line of expect.headerLines ?? []) {
-      assert.ok(res.headers.includes(line), `the reply carries the header line ${line}:\n${res.headers.join("\n")}`);
+  assert.equal(res.status, expect.status, `the status, in the reply:\n${res.raw}`);
+  if (expect.body === "none") assert.equal(res.body, "", `a reply with no body:\n${res.raw}`);
+  if (expect.contentType) assert.match(contentTypeOf(res.headers) ?? "", expect.contentType, "the Content-Type of the reply");
+  for (const line of expect.headerLines ?? []) {
+    assert.ok(res.headers.includes(line), `the reply carries the header line ${line}:\n${res.headers.join("\n")}`);
+  }
+  if (expect.json !== undefined || expect.check || expect.code !== null || expect.v03) {
+    let parsed;
+    try {
+      parsed = JSON.parse(res.body);
+    } catch (err) {
+      throw new Error(`the body is not JSON (${err.message}):\n${res.raw}`);
     }
-    if (expect.json !== undefined || expect.check || expect.code !== null || expect.v03) {
-      let parsed;
-      try {
-        parsed = JSON.parse(res.body);
-      } catch (err) {
-        throw new Error(`the body is not JSON (${err.message}):\n${res.raw}`);
-      }
-      if (expect.json !== undefined) {
-        assert.deepEqual(parsed, typeof expect.json === "function" ? expect.json({ card, port: server.port }) : expect.json, "the body");
-      }
-      if (expect.check) assert.ok(expect.check(parsed), `the body is as the row expects:\n${res.body}`);
-      if (expect.code !== null) assert.equal(parsed.error?.code, expect.code, "the JSON-RPC code");
-      if (expect.v03) assert.deepEqual(schemaErrors(expect.v03, parsed), [], `the body validates against the A2A v0.3.0 ${expect.v03} schema`);
+    if (expect.json !== undefined) {
+      assert.deepEqual(parsed, typeof expect.json === "function" ? expect.json({ card, port: server.port }) : expect.json, "the body");
     }
+    if (expect.check) assert.ok(expect.check(parsed), `the body is as the row expects:\n${res.body}`);
+    if (expect.code !== null) assert.equal(parsed.error?.code, expect.code, "the JSON-RPC code");
+    if (expect.v03) assert.deepEqual(schemaErrors(expect.v03, parsed), [], `the body validates against the A2A v0.3.0 ${expect.v03} schema`);
   }
   if (expect.audit.length > 0) {
     const lines = (await waitForAudit(audited, seen + expect.audit.length)).slice(seen);
@@ -405,6 +479,49 @@ async function checkRow(row, server) {
     assert.equal(audited().length, seen, `the request wrote no audit line:\n${server.log()}`);
   }
 }
+
+test("dechunk joins the chunks of a chunked body, and throws for the body cut short at each byte before its end", () => {
+  // Two chunks, the last chunk and the CRLF that ends the body.
+  const body = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+  assert.equal(dechunk(Buffer.from(body, "latin1")).toString("latin1"), "hello world");
+  assert.equal(dechunk(Buffer.from("5;name=value\r\nhello\r\n0\r\nExpires: 0\r\n\r\n", "latin1")).toString("latin1"), "hello", "a chunk extension and a trailer field");
+  for (let length = 0; length < body.length; length++) {
+    assert.throws(() => dechunk(Buffer.from(body.slice(0, length), "latin1")), new RegExp(`^Error: the chunked body ends at byte ${length}, `), `the first ${length} bytes`);
+  }
+});
+
+test("dechunk throws for a chunk size line that is not hexadecimal and for chunk data not followed by CRLF", () => {
+  assert.throws(() => dechunk(Buffer.from("zz\r\nhello\r\n0\r\n\r\n", "latin1")), { message: "the chunk size line at byte 0 is not a hexadecimal size" });
+  assert.throws(() => dechunk(Buffer.from("5\r\nhello\r\n\r\n", "latin1")), { message: "the chunk size line at byte 10 is not a hexadecimal size" });
+  assert.throws(() => dechunk(Buffer.from("5\r\nhelloXX0\r\n\r\n", "latin1")), { message: "the 5 bytes of chunk data at byte 3 are not followed by CRLF" });
+});
+
+test("a row whose chunked reply is cut short fails with the reply in its message", async () => {
+  const reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n";
+  // A server that answers a request with reply once it has read the request's
+  // header lines, and then closes the connection.
+  const server = createServer((socket) => {
+    let request = "";
+    socket.on("data", (chunk) => {
+      const answered = request.includes("\r\n\r\n");
+      request += chunk.toString("latin1");
+      if (!answered && request.includes("\r\n\r\n")) socket.end(reply, "latin1");
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const row = { request: { method: "GET", path: "/" }, expect: { status: 200, code: null, audit: [] } };
+    const stub = { port: server.address().port, audit: () => [], log: () => "" };
+    await assert.rejects(checkRow(row, stub), {
+      message: `the chunked body ends at byte 10, before the CRLF that ends the chunk size line at byte 10, in the reply:\n${reply}`,
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
 
 // The requests a row sends, each of which the limiter counts.
 const cost = (row) => (row.request.repeat ?? 0) + 1;
@@ -432,14 +549,14 @@ for (const [i, rows] of batches.entries()) {
   test(`rows ${rows[0].name} to ${rows.at(-1).name} on server ${i + 1} of ${batches.length}`, async (t) => {
     await withServer({}, async (server) => {
       for (const row of rows) {
-        await t.test(`${row.tag}: ${row.name}`, () => checkRow(row, server));
+        await t.test(`${row.tag}: ${row.name}`, { skip: skipReason(row) }, () => checkRow(row, server));
       }
     });
   });
 }
 
 for (const row of ownServer) {
-  test(`${row.tag}: ${row.name}, on a server of its own`, async () => {
+  test(`${row.tag}: ${row.name}, on a server of its own`, { skip: skipReason(row) }, async () => {
     await withServer(row.server ?? {}, (server) => checkRow(row, server));
   });
 }

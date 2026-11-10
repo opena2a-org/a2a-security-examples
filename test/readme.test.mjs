@@ -228,7 +228,8 @@ test("the audit sentence names the handler's audit actions, including the one fo
   for (const action of actions) {
     assert.ok(sentence.includes(`\`${action}\``), `docs/validated-task-handler.md names the ${action} audit action`);
   }
-  assert.doesNotMatch(sentence, /^Every request/, "a 431 and a request for the agent card write no audit line");
+  assert.doesNotMatch(sentence, /^Every request/, "a request for the agent card writes no audit line");
+  assert.match(sentence, /Requests for the agent card, and requests Node\.js answers before any handler runs, write no audit line\./, "docs/validated-task-handler.md says which requests write no audit line");
   assert.doesNotMatch(sentence, /pass authentication/, "a request that fails authentication writes an audit line too");
   assert.match(sentence, /`auth_failed` for a request that fails authentication, with the status it gets and a reason but never the header or the token/, "docs/validated-task-handler.md says what the auth_failed line records and that it leaves out the token");
 });
@@ -709,8 +710,7 @@ test("the limiter options reader reads a last value that ends with a TypeScript 
 
 test("step 1 is the rate limit, which every request that reaches it counts toward before the handler authenticates it", () => {
   // test/validated-task-handler.test.mjs sends requests that fail
-  // authentication until the next request gets 429, and requests answered 431
-  // that the limiter does not count.
+  // authentication until the next request gets 429.
   const handler = readText("examples/validated-task-handler/handler.ts");
   assert.match(handler, /app\.post\("\/", rateLimit, authenticate, /, "handler.ts runs the rate limiter before authentication");
   const points = handler.match(/points: (\d+), \/\/ requests/);
@@ -721,8 +721,8 @@ test("step 1 is the rate limit, which every request that reaches it counts towar
   assert.deepEqual(limiterOptionKeys(handler), ["points", "duration"], "handler.ts creates the limiter with an options object of key: value pairs and comments, and gives it no option but points and duration");
   const step = inputValidationLines.find((l) => l.startsWith("1. "));
   assert.ok(step, "docs/input-validation.md lists a step 1");
-  assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: a request over the limit gets the error \`Too many requests\`. Every request that reaches the limiter counts, including one that then fails authentication; a request answered 431 for too many header lines (see step 2) is not counted.`), "README lists the rate limit as step 1 and says a request that fails authentication counts and one answered 431 does not");
-  assert.doesNotMatch(step, /Every request counts/, "step 1 does not say that every request counts, as one answered 431 never reaches the limiter");
+  assert.ok(step.startsWith(`1. Rate limit of ${points[1]} requests per minute per client IP: a request over the limit gets the error \`Too many requests\`. Every request that reaches the limiter counts, including one that then fails authentication.`), "README lists the rate limit as step 1 and says a request that fails authentication counts");
+  assert.doesNotMatch(step, /Every request counts/, "step 1 does not say that every request counts, as a request for the agent card never reaches the limiter");
   assert.ok(step.includes("The limiter counts a client's requests for 60 seconds from its first one and starts again with its first request after those 60 seconds have ended"), "step 1 says the 60 seconds start with a client's first request and the count starts again after they have ended");
 });
 
@@ -760,19 +760,6 @@ test("a checkout gets \"\\n\" line endings, and this file reads each file it che
     const line = source.slice(0, read.index).split("\n").length;
     assert.ok(read[1], `the read on line ${line} parses JSON, which allows "\\r\\n", or goes through readText`);
   }
-});
-
-test("step 2 puts the 431 for too many header lines before step 1, as the handler checks the header lines before the route that runs the limiter", () => {
-  // test/validated-task-handler.test.mjs sends more requests answered 431 than
-  // the limiter allows and then a request that is accepted.
-  const handler = readText("examples/validated-task-handler/handler.ts");
-  const headerLines = handler.indexOf("app.use(limitHeaderLines);");
-  const route = handler.indexOf('app.post("/", rateLimit, ');
-  assert.ok(headerLines >= 0 && route >= 0, "handler.ts registers limitHeaderLines and a POST / route that runs the limiter");
-  assert.ok(headerLines < route, "handler.ts registers limitHeaderLines before the POST / route that runs the limiter");
-  const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
-  const limit = Number(handler.match(/const maxHeaderLines = (\d+);/)[1]).toLocaleString("en-US");
-  assert.ok(step.includes(`Before step 1, a request with ${limit} or more header lines gets 431`), "step 2 says a request with too many header lines gets 431 before step 1");
 });
 
 test("the bearer token sentence names every token the handler rejects", () => {
@@ -962,10 +949,11 @@ test("step 2 says Bearer in any letter case and one or more spaces, and the hand
 
 test("step 2 gives the error More than one Authorization header for a request with more than one Authorization header, which the handler counts", () => {
   // req.headers holds the first Authorization line of a request and none of
-  // the later ones, so the handler can only see a second line in rawHeaders.
-  // test/validated-task-handler.test.mjs sends such requests.
+  // the later ones, so the handler reads each line's value from
+  // req.headersDistinct. test/validated-task-handler.test.mjs sends such
+  // requests.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  assert.match(handler, /req\.rawHeaders/, "handler.ts counts the Authorization header lines of a request");
+  assert.match(handler, /req\.headersDistinct\.authorization/, "handler.ts counts the Authorization header lines of a request");
   const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
   assert.match(step.split("; an invalid token ")[0], /a request that sends the header more than once gets the error `More than one Authorization header`/, "step 2 gives the error More than one Authorization header for a header sent more than once");
 });
@@ -975,7 +963,7 @@ test("step 2 gives the error More than one Authorization header to a header sent
   // so step 2 says which answer two such lines get.
   // test/validated-task-handler.test.mjs sends them.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const counted = handler.indexOf("authorizationLines(req) > 1");
+  const counted = handler.indexOf("(req.headersDistinct.authorization?.length ?? 0) > 1");
   const read = handler.indexOf("bearerScheme.test(authHeader)");
   assert.ok(counted !== -1 && read !== -1, "handler.ts counts the Authorization header lines and reads the scheme");
   assert.ok(counted < read, "handler.ts counts the Authorization header lines before it reads the scheme");
@@ -985,7 +973,7 @@ test("step 2 gives the error More than one Authorization header to a header sent
   assert.doesNotMatch(received(repeated[1]), bearerSchemePattern(), `handler.ts reads ${repeated[1]} as another scheme, which gets Authentication required when sent once`);
 });
 
-test("step 2 names the challenges the handler's authentication errors carry and the header line count at which it answers 431", () => {
+test("step 2 names the challenges the handler's authentication errors carry", () => {
   // test/validated-task-handler.test.mjs sends requests that get these answers.
   const handler = readText("examples/validated-task-handler/handler.ts");
   const step = inputValidationLines.find((l) => l.startsWith("2. Bearer authentication:"));
@@ -1008,12 +996,6 @@ test("step 2 names the challenges the handler's authentication errors carry and 
     step.includes(`${malformedErrors.join(" and ")} add the error code for a malformed request: \`WWW-Authenticate: ${challenge[1]}${malformed[1]}\``),
     "step 2 names the challenge for a malformed Authorization header and each error that carries it"
   );
-  const limit = handler.match(/const maxHeaderLines = (\d+);/);
-  assert.ok(limit, "handler.ts sets the number of header lines at which a request gets 431");
-  const count = Number(limit[1]).toLocaleString("en-US");
-  assert.ok(step.includes(`a request with ${count} or more header lines gets 431`), `step 2 gives 431 for ${count} or more header lines`);
-  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
-  assert.match(sentence, /Requests rejected with HTTP 431 and requests for the agent card write no audit line\./, "docs/validated-task-handler.md says a 431 writes no audit line");
 });
 
 // The characters the pattern takes in a bearer token, of the 256 a header byte
@@ -1054,30 +1036,30 @@ test("the bearer token sentence and step 2 name the characters the handler takes
   }
 });
 
-test("the audit sentence names a body that is not a JSON object or array, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {
+test("the audit sentence names a body that is not a JSON object or array, the size limit, a Content-Encoding other than identity and a charset the parser does not read", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
   const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
   const reasons = [
     "not a JSON object or array",
     `over ${limit[1]} MB`,
-    "unsupported encoding or charset",
-    "compressed body that does not inflate",
-    "connection closed before the whole body arrives",
-    "at most a bare HTTP 400 with no body",
+    "sent with a Content-Encoding other than identity",
+    "in a charset the parser does not read",
   ];
   for (const reason of reasons) {
     assert.ok(rejected.includes(reason), `docs/validated-task-handler.md says request_rejected covers a body ${reason}`);
   }
 });
 
-test("the audit sentence limits the bare 400 to a client that closes the connection and names the 408 for a stalled upload", () => {
-  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
-  const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
-  assert.match(rejected, /at most a bare HTTP 400 with no body when the client closes it/);
-  assert.match(rejected, /a bare HTTP 408 with no body when the upload stalls until Node's request timeout/);
+test("README and its docs pages describe no reply of the handler's own to a connection closed before the whole body arrives or to an upload that stalls", () => {
+  // handler.ts has no branch for either: Node.js and the parser answer them.
+  // A sentence on a bare 400 or 408, or on Node's request timeout, would
+  // describe behaviour the example does not have.
+  for (const text of [readme, ...docsPages.map(readText)]) {
+    assert.doesNotMatch(text, /\bbare (?:HTTP )?\d{3}\b|\bbare reply\b|\bstall(?:s|ed)\b|request timeout|closes the connection|connection closed|closed connection/);
+  }
 });
 
 test("README and its docs pages do not describe the strict JSON parser as accepting any valid JSON", () => {
@@ -1104,9 +1086,10 @@ test("step 3 limits the Invalid JSON reply to a non-empty body sent as applicati
 
 test("step 3 says a body the parser cannot read gets Invalid request body, not Invalid JSON, whatever it contains", () => {
   // Reading the body comes before parsing it, so a body such as 123 over the
-  // size limit or in an unsupported charset never reaches the Invalid JSON reply.
+  // size limit or in a charset the parser does not read never reaches the
+  // Invalid JSON reply.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const step = inputValidationLines.find((l) => l.startsWith("3. JSON parsing:"));
   assert.ok(step, "docs/input-validation.md lists JSON parsing as step 3");
@@ -1114,10 +1097,8 @@ test("step 3 says a body the parser cannot read gets Invalid request body, not I
   assert.match(step, /the parser cannot read[^.]*whatever it contains/, "step 3 says the reply does not depend on what the body contains");
   const unread = step.split("with the JSON-RPC error `Invalid request body`: ")[1]?.split(". ")[0] ?? "";
   assert.ok(unread.startsWith(`a body over ${limit[1]} MB `), "step 3 gives Invalid request body for a body over the size limit");
-  assert.match(unread, /, one with an unsupported encoding or charset,/, "step 3 gives Invalid request body for an unsupported encoding or charset");
-  assert.match(unread, /, and a compressed body that does not inflate$/, "step 3 gives Invalid request body for a compressed body that does not inflate");
-  assert.match(step, /A client that closes the connection before the whole body arrives gets at most a bare reply with no body/, "step 3 limits the bare reply that may not arrive to a client that closes the connection");
-  assert.match(step, /an upload that stalls until Node's request timeout gets a bare reply with no body/, "step 3 names the bare reply for a stalled upload");
+  assert.match(unread, /, one sent with a `Content-Encoding` other than `identity`, as the parsers are set not to inflate a compressed body,/, "step 3 gives Invalid request body for a compressed body, which the parsers do not inflate");
+  assert.match(unread, /, or one in a charset the parser does not read$/, "step 3 gives Invalid request body for a charset the parser does not read");
 });
 
 test("step 3 says the body limit leaves room for the file parts step 4 allows when their bytes are written without JSON escapes", () => {
@@ -1125,7 +1106,7 @@ test("step 3 says the body limit leaves room for the file parts step 4 allows wh
   // message the schema accepts whose file bytes are written that way can be
   // over the limit.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   const parts = handler.match(/parts: z\.array\(PartSchema\)\.min\(1\)\.max\((\d+)\)/);
   const bytes = handler.match(/bytes: z\.string\(\)\.max\((\d+)\)/);
   assert.ok(limit && parts && bytes, "handler.ts sets the JSON body limit, the most parts and the longest bytes");
@@ -1142,9 +1123,9 @@ test("step 3 says the body limit leaves room for the file parts step 4 allows wh
 
 test("the audit sentence and the attack page give the body limit of POST /a2a/message as handler.ts sets it, with the characters the route reads and the bytes they take", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
-  const routeLimit = handler.match(/const (\w+) = express\.json\(\{ limit: "(\d+)kb" \}\);/);
+  const routeLimit = handler.match(/const (\w+) = express\.json\(\{ limit: "(\d+)kb", inflate: false, type: "application\/json" \}\);/);
   assert.ok(routeLimit, "handler.ts sets a second JSON body limit in kilobytes");
   assert.ok(handler.includes(`app.post("/a2a/message", rateLimit, authenticate, ${routeLimit[1]}, `), "POST /a2a/message uses the parser with the second limit");
   const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
@@ -1551,8 +1532,8 @@ test("README names the command that runs the tests", () => {
 });
 
 test("README states the Node.js version npm test needs, as the root package.json engines field sets it", () => {
-  // The quick start runs on any Node.js 18, but Node.js 18.0 has no --test
-  // option and no after() export from node:test, so npm test needs a later 18.
+  // Node.js 18.0 has no --test option and no after() export from node:test,
+  // so npm test needs a later 18.
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const floor = pkg.engines?.node?.match(/^>=(\d+)\.(\d+)(?:\.\d+)?$/);
   assert.ok(floor, "the root package.json sets engines.node to >=X.Y");
@@ -1562,6 +1543,18 @@ test("README states the Node.js version npm test needs, as the root package.json
     sentence.includes(`Node.js ${floor[1]}.${floor[2]} or later`),
     `README says npm test needs Node.js ${floor[1]}.${floor[2]} or later`
   );
+});
+
+test("the quick start and docs/validated-task-handler.md name the Node.js releases the example's engines field admits", () => {
+  const pkg = JSON.parse(readFileSync(join(root, "examples/validated-task-handler/package.json"), "utf8"));
+  const alternatives = (pkg.engines?.node ?? "").split("||").map((alternative) => alternative.trim().match(/^(\^|>=)((\d+)\.\d+\.\d+)$/));
+  assert.ok(alternatives.every(Boolean), "the example's package.json sets engines.node to ^X.Y.Z and >=X.Y.Z alternatives joined by ||");
+  // One, two or more items, as in "a", "a or b" and "a, b, or c".
+  const listOf = (items, word) => (items.length < 3 ? items.join(` ${word} `) : `${items.slice(0, -1).join(", ")}, ${word} ${items.at(-1)}`);
+  const quickStart = alternatives.map(([, op, release, major]) => (op === "^" ? `${release} or a later ${major} release` : `${release} or later`));
+  assert.ok(readme.includes(`Requires Node.js ${listOf(quickStart, "or")} ([why those releases](docs/validated-task-handler.md#nodejs-releases)).`), "the quick start names the releases the engines field admits");
+  const page = alternatives.map(([, op, release, major]) => (op === "^" ? `${release} and the later ${major} releases` : `${release} and later`));
+  assert.ok(handlerPage.includes(`\n## Node.js releases\n\nThe example's \`package.json\` admits Node.js ${listOf(page, "and")}.`), "docs/validated-task-handler.md names the releases the engines field admits");
 });
 
 // The Node.js 18 minor release that added each name a test file imports from

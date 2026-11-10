@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "A2A task handler with input validation and security controls",
   "main": "dist/handler.js",
+  "engines": {
+    "node": "^22.23.3 || ^24.18.1 || >=26.12.1"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/handler.js",
