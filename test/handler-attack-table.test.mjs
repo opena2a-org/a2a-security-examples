@@ -285,22 +285,40 @@ async function withServer(options, fn) {
 }
 
 // The body of a reply sent with Transfer-Encoding: chunked, with the chunks
-// joined.
+// joined. Throws, naming the byte of the body it stopped at, for a chunk size
+// line that is not hexadecimal, for chunk data not followed by CRLF, and for a
+// body that ends before the empty line after its last chunk and trailer fields,
+// as a reply cut short does. Every pass of either loop throws, returns or
+// advances the offset it reads from, so neither loop runs without end.
 function dechunk(body) {
   const chunks = [];
   let at = 0;
   for (;;) {
     const lineEnd = body.indexOf("\r\n", at);
-    const size = parseInt(body.subarray(at, lineEnd).toString("latin1"), 16);
+    if (lineEnd === -1) throw new Error(`the chunked body ends at byte ${body.length}, before the CRLF that ends the chunk size line at byte ${at}`);
+    // The size in hexadecimal digits, then any chunk extensions after a semicolon.
+    const hex = /^([0-9a-f]+)(?:[ \t]*;.*)?$/i.exec(body.toString("latin1", at, lineEnd))?.[1];
+    if (hex === undefined) throw new Error(`the chunk size line at byte ${at} is not a hexadecimal size`);
+    const size = parseInt(hex, 16);
+    at = lineEnd + 2;
     if (size === 0) break;
-    chunks.push(body.subarray(lineEnd + 2, lineEnd + 2 + size));
-    at = lineEnd + 2 + size + 2;
+    if (body.length < at + size + 2) throw new Error(`the chunked body ends at byte ${body.length}, inside the ${size} bytes of chunk data at byte ${at} and the CRLF after them`);
+    if (body.toString("latin1", at + size, at + size + 2) !== "\r\n") throw new Error(`the ${size} bytes of chunk data at byte ${at} are not followed by CRLF`);
+    chunks.push(body.subarray(at, at + size));
+    at += size + 2;
   }
-  return Buffer.concat(chunks);
+  // The trailer field lines, if any, and the empty line that ends the body.
+  for (;;) {
+    const lineEnd = body.indexOf("\r\n", at);
+    if (lineEnd === -1) throw new Error(`the chunked body ends at byte ${body.length}, before the CRLF that ends it`);
+    if (lineEnd === at) return Buffer.concat(chunks);
+    at = lineEnd + 2;
+  }
 }
 
 // The status, header lines and body of the reply in raw, as the server wrote
-// them. An empty raw is a connection closed with no reply.
+// them. An empty raw is a connection closed with no reply. Throws for a
+// chunked body dechunk cannot read.
 function parseReply(raw) {
   if (raw.length === 0) return { status: undefined, headers: [], body: "", raw: "" };
   const end = raw.indexOf("\r\n\r\n");
@@ -343,8 +361,18 @@ function send(port, request) {
     // with an error after the reply has arrived.
     socket.on("error", (err) => (failure = err));
     socket.on("close", () => {
-      if (chunks.length === 0 && failure) reject(failure);
-      else resolve(parseReply(Buffer.concat(chunks)));
+      if (chunks.length === 0 && failure) {
+        reject(failure);
+        return;
+      }
+      // When parseReply cannot read the reply, as for a chunked reply cut
+      // short, reject with the reply, so the row fails with it in its message.
+      const raw = Buffer.concat(chunks);
+      try {
+        resolve(parseReply(raw));
+      } catch (err) {
+        reject(new Error(`${err.message}, in the reply:\n${raw.toString("latin1")}`));
+      }
     });
   });
 }
@@ -405,6 +433,49 @@ async function checkRow(row, server) {
     assert.equal(audited().length, seen, `the request wrote no audit line:\n${server.log()}`);
   }
 }
+
+test("dechunk joins the chunks of a chunked body, and throws for the body cut short at each byte before its end", () => {
+  // Two chunks, the last chunk and the CRLF that ends the body.
+  const body = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+  assert.equal(dechunk(Buffer.from(body, "latin1")).toString("latin1"), "hello world");
+  assert.equal(dechunk(Buffer.from("5;name=value\r\nhello\r\n0\r\nExpires: 0\r\n\r\n", "latin1")).toString("latin1"), "hello", "a chunk extension and a trailer field");
+  for (let length = 0; length < body.length; length++) {
+    assert.throws(() => dechunk(Buffer.from(body.slice(0, length), "latin1")), new RegExp(`^Error: the chunked body ends at byte ${length}, `), `the first ${length} bytes`);
+  }
+});
+
+test("dechunk throws for a chunk size line that is not hexadecimal and for chunk data not followed by CRLF", () => {
+  assert.throws(() => dechunk(Buffer.from("zz\r\nhello\r\n0\r\n\r\n", "latin1")), { message: "the chunk size line at byte 0 is not a hexadecimal size" });
+  assert.throws(() => dechunk(Buffer.from("5\r\nhello\r\n\r\n", "latin1")), { message: "the chunk size line at byte 10 is not a hexadecimal size" });
+  assert.throws(() => dechunk(Buffer.from("5\r\nhelloXX0\r\n\r\n", "latin1")), { message: "the 5 bytes of chunk data at byte 3 are not followed by CRLF" });
+});
+
+test("a row whose chunked reply is cut short fails with the reply in its message", async () => {
+  const reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n";
+  // A server that answers a request with reply once it has read the request's
+  // header lines, and then closes the connection.
+  const server = createServer((socket) => {
+    let request = "";
+    socket.on("data", (chunk) => {
+      const answered = request.includes("\r\n\r\n");
+      request += chunk.toString("latin1");
+      if (!answered && request.includes("\r\n\r\n")) socket.end(reply, "latin1");
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const row = { request: { method: "GET", path: "/" }, expect: { status: 200, code: null, audit: [] } };
+    const stub = { port: server.address().port, audit: () => [], log: () => "" };
+    await assert.rejects(checkRow(row, stub), {
+      message: `the chunked body ends at byte 10, before the CRLF that ends the chunk size line at byte 10, in the reply:\n${reply}`,
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
 
 // The requests a row sends, each of which the limiter counts.
 const cost = (row) => (row.request.repeat ?? 0) + 1;
