@@ -1036,30 +1036,30 @@ test("the bearer token sentence and step 2 name the characters the handler takes
   }
 });
 
-test("the audit sentence names a body that is not a JSON object or array, the size limit, an unsupported encoding or charset, a compressed body that does not inflate, and a body cut off by a closed connection", () => {
+test("the audit sentence names a body that is not a JSON object or array, the size limit, a Content-Encoding other than identity and a charset the parser does not read", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
   const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
   const reasons = [
     "not a JSON object or array",
     `over ${limit[1]} MB`,
-    "unsupported encoding or charset",
-    "compressed body that does not inflate",
-    "connection closed before the whole body arrives",
-    "at most a bare HTTP 400 with no body",
+    "sent with a Content-Encoding other than identity",
+    "in a charset the parser does not read",
   ];
   for (const reason of reasons) {
     assert.ok(rejected.includes(reason), `docs/validated-task-handler.md says request_rejected covers a body ${reason}`);
   }
 });
 
-test("the audit sentence limits the bare 400 to a client that closes the connection and names the 408 for a stalled upload", () => {
-  const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));
-  const rejected = sentence.match(/`request_rejected` for ([^`]*)/)?.[1] ?? "";
-  assert.match(rejected, /at most a bare HTTP 400 with no body when the client closes it/);
-  assert.match(rejected, /a bare HTTP 408 with no body when the upload stalls until Node's request timeout/);
+test("README and its docs pages describe no reply of the handler's own to a connection closed before the whole body arrives or to an upload that stalls", () => {
+  // handler.ts has no branch for either: Node.js and the parser answer them.
+  // A sentence on a bare 400 or 408, or on Node's request timeout, would
+  // describe behaviour the example does not have.
+  for (const text of [readme, ...docsPages.map(readText)]) {
+    assert.doesNotMatch(text, /\bbare (?:HTTP )?\d{3}\b|\bbare reply\b|\bstall(?:s|ed)\b|request timeout|closes the connection|connection closed|closed connection/);
+  }
 });
 
 test("README and its docs pages do not describe the strict JSON parser as accepting any valid JSON", () => {
@@ -1086,9 +1086,10 @@ test("step 3 limits the Invalid JSON reply to a non-empty body sent as applicati
 
 test("step 3 says a body the parser cannot read gets Invalid request body, not Invalid JSON, whatever it contains", () => {
   // Reading the body comes before parsing it, so a body such as 123 over the
-  // size limit or in an unsupported charset never reaches the Invalid JSON reply.
+  // size limit or in a charset the parser does not read never reaches the
+  // Invalid JSON reply.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
   const step = inputValidationLines.find((l) => l.startsWith("3. JSON parsing:"));
   assert.ok(step, "docs/input-validation.md lists JSON parsing as step 3");
@@ -1096,10 +1097,8 @@ test("step 3 says a body the parser cannot read gets Invalid request body, not I
   assert.match(step, /the parser cannot read[^.]*whatever it contains/, "step 3 says the reply does not depend on what the body contains");
   const unread = step.split("with the JSON-RPC error `Invalid request body`: ")[1]?.split(". ")[0] ?? "";
   assert.ok(unread.startsWith(`a body over ${limit[1]} MB `), "step 3 gives Invalid request body for a body over the size limit");
-  assert.match(unread, /, one with an unsupported encoding or charset,/, "step 3 gives Invalid request body for an unsupported encoding or charset");
-  assert.match(unread, /, and a compressed body that does not inflate$/, "step 3 gives Invalid request body for a compressed body that does not inflate");
-  assert.match(step, /A client that closes the connection before the whole body arrives gets at most a bare reply with no body/, "step 3 limits the bare reply that may not arrive to a client that closes the connection");
-  assert.match(step, /an upload that stalls until Node's request timeout gets a bare reply with no body/, "step 3 names the bare reply for a stalled upload");
+  assert.match(unread, /, one sent with a `Content-Encoding` other than `identity`, as the parsers are set not to inflate a compressed body,/, "step 3 gives Invalid request body for a compressed body, which the parsers do not inflate");
+  assert.match(unread, /, or one in a charset the parser does not read$/, "step 3 gives Invalid request body for a charset the parser does not read");
 });
 
 test("step 3 says the body limit leaves room for the file parts step 4 allows when their bytes are written without JSON escapes", () => {
@@ -1107,7 +1106,7 @@ test("step 3 says the body limit leaves room for the file parts step 4 allows wh
   // message the schema accepts whose file bytes are written that way can be
   // over the limit.
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   const parts = handler.match(/parts: z\.array\(PartSchema\)\.min\(1\)\.max\((\d+)\)/);
   const bytes = handler.match(/bytes: z\.string\(\)\.max\((\d+)\)/);
   assert.ok(limit && parts && bytes, "handler.ts sets the JSON body limit, the most parts and the longest bytes");
@@ -1124,9 +1123,9 @@ test("step 3 says the body limit leaves room for the file parts step 4 allows wh
 
 test("the audit sentence and the attack page give the body limit of POST /a2a/message as handler.ts sets it, with the characters the route reads and the bytes they take", () => {
   const handler = readText("examples/validated-task-handler/handler.ts");
-  const limit = handler.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/);
+  const limit = handler.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /);
   assert.ok(limit, "handler.ts sets the JSON body limit in megabytes");
-  const routeLimit = handler.match(/const (\w+) = express\.json\(\{ limit: "(\d+)kb" \}\);/);
+  const routeLimit = handler.match(/const (\w+) = express\.json\(\{ limit: "(\d+)kb", inflate: false, type: "application\/json" \}\);/);
   assert.ok(routeLimit, "handler.ts sets a second JSON body limit in kilobytes");
   assert.ok(handler.includes(`app.post("/a2a/message", rateLimit, authenticate, ${routeLimit[1]}, `), "POST /a2a/message uses the parser with the second limit");
   const sentence = handlerPageLines.find((l) => /\baudit lines?\b/.test(l) && !l.startsWith("|"));

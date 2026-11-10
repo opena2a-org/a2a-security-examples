@@ -8,8 +8,9 @@
 //
 // A row has:
 //   tag: "contract" for behaviour the example teaches, which a rebuild keeps,
-//     or "transport" for hand-written transport handling, recorded as the
-//     handler does it today.
+//     or "transport" for a reply the platform gives through the options
+//     handler.ts sets: the parser's reply to a body it does not read, or the
+//     reply of Node.js to a request of too many header lines.
 //   step: the step of docs/input-validation.md that answers the request, 1 to
 //     6, or null for a request no step rejects: one the handler accepts, the
 //     agent card, an unknown route, or one Node.js answers itself.
@@ -22,25 +23,21 @@
 //     sends no header, an array sends one header line per value), contentType
 //     (application/json unless given; null sends none), headers (other header
 //     lines), body (a string, a Buffer, an object sent as JSON, or a function
-//     giving one of those when the row is sent), declaredLength (a
-//     Content-Length to send in place of the body's length), closeAfter (end
-//     the connection that many milliseconds after sending), awaitServer (keep
-//     the connection open until the server ends it), repeat (send the row's
+//     giving one of those when the row is sent), repeat (send the row's
 //     request that many times before the one the row checks, each of them
 //     answered 200 with one audit line).
-//   server: options for a server of the row's own: requestTimeout (a Node.js
-//     request timeout in milliseconds, in place of the default 300 seconds),
-//     fault (true runs a copy of the example whose processTask throws).
+//   server: options for a server of the row's own: fault (true runs a copy of
+//     the example whose processTask throws).
 //   expect: status (the HTTP status), code (the JSON-RPC code of the reply, or
 //     null when the reply carries none), json (the whole JSON body, or a
 //     function of { card, port } giving it), check (a function of the parsed
 //     body that gives true when the body is as expected), body ("none" for a
-//     reply with no body), reply ("optional" when the client may get no reply
-//     at all), headerLines (lines the response headers hold), contentType (a
-//     pattern the Content-Type header matches), v03 (the name of the A2A
-//     v0.3.0 schema the body validates against), audit (the audit lines the
-//     checked request writes, each an action and, when given, the details of
-//     the line).
+//     reply with no body), headerLines (lines the response headers hold),
+//     contentType (a pattern the Content-Type header matches), v03 (the name
+//     of the A2A v0.3.0 schema the body validates against), audit (the audit
+//     lines the checked request writes, each an action and, when given, the
+//     details of the line).
+import { gzipSync } from "node:zlib";
 
 // The rate limit handler.ts gives its limiter: requests per client IP in the
 // seconds that start with the client's first request.
@@ -119,9 +116,6 @@ const rejectedBody = (status, reason) => ["request_rejected", { status, reason }
 // The message HackMyAgent's a2a target posts to /a2a/message, with the names
 // its scanner gives the sending and receiving agents when a target names none.
 const agentMessage = (content) => ({ from: "attacker-agent", to: "target-agent", content });
-
-// A message/send request that declares 100 body bytes and carries the first 6.
-const truncated = { body: '{"a":1', declaredLength: 100 };
 
 // The reply to a message/send request the handler accepts.
 const completedV03 = {
@@ -330,24 +324,9 @@ export const attackTable = [
   {
     tag: "transport",
     step: 3,
-    name: "a gzip body that does not inflate",
-    request: { headers: ["Content-Encoding: gzip"], body: "notgzipdata-notgzipdata-xxxx" },
-    expect: { status: 400, code: -32600, json: invalidRequestBody, audit: [rejectedBody(400, "body.inflate.failed")] },
-  },
-  {
-    tag: "transport",
-    step: 3,
-    name: "a connection closed after 6 of the 100 body bytes it declared",
-    request: { ...truncated, closeAfter: 300 },
-    expect: { status: 400, code: null, body: "none", reply: "optional", audit: [rejectedBody(400, "request.aborted")] },
-  },
-  {
-    tag: "transport",
-    step: 3,
-    name: "an upload that stalls after 6 of the 100 body bytes it declared until the request timeout",
-    request: { ...truncated, awaitServer: true },
-    server: { requestTimeout: 1000 },
-    expect: { status: 408, code: null, body: "none", audit: [rejectedBody(408, "request.aborted")] },
+    name: "a gzip body, which the parsers do not inflate",
+    request: { headers: ["Content-Encoding: gzip"], body: () => gzipSync(JSON.stringify(hello)) },
+    expect: { status: 415, code: -32600, json: invalidRequestBody, audit: [rejectedBody(415, "encoding.unsupported")] },
   },
 
   // Step 4: schema validation.

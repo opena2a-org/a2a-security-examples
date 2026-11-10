@@ -38,10 +38,9 @@ function errorOf(row) {
 
 // The replies the steps give at POST /, one for each step, status, code and
 // error, in step order and, within a step, in the order of the first row that
-// gets each. Each gives the step, the status, whether the client may get no
-// reply at all, the JSON-RPC code or null, the error or null for a reply with
-// no body, and the name of that first row. A row that names no step, or that
-// sends another method or path, gives none.
+// gets each. Each gives the step, the status, the JSON-RPC code or null, the
+// error or null for a reply with no body, and the name of that first row. A
+// row that names no step, or that sends another method or path, gives none.
 export function answers(table) {
   const byReply = new Map();
   for (const row of table) {
@@ -50,12 +49,11 @@ export function answers(table) {
     const answer = {
       step: row.step,
       status: row.expect.status,
-      noReply: row.expect.reply === "optional",
       code: row.expect.code,
       error: errorOf(row),
       example: row.name,
     };
-    const key = JSON.stringify([answer.step, answer.status, answer.noReply, answer.code, answer.error]);
+    const key = JSON.stringify([answer.step, answer.status, answer.code, answer.error]);
     if (!byReply.has(key)) byReply.set(key, answer);
   }
   return [...byReply.values()].sort((a, b) => a.step - b.step);
@@ -80,10 +78,9 @@ function codeSpan(text) {
 export function renderTable(table) {
   const lines = ["| Step | Example request | HTTP status | JSON-RPC code | Error |", "|---|---|---|---|---|"];
   for (const answer of answers(table)) {
-    const status = answer.noReply ? `${answer.status}, or no reply` : `${answer.status}`;
     const code = answer.code === null ? "none" : codeSpan(String(answer.code));
     const error = answer.error === null ? "no body" : codeSpan(answer.error);
-    lines.push(`| ${answer.step} | ${cell(answer.example)} | ${status} | ${code} | ${error} |`);
+    lines.push(`| ${answer.step} | ${cell(answer.example)} | ${answer.status} | ${code} | ${error} |`);
   }
   return `\n${lines.join("\n")}\n\n`;
 }

@@ -63,14 +63,34 @@ test("the limits the table gives are those handler.ts sets", () => {
   assert.equal(limits.fileBytesChars, handlerNumber(/bytes: z\.string\(\)\.max\((\d+)\)/));
   assert.ok(handlerSource.includes("content: TextPartSchema.shape.text,"), "the content of an agent message has the bounds of a text part");
   assert.equal(limits.agentMessageChars, limits.textChars);
-  assert.equal(bodyLimits["/"], handlerNumber(/express\.json\(\{ limit: "(\d+)mb" \}\)/) * 1024 * 1024);
-  assert.equal(bodyLimits["/a2a/message"], handlerNumber(/express\.json\(\{ limit: "(\d+)kb" \}\)/) * 1024);
+  assert.equal(bodyLimits["/"], handlerNumber(/const parseJson = express\.json\(\{ limit: "(\d+)mb", inflate: false, type: "application\/json" \}\);/) * 1024 * 1024);
+  assert.equal(bodyLimits["/a2a/message"], handlerNumber(/const parseAgentMessageJson = express\.json\(\{ limit: "(\d+)kb", inflate: false, type: "application\/json" \}\);/) * 1024);
 });
 
 test("handler.ts leaves the header line limit to Node.js: it sets no maxHeadersCount and reads no rawHeaders", () => {
   assert.doesNotMatch(handlerSource, /maxHeadersCount/, "handler.ts sets no limit on the header lines Node.js reads");
   assert.doesNotMatch(handlerSource, /rawHeaders/, "handler.ts counts no header lines of its own");
   assert.match(handlerSource, /req\.headersDistinct\.authorization/, "handler.ts reads the value of each Authorization header line from req.headersDistinct");
+});
+
+test("handler.ts leaves body transport to the parser: each express.json parser sets limit, inflate and type, and no branch of its own answers a timed-out, closed or compressed request", () => {
+  const parsers = [...handlerSource.matchAll(/express\.json\((.*)\)/g)].map((match) => match[1]);
+  assert.equal(parsers.length, 3, "handler.ts has three JSON parsers");
+  for (const options of parsers) {
+    assert.match(
+      options,
+      /^\{ limit: "\d+(?:mb|kb)", inflate: false, type: (?:"application\/json"|\["application\/json", "application\/a2a\+json"\]) \}$/,
+      `the parser express.json(${options}) sets limit, inflate false and type, and nothing else`
+    );
+  }
+  assert.doesNotMatch(handlerSource, /\b408\b|ERR_HTTP_REQUEST_TIMEOUT|socket\.errored|requestTimedOut/, "handler.ts has no branch for a request Node.js has timed out");
+  assert.doesNotMatch(handlerSource, /\bZ_|inflate\.failed|rejectionReason/, "handler.ts maps no zlib error of its own");
+  assert.doesNotMatch(handlerSource, /aborted|closes the connection|stalls/, "handler.ts has no branch for a connection closed before the whole body arrives");
+});
+
+test("handler.ts reads PORT in lines of its own, not in a parsePort function, and keeps the line it exits with for a value that is not a port", () => {
+  assert.doesNotMatch(handlerSource, /parsePort/, "handler.ts has no parsePort function");
+  assert.match(handlerSource, /PORT must be a number from 1 to 65535/, "handler.ts keeps the line that names PORT");
 });
 
 // Releases measured on 2026-11-09 with a node:http server on 127.0.0.1 that
@@ -201,28 +221,6 @@ if (process.platform !== "win32") {
   }
 }
 
-// A CommonJS file that gives the server Node.js creates a request timeout of
-// ms milliseconds, a headers timeout below it, and a short interval between
-// the checks that find a connection whose timeout has expired, in place of
-// Node's 300 seconds, 60 seconds and 30 seconds.
-function timeoutPreload(ms) {
-  return `const http = require("node:http");
-const createServer = http.createServer;
-http.createServer = function (...args) {
-  const options = typeof args[0] === "function" ? {} : args.shift();
-  return createServer({ ...options, connectionsCheckingInterval: 100, headersTimeout: ${Math.ceil(ms / 2)}, requestTimeout: ${ms} }, ...args);
-};
-`;
-}
-
-// NODE_OPTIONS that keep the existing value and load file before the example
-// starts. NODE_OPTIONS is split on spaces, so the path is quoted, and inside
-// quotes a backslash escapes the next character.
-function requireOptions(file) {
-  const quoted = `"${file.replace(/[\\"]/g, "\\$&")}"`;
-  return [process.env.NODE_OPTIONS, `--require=${quoted}`].filter(Boolean).join(" ");
-}
-
 // A copy of the example in a temporary directory, with the secure-agent-card
 // directory beside it as in the repository and the example's node_modules
 // linked in, whose processTask throws. Resolves with the temporary directory,
@@ -251,11 +249,11 @@ function faultCopy() {
   return { top, dir };
 }
 
-// Start the example on a free port, with the server options a row asks for,
-// and resolve with its port and the readers of its log once it is listening.
-// A port another process takes between the pick and the listen is picked
-// again, three times at most.
-async function startServer({ requestTimeout, fault } = {}) {
+// Start the example on a free port, or the copy a row asks for, and resolve
+// with its port and the readers of its log once it is listening. A port
+// another process takes between the pick and the listen is picked again,
+// three times at most.
+async function startServer({ fault } = {}) {
   assert.ok(existsSync(tsx), "run npm ci in examples/validated-task-handler first");
   const dirs = [];
   let cwd = example;
@@ -266,13 +264,6 @@ async function startServer({ requestTimeout, fault } = {}) {
   }
   const env = { ...process.env };
   delete env.AGENT_URL;
-  if (requestTimeout !== undefined) {
-    const dir = makeTempDir("a2a-attack-table-preload-");
-    dirs.push(dir);
-    const file = join(dir, "preload.cjs");
-    writeFileSync(file, timeoutPreload(requestTimeout));
-    env.NODE_OPTIONS = requireOptions(file);
-  }
   const cleanup = () => {
     for (const dir of dirs) removeTempDir(dir);
   };
@@ -397,7 +388,7 @@ function parseReply(raw) {
 // closed. The header lines are written as Latin-1, as Node.js reads them, so a
 // header value outside ASCII reaches the handler as it is written here.
 function send(port, request) {
-  const { method = "POST", path = "/", authorization, contentType = "application/json", headers = [], declaredLength, closeAfter, awaitServer } = request;
+  const { method = "POST", path = "/", authorization, contentType = "application/json", headers = [] } = request;
   const body = typeof request.body === "function" ? request.body() : request.body;
   const payload = body === undefined ? undefined : Buffer.isBuffer(body) ? body : Buffer.from(typeof body === "string" ? body : JSON.stringify(body));
   const lines = [`${method} ${path} HTTP/1.1`, "Host: 127.0.0.1"];
@@ -405,7 +396,7 @@ function send(port, request) {
   for (const value of credentials) lines.push(`Authorization: ${value}`);
   if (payload !== undefined && contentType !== null) lines.push(`Content-Type: ${contentType}`);
   lines.push(...headers);
-  if (payload !== undefined) lines.push(`Content-Length: ${declaredLength ?? payload.length}`);
+  if (payload !== undefined) lines.push(`Content-Length: ${payload.length}`);
   lines.push("Connection: close", "", "");
   const head = Buffer.from(lines.join("\r\n"), "latin1");
   return new Promise((resolve, reject) => {
@@ -414,9 +405,8 @@ function send(port, request) {
     const socket = connect(port, "127.0.0.1", () => {
       socket.write(head);
       if (payload !== undefined) socket.write(payload);
-      if (closeAfter !== undefined) setTimeout(() => socket.end(), closeAfter);
     });
-    socket.setTimeout(awaitServer ? 15000 : 60000, () => socket.destroy(new Error("no reply within the time allowed")));
+    socket.setTimeout(60000, () => socket.destroy(new Error("no reply within the time allowed")));
     socket.on("data", (chunk) => chunks.push(chunk));
     // A server that answers before it has read the whole body may close the
     // connection while the body is still being written, which ends the write
@@ -460,27 +450,25 @@ async function checkRow(row, server) {
     seen = lines.length;
   }
   const res = await send(server.port, request);
-  if (!(expect.reply === "optional" && res.status === undefined)) {
-    assert.equal(res.status, expect.status, `the status, in the reply:\n${res.raw}`);
-    if (expect.body === "none") assert.equal(res.body, "", `a reply with no body:\n${res.raw}`);
-    if (expect.contentType) assert.match(contentTypeOf(res.headers) ?? "", expect.contentType, "the Content-Type of the reply");
-    for (const line of expect.headerLines ?? []) {
-      assert.ok(res.headers.includes(line), `the reply carries the header line ${line}:\n${res.headers.join("\n")}`);
+  assert.equal(res.status, expect.status, `the status, in the reply:\n${res.raw}`);
+  if (expect.body === "none") assert.equal(res.body, "", `a reply with no body:\n${res.raw}`);
+  if (expect.contentType) assert.match(contentTypeOf(res.headers) ?? "", expect.contentType, "the Content-Type of the reply");
+  for (const line of expect.headerLines ?? []) {
+    assert.ok(res.headers.includes(line), `the reply carries the header line ${line}:\n${res.headers.join("\n")}`);
+  }
+  if (expect.json !== undefined || expect.check || expect.code !== null || expect.v03) {
+    let parsed;
+    try {
+      parsed = JSON.parse(res.body);
+    } catch (err) {
+      throw new Error(`the body is not JSON (${err.message}):\n${res.raw}`);
     }
-    if (expect.json !== undefined || expect.check || expect.code !== null || expect.v03) {
-      let parsed;
-      try {
-        parsed = JSON.parse(res.body);
-      } catch (err) {
-        throw new Error(`the body is not JSON (${err.message}):\n${res.raw}`);
-      }
-      if (expect.json !== undefined) {
-        assert.deepEqual(parsed, typeof expect.json === "function" ? expect.json({ card, port: server.port }) : expect.json, "the body");
-      }
-      if (expect.check) assert.ok(expect.check(parsed), `the body is as the row expects:\n${res.body}`);
-      if (expect.code !== null) assert.equal(parsed.error?.code, expect.code, "the JSON-RPC code");
-      if (expect.v03) assert.deepEqual(schemaErrors(expect.v03, parsed), [], `the body validates against the A2A v0.3.0 ${expect.v03} schema`);
+    if (expect.json !== undefined) {
+      assert.deepEqual(parsed, typeof expect.json === "function" ? expect.json({ card, port: server.port }) : expect.json, "the body");
     }
+    if (expect.check) assert.ok(expect.check(parsed), `the body is as the row expects:\n${res.body}`);
+    if (expect.code !== null) assert.equal(parsed.error?.code, expect.code, "the JSON-RPC code");
+    if (expect.v03) assert.deepEqual(schemaErrors(expect.v03, parsed), [], `the body validates against the A2A v0.3.0 ${expect.v03} schema`);
   }
   if (expect.audit.length > 0) {
     const lines = (await waitForAudit(audited, seen + expect.audit.length)).slice(seen);

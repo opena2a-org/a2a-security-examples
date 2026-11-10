@@ -12,7 +12,7 @@ import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { deflateSync, gzipSync } from "node:zlib";
 import { canRunHackMyAgent } from "../scripts/install-root.mjs";
 import { schemaErrors } from "./a2a-schema.mjs";
 import { protoErrors, protoText, v03Fields, v1Fields, withoutFields } from "./a2a-proto.mjs";
@@ -104,7 +104,7 @@ const validTask = JSON.stringify(sendMessage([{ kind: "text", text: "Hello" }]))
 // The body limit in bytes, and the most parts and the longest file bytes the
 // schema allows, as handler.ts sets them.
 const handlerSource = readFileSync(join(example, "handler.ts"), "utf8");
-const bodyLimit = Number(handlerSource.match(/express\.json\(\{ limit: "(\d+)mb" \}\)/)[1]) * 1024 * 1024;
+const bodyLimit = Number(handlerSource.match(/const parseJson = express\.json\(\{ limit: "(\d+)mb", /)[1]) * 1024 * 1024;
 const maxParts = Number(handlerSource.match(/parts: z\.array\(PartSchema\)\.min\(1\)\.max\((\d+)\)/)[1]);
 const maxBytesLength = Number(handlerSource.match(/bytes: z\.string\(\)\.max\((\d+)\)/)[1]);
 
@@ -148,10 +148,8 @@ function stopServer(proc, signal = "SIGTERM") {
 // close only once tsx and the server it started have both exited.
 const started = new Set();
 
-// The process ids of the tsx processes that have exited: those spawnExample
-// has started, once their output pipes have closed, and those the test run of
-// the interrupted-run test has started, once that test has waited for them to
-// exit.
+// The process ids of the tsx processes spawnExample has started that have
+// exited, once their output pipes have closed.
 const exitedTsx = [];
 
 // The socket a tsx process binds under the temporary directory, which it takes
@@ -159,15 +157,6 @@ const exitedTsx = [];
 // Windows tsx binds a named pipe, which leaves no file, and there is no path.
 function tsxSocket(pid) {
   return process.platform === "win32" ? undefined : join(tmpdir(), `tsx-${process.geteuid()}`, `${pid}.pipe`);
-}
-
-// Remove the socket a tsx process that has exited has left, if it left one.
-// tsx removes its socket when SIGINT or SIGTERM ends it, but not when SIGKILL
-// does, and not when the signal reaches it after it has bound the socket and
-// before it handles signals.
-function removeTsxSocket(pid) {
-  const socket = tsxSocket(pid);
-  if (socket) rmSync(socket, { force: true });
 }
 
 // Start tsx and the example, or Node with args instead. On POSIX the process
@@ -314,19 +303,6 @@ async function within(promise, ms, message) {
   }
 }
 
-// Poll check every interval ms until it holds or ms have passed, and resolve
-// with whether it holds. The wait is bounded by time, not by a count of polls:
-// a server stops some seconds after its signal on a busy host, and a wait that
-// gave up after 100 polls, 5 seconds, failed there.
-async function settled(check, ms, interval = 50) {
-  const deadline = Date.now() + ms;
-  while (!check()) {
-    if (Date.now() >= deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
-  return true;
-}
-
 // Wait for closed, the close event of proc, and fail with message after ms
 // instead of waiting forever. When the wait fails, proc and its stdout and
 // stderr pipes are unref'd: a process still running would otherwise keep the
@@ -421,36 +397,6 @@ function psUnavailable(args) {
   const { error, status } = spawnSync("ps", args);
   if (error) return `ps cannot run here: ${error.message}`;
   return status === 0 ? false : `ps ${args.join(" ")} exits with status ${status} here`;
-}
-
-// The process groups, other than its own, of the processes descended from pid.
-function descendantGroups(pid) {
-  const ps = spawnSync("ps", ["-A", "-o", "pid=,ppid=,pgid="], { encoding: "utf8" });
-  if (ps.error) throw ps.error;
-  const rows = ps.stdout.trim().split("\n").map((line) => line.trim().split(/\s+/).map(Number));
-  const tree = new Set([pid]);
-  for (let grew = true; grew; ) {
-    grew = false;
-    for (const [child, parent] of rows) {
-      if (tree.has(parent) && !tree.has(child)) {
-        tree.add(child);
-        grew = true;
-      }
-    }
-  }
-  return new Set(rows.filter(([child, , group]) => tree.has(child) && group !== pid).map(([, , group]) => group));
-}
-
-// The process groups that have a process that has not exited. A process that
-// has exited stays listed, in state Z, until it is reaped. Once its parent has
-// exited, that is up to whichever process adopts it, and in a container whose
-// first process is Node.js, as when docker run starts the tests without
-// --init, that process never reaps it.
-function liveGroups() {
-  const ps = spawnSync("ps", ["-A", "-o", "pgid=,stat="], { encoding: "utf8" });
-  if (ps.error) throw ps.error;
-  const rows = ps.stdout.trim().split("\n").map((line) => line.trim().split(/\s+/));
-  return new Set(rows.filter(([, stat]) => !stat.startsWith("Z")).map(([group]) => Number(group)));
 }
 
 // When this hook fails, the TAP reporter of Node.js 18.17.1 prints the failure
@@ -718,61 +664,24 @@ test("an empty body or a body not sent as application/json fails schema validati
   }
 });
 
-test("a compressed body that does not inflate gets a JSON 400 and a request_rejected audit line naming the inflate failure", async () => {
+test("a compressed body, a well-formed gzip or deflate stream or not, gets 415 and a request_rejected audit line naming the encoding as unsupported: the parsers are set not to inflate", async () => {
   const cases = [
+    { encoding: "gzip", body: gzipSync(validTask) },
+    { encoding: "deflate", body: deflateSync(validTask) },
+    // The encoding is refused before any of the body is read, so bytes that
+    // are no gzip stream get the same reply.
     { encoding: "gzip", body: "notgzipdata-notgzipdata-xxxx" },
-    { encoding: "deflate", body: "notgzipdata-notgzipdata-xxxx" },
-    // A real gzip stream cut off part way fails with a different zlib code.
-    { encoding: "gzip", body: gzipSync(validTask).subarray(0, 20) },
   ];
   for (const { encoding, body } of cases) {
     const seen = auditLines().length;
     const res = await postTask({ Authorization: "Bearer demo-token", "Content-Encoding": encoding }, body);
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 415, `a ${encoding} body`);
     assert.deepEqual(await res.json(), bodyError(-32600, "Invalid request body"));
     const audited = (await waitForAudit(seen + 1)).slice(seen);
     assert.equal(audited.length, 1, `one audit line for the ${encoding} body:\n${output}`);
     assert.equal(audited[0].action, "request_rejected");
-    assert.deepEqual(audited[0].details, { status: 400, reason: "body.inflate.failed" });
+    assert.deepEqual(audited[0].details, { status: 415, reason: "encoding.unsupported" });
   }
-});
-
-// A task request that declares 100 body bytes and carries only the first 6.
-const truncatedTask = [
-  "POST / HTTP/1.1",
-  "Host: 127.0.0.1",
-  "Authorization: Bearer demo-token",
-  "Content-Type: application/json",
-  "Content-Length: 100",
-  "",
-  '{"a":1',
-].join("\r\n");
-
-test("a body cut off by a closed connection gets at most a bare 400 and a request_rejected audit line", async () => {
-  const seen = auditLines().length;
-  // Send 6 of the 100 bytes, then stop sending. The half-closed socket can
-  // still read whatever the server answers before it closes the connection.
-  const reply = await new Promise((resolve, reject) => {
-    let data = "";
-    const socket = connect(port, "127.0.0.1", () => {
-      socket.write(truncatedTask);
-      setTimeout(() => socket.end(), 300);
-    });
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk) => (data += chunk));
-    socket.on("error", reject);
-    socket.on("close", () => resolve(data));
-  });
-  // Either nothing, or a 400 status line and headers with no body after them.
-  assert.match(
-    reply,
-    /^(HTTP\/1\.1 400 Bad Request\r\n(?:[^\r\n]+\r\n)*\r\n)?$/,
-    `the client gets at most a bare HTTP 400 with no body:\n${reply}`
-  );
-  const audited = (await waitForAudit(seen + 1)).slice(seen);
-  assert.equal(audited.length, 1, `one audit line for the truncated body:\n${output}`);
-  assert.equal(audited[0].action, "request_rejected");
-  assert.deepEqual(audited[0].details, { status: 400, reason: "request.aborted" });
 });
 
 // NODE_OPTIONS that keep the existing value and load a CommonJS file before the
@@ -784,89 +693,6 @@ function requireOptions(file, existing = process.env.NODE_OPTIONS) {
   const quoted = `"${file.replace(/[\\"]/g, "\\$&")}"`;
   return [existing, `--require=${quoted}`].filter(Boolean).join(" ");
 }
-
-// Node's request timeout is 300 seconds by default. This preload records the
-// value the example runs with, then shortens it so the stalled-upload test
-// does not wait that long. The headers timeout is shortened too: left above
-// the request timeout, it is the one that applies. The interval between
-// connection checks is passed to createServer because some Node.js 18 releases
-// start the check when the server is created, not when it starts listening.
-const stallPreload = `const http = require("node:http");
-const createServer = http.createServer;
-http.createServer = function (...args) {
-  const options = typeof args[0] === "function" ? {} : args.shift();
-  return createServer({ ...options, connectionsCheckingInterval: 100 }, ...args);
-};
-const listen = http.Server.prototype.listen;
-http.Server.prototype.listen = function (...args) {
-  this.once("listening", () => {
-    process.stderr.write("requestTimeout " + this.requestTimeout + "\\n");
-    this.headersTimeout = 500;
-    this.requestTimeout = 1000;
-  });
-  return listen.apply(this, args);
-};
-`;
-
-test("an upload that stalls until the request timeout gets a bare 408 and a request_rejected audit line", async () => {
-  const dir = makeTempDir("a2a-preload-");
-  const file = join(dir, "preload.cjs");
-  writeFileSync(file, stallPreload);
-  const stallPort = await freePort();
-  const env = { ...process.env, PORT: String(stallPort), NODE_OPTIONS: requireOptions(file) };
-  delete env.AGENT_URL;
-  const stalled = spawnExample(env);
-  const closed = new Promise((resolve) => stalled.once("close", resolve));
-  let log = "";
-  stalled.stdout.on("data", (chunk) => (log += chunk));
-  stalled.stderr.on("data", (chunk) => (log += chunk));
-  const logLines = () => log.split("\n").slice(0, -1);
-  const audited = () => logLines().filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
-  try {
-    for (let i = 0; i < 600 && !log.includes("listening on port"); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    assert.match(log, /listening on port/, `server did not start:\n${log}`);
-    assert.ok(logLines().includes("requestTimeout 300000"), `the example runs with Node's default request timeout:\n${log}`);
-    // Send 6 of the 100 bytes, then send nothing more and keep the connection open.
-    const reply = await new Promise((resolve, reject) => {
-      let data = "";
-      const socket = connect(stallPort, "127.0.0.1", () => socket.write(truncatedTask));
-      socket.setEncoding("utf8");
-      socket.setTimeout(10000, () => socket.destroy(new Error(`no reply within 10 seconds:\n${data}`)));
-      socket.on("data", (chunk) => (data += chunk));
-      socket.on("error", reject);
-      socket.on("close", () => resolve(data));
-    });
-    // A 408 status line and headers with no body after them.
-    assert.match(
-      reply,
-      /^HTTP\/1\.1 408 Request Timeout\r\n(?:[^\r\n]+\r\n)*\r\n$/,
-      `the client gets a bare HTTP 408 with no body:\n${reply}`
-    );
-    for (let i = 0; i < 100 && audited().length < 1; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    assert.equal(audited().length, 1, `one audit line for the stalled body:\n${log}`);
-    assert.equal(audited()[0].action, "request_rejected");
-    // The audit line records the 408 the client received, not the 400 the
-    // parser's request.aborted error carries.
-    assert.deepEqual(audited()[0].details, { status: 408, reason: "request.aborted" });
-  } finally {
-    // stopServer ends tsx and the server without tsx passing a signal on. Wait
-    // until both have exited and the stdout and stderr pipes have closed, and
-    // fail rather than hang if they do not. The process handle finishes
-    // closing only when the event loop runs again; the test that counts the
-    // handles keeping the test process alive lets one timer turn pass before
-    // it counts. The preload directory is removed even when the wait fails.
-    try {
-      stopServer(stalled);
-      await closedWithin(stalled, closed, 10000, `tsx and the server it started did not exit within 10 seconds:\n${log}`);
-    } finally {
-      removeTempDir(dir);
-    }
-  }
-});
 
 test("a process that has not closed when the wait fails no longer keeps the test process alive", async () => {
   // The process is left running. Were it and its output pipes still
@@ -884,211 +710,6 @@ test("a process that has not closed when the wait fails no longer keeps the test
   } finally {
     proc.kill("SIGKILL");
     await within(closed, 10000, "the process did not exit within 10 seconds of SIGKILL");
-  }
-});
-
-// Run body, then cleanup whether or not body failed, as try and finally do.
-// When both fail, try and finally throw the error of cleanup alone; this
-// throws one error that carries both, with the message of each on its own
-// line.
-async function thenAlways(body, cleanup) {
-  const errors = [];
-  for (const step of [body, cleanup]) {
-    try {
-      await step();
-    } catch (err) {
-      errors.push(err);
-    }
-  }
-  if (errors.length === 2) throw new AggregateError(errors, errors.map((err) => err.message).join("\n"));
-  if (errors.length === 1) throw errors[0];
-}
-
-// Stop proc, a tsx process, and the server it started with SIGKILL, and wait
-// ms for closed, the close event of proc. SIGKILL gives tsx no chance to
-// remove its socket, so remove it here, when the wait fails too: the last test
-// looks for the socket only of a process whose close event has come.
-async function killServer(proc, closed, ms = 10000) {
-  stopServer(proc, "SIGKILL");
-  try {
-    await within(closed, ms, `tsx and the server it started still hold the output pipes ${ms / 1000} seconds after stopServer`);
-  } finally {
-    removeTsxSocket(proc.pid);
-  }
-}
-
-// Start a server, then stop tsx and the server with SIGKILL and wait until
-// both have exited. A check that looks for the socket SIGKILL leaves in the
-// wrong place would find it removed whether or not it was, so look for it
-// first, at the path socketOf gives for the process id of tsx. The server is
-// stopped when that check fails too: startServer unrefs it, so the test run
-// would otherwise end and leave tsx and the server running.
-async function stopWithSigkill(socketOf = tsxSocket) {
-  const proc = await startServer(await freePort());
-  const closed = new Promise((resolve) => proc.once("close", resolve));
-  const socket = socketOf(proc.pid);
-  await thenAlways(
-    () => {
-      if (socket) assert.ok(existsSync(socket), `tsx has bound its socket at ${socket}`);
-    },
-    () => killServer(proc, closed)
-  );
-}
-
-test("a wait for a condition is bounded by the time given, not by a count of polls", async () => {
-  // The wait for an interrupted run's servers to stop once gave up after 100
-  // polls, 5 seconds, while a server stopped later than that on a busy host.
-  let polls = 0;
-  assert.equal(await settled(() => ++polls >= 150, 10000, 1), true, "a condition that holds on the 150th poll is reached");
-  assert.equal(polls, 150, "the wait ends with the poll on which the condition holds");
-  const start = Date.now();
-  assert.equal(await settled(() => false, 100, 1), false, "a condition that never holds ends the wait once the time has passed");
-  assert.ok(Date.now() - start >= 100, "the wait lasts the time given");
-});
-
-test("stopping a server ends tsx and the server it started even when tsx cannot pass the signal on", async () => {
-  // SIGKILL ends tsx at once, as ChildProcess.kill() ends it on Windows, so tsx
-  // passes nothing on. A server left running keeps tsx's stdout and stderr
-  // open, the close event never comes, and a test that waits for it never
-  // ends. Windows has no signals; there stopServer ends the process tree.
-  await stopWithSigkill();
-});
-
-test("the SIGKILL test stops tsx and the server it started when its check that tsx has bound its socket fails", async () => {
-  // startServer unrefs the server, so a test that fails without stopping it
-  // lets the test run end while tsx and the server keep running. A server
-  // whose output pipes have closed is no longer in the set of started servers.
-  const before = new Set(started);
-  await assert.rejects(stopWithSigkill(() => join(example, "no-socket.pipe")), /tsx has bound its socket at .*no-socket\.pipe$/);
-  const left = [...started].filter((proc) => !before.has(proc));
-  await thenAlways(
-    () => assert.deepEqual(left.map((proc) => proc.pid), [], "tsx and the server the failed test started have exited"),
-    // Stop a server the failed test left, so that this test leaves none.
-    async () => {
-      for (const proc of left) {
-        await killServer(proc, new Promise((resolve) => proc.once("close", resolve)));
-      }
-    }
-  );
-});
-
-test(
-  "stopping a server with SIGKILL removes the socket of tsx when the wait for the close event fails",
-  { skip: process.platform === "win32" && "on Windows tsx binds a named pipe, which leaves no file" },
-  async () => {
-    // A process in a group of its own stands for tsx, a file at the path of its
-    // socket for the socket SIGKILL leaves, and a close event that never comes
-    // for a server that still holds the output pipes.
-    const proc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
-    const closed = new Promise((resolve) => proc.once("close", resolve));
-    const socket = tsxSocket(proc.pid);
-    try {
-      mkdirSync(dirname(socket), { recursive: true });
-      writeFileSync(socket, "");
-      await assert.rejects(
-        killServer(proc, new Promise(() => {}), 200),
-        /^Error: tsx and the server it started still hold the output pipes 0\.2 seconds after stopServer$/
-      );
-      assert.equal(existsSync(socket), false, "the socket is removed when the wait fails");
-    } finally {
-      rmSync(socket, { force: true });
-      stopServer(proc, "SIGKILL");
-      await within(closed, 10000, "the process did not exit within 10 seconds of SIGKILL");
-    }
-  }
-);
-
-test("a check that fails and a cleanup after it that fails are both in the error thrown", async () => {
-  // try and finally throw the error of the finally block alone, so a server
-  // that does not exit in time would hide the check that failed before it.
-  const check = () => {
-    throw new Error("the check failed");
-  };
-  const cleanup = async () => {
-    throw new Error("the cleanup failed");
-  };
-  let cleaned = 0;
-  await assert.rejects(thenAlways(check, () => cleaned++), /^Error: the check failed$/);
-  assert.equal(cleaned, 1, "the cleanup runs after a check that fails");
-  await assert.rejects(thenAlways(() => {}, cleanup), /^Error: the cleanup failed$/);
-  await assert.rejects(thenAlways(check, cleanup), (err) => {
-    assert.ok(err instanceof AggregateError, "one error carries both");
-    assert.equal(err.message, "the check failed\nthe cleanup failed");
-    assert.deepEqual(err.errors.map((each) => each.message), ["the check failed", "the cleanup failed"]);
-    return true;
-  });
-  await thenAlways(() => {}, () => cleaned++);
-  assert.equal(cleaned, 2, "the cleanup runs after a check that passes");
-});
-
-test("the stalled-upload test loads its preload with --require, not --import", () => {
-  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
-  const start = source.indexOf('test("an upload that stalls until the request timeout');
-  assert.ok(start >= 0, "this file has the stalled-upload test");
-  const stalledTest = source.slice(start, source.indexOf("\ntest(", start));
-  // Node.js 18.0 to 18.17 exit with "--import= is not allowed in NODE_OPTIONS".
-  assert.doesNotMatch(stalledTest, /--import/, "the stalled-upload test passes no --import in NODE_OPTIONS");
-  assert.match(stalledTest, /NODE_OPTIONS: requireOptions\(file\)/, "the stalled-upload test loads its preload with --require");
-});
-
-// The source of this file and, in it, of the interrupted-run test. The line
-// break after test( keeps the search from finding this function's own string,
-// which comes first in the file.
-function interruptedRunTest() {
-  const source = readFileSync(fileURLToPath(import.meta.url), "utf8").replace(/\r\n/g, "\n");
-  const start = source.indexOf('test(\n  "interrupting a test run stops the servers it started');
-  assert.ok(start >= 0, "this file has the interrupted-run test");
-  return { source, interruptedTest: source.slice(start, source.indexOf("\ntest(", start)) };
-}
-
-test("the interrupted-run test reads the output of the test run it starts and gives it in each of its failure messages", () => {
-  // Without that output, a run that cannot start a server fails with no cause.
-  const { interruptedTest } = interruptedRunTest();
-  assert.match(interruptedTest, /\{ env, stdio: \["ignore", "pipe", "pipe"\], detached: true \}/, "the run's stdout and stderr are piped to the test");
-  assert.match(interruptedTest, /run\.stdout\.on\("data", \(chunk\) => \(log \+= chunk\)\)/, "the test reads the run's stdout");
-  assert.match(interruptedTest, /run\.stderr\.on\("data", \(chunk\) => \(log \+= chunk\)\)/, "the test reads the run's stderr");
-  const messages = interruptedTest.match(/\b(?:assert\.\w+|within)\(/g);
-  const withOutput = interruptedTest.match(/:\\n\$\{log\}`/g) ?? [];
-  assert.ok(messages.length > 0, "the interrupted-run test makes assertions");
-  assert.equal(withOutput.length, messages.length, "each assertion message in the interrupted-run test ends with the run's output");
-});
-
-test("the interrupted-run test removes the socket of each server the run started, and the last test looks for those sockets", () => {
-  // The SIGTERM of the interrupted run can reach the tsx of the stalled-upload
-  // server after it has bound its socket and before it handles signals, and
-  // tsx then leaves the socket. spawnExample of this run did not start that
-  // tsx, so the last test looks for its socket only once the interrupted-run
-  // test has added its process id to exitedTsx.
-  const { source, interruptedTest } = interruptedRunTest();
-  assert.match(
-    interruptedTest,
-    /for \(const pid of groups\) \{\n\s*removeTsxSocket\(pid\);\n\s*exitedTsx\.push\(pid\);\n\s*\}/,
-    "the test removes the socket of each server the run started and adds its process id to exitedTsx"
-  );
-  const lastTest = source.slice(source.lastIndexOf("\ntest("));
-  assert.match(lastTest, /exitedTsx\.map\(tsxSocket\)\.filter\(\(socket\) => existsSync\(socket\)\)/, "the last test looks for the socket of each process id in exitedTsx");
-});
-
-test("the stalled-upload preload sets the connection check interval when the server is created", () => {
-  // Some Node.js 18 releases start the check in the server's constructor. An
-  // interval set in listen comes too late there: the 408 takes 30 seconds.
-  const dir = makeTempDir("a2a-preload-");
-  try {
-    const file = join(dir, "preload.cjs");
-    writeFileSync(file, stallPreload);
-    const created = 'require("node:http").createServer(() => {}).connectionsCheckingInterval';
-    const run = spawnSync(process.execPath, ["-p", created], {
-      env: { ...process.env, NODE_OPTIONS: requireOptions(file) },
-      encoding: "utf8",
-      timeout: 30000,
-    });
-    assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.equal(run.stdout, "100\n", "a server that is not listening yet has the shortened interval");
-  } finally {
-    removeTempDir(dir);
   }
 });
 
@@ -2106,115 +1727,6 @@ readSync(0, Buffer.alloc(1));
 );
 
 test(
-  "interrupting a test run stops the servers it started and removes the temporary directory it made",
-  {
-    skip:
-      (process.platform === "win32" && "on Windows the servers share the console and receive Ctrl-C themselves") ||
-      psUnavailable(["-A", "-o", "pid=,ppid=,pgid="]) ||
-      psUnavailable(["-A", "-o", "pgid=,stat="]),
-  },
-  async () => {
-    // Run the stalled-upload test alone in a process group of its own, as a
-    // shell runs a job, and once the run has started the main server and the
-    // stalled-upload server, send SIGINT to that group, as Ctrl-C does. The run
-    // makes its temporary directories in a directory of its own, so the only
-    // preload directories there are its own. Its TMPDIR stays as it is: tsx
-    // binds a socket under TMPDIR, and where a TMPDIR one directory deeper
-    // makes that socket's path longer than a Unix socket path may be, tsx
-    // starts no server.
-    const runTmp = makeTempDir("a2a-tmp-");
-    const env = { ...process.env, A2A_TEST_TMPDIR: runTmp };
-    // Left set, the nested run reports to this run instead of running on its own.
-    delete env.NODE_TEST_CONTEXT;
-    const run = spawn(
-      process.execPath,
-      ["--test", "--test-name-pattern=^an upload that stalls", fileURLToPath(import.meta.url)],
-      { env, stdio: ["ignore", "pipe", "pipe"], detached: true }
-    );
-    const exited = new Promise((resolve) => run.once("exit", resolve));
-    // What the run writes, for the failure messages: when the run cannot start
-    // a server, the server's error is in its output.
-    let log = "";
-    run.stdout.on("data", (chunk) => (log += chunk));
-    run.stderr.on("data", (chunk) => (log += chunk));
-    let ended = false;
-    run.once("close", () => (ended = true));
-    const preloadDirs = () => readdirSync(runTmp).filter((name) => name.startsWith("a2a-preload-"));
-    let groups = new Set();
-    // A server that has exited counts as stopped while it waits to be reaped.
-    const running = () => {
-      const live = liveGroups();
-      return [...groups].filter((pid) => live.has(pid));
-    };
-    try {
-      // A run that has ended has started all the servers it will start.
-      await settled(() => {
-        groups = descendantGroups(run.pid);
-        return groups.size >= 2 || ended;
-      }, 30000);
-      const runningBefore = running();
-      // When a server has not started or has already stopped, a test in the
-      // run fails, and the run reports the server's output only once that test
-      // has failed. Wait for the run to end, so that the report is in the
-      // messages below.
-      if (groups.size < 2 || runningBefore.length < 2) {
-        for (let i = 0; i < 600 && !ended; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-      }
-      assert.equal(groups.size, 2, `the run started the main server and the stalled-upload server:\n${log}`);
-      // A check that cannot see the servers while they run would report them
-      // stopped after the interrupt whether or not the run stopped them.
-      assert.deepEqual(runningBefore, [...groups], `ps lists both servers as running before the run is interrupted:\n${log}`);
-      // Likewise, a check that cannot see the preload directory while the
-      // stalled-upload server runs would report it removed either way.
-      assert.equal(preloadDirs().length, 1, `the run has made the preload directory before it is interrupted:\n${log}`);
-      // tsx binds its socket under the run's TMPDIR, which is this run's, so
-      // the run makes nothing in its own directory but the preload directory.
-      assert.deepEqual(
-        readdirSync(runTmp).filter((name) => !name.startsWith("a2a-preload-")),
-        [],
-        `the run makes nothing in its own directory but the preload directory:\n${log}`
-      );
-      process.kill(-run.pid, "SIGINT");
-      await within(exited, 10000, `the interrupted run did not exit within 10 seconds:\n${log}`);
-      // On a busy host a server stops some seconds after the run signals it.
-      await settled(() => running().length === 0, 10000);
-      assert.deepEqual(running(), [], `no server the interrupted run started is still running:\n${log}`);
-      // The process that has exited is the one that starts the test file. The
-      // one that runs the file removes the directory, and can end after it.
-      for (let i = 0; i < 100 && preloadDirs().length > 0; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      assert.deepEqual(preloadDirs(), [], `no preload directory the interrupted run made is left:\n${log}`);
-    } finally {
-      // Stop the run and whatever it left running, even when an assertion
-      // failed, and remove its temporary directory even when stopping them fails.
-      try {
-        stopServer(run);
-        for (const pid of groups) stopServer({ pid });
-        // Each group is led by the tsx of a server. tsx removes its socket
-        // when the SIGTERM of the interrupted run ends it, but not when that
-        // signal reaches it after it has bound the socket and before it
-        // handles signals, as it can reach the tsx of the stalled-upload
-        // server. So once the servers have exited, remove the sockets they
-        // left, and add their process ids to those the last test looks for
-        // sockets of.
-        for (let i = 0; i < 100 && running().length > 0; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        for (const pid of groups) {
-          removeTsxSocket(pid);
-          exitedTsx.push(pid);
-        }
-      } finally {
-        removeTempDir(runTmp);
-      }
-    }
-  }
-);
-
-test(
   "a Unix socket binds at an absolute path as long as the tests take as the longest, and not at one a byte longer",
   { skip: socketPathLimit === undefined && "on Windows tsx binds a named pipe, not a Unix socket" },
   async () => {
@@ -2953,7 +2465,7 @@ test("a message sent to /a2a/message gets the authentication, JSON parsing, vali
 
 test("POST /a2a/message has a body limit of its own, which admits the longest message the route reads with every character written as an escape, and answers 413 to a larger body that POST / parses", async () => {
   // The body limit of POST /a2a/message in bytes, as handler.ts sets it.
-  const kilobytes = handlerSource.match(/express\.json\(\{ limit: "(\d+)kb" \}\)/);
+  const kilobytes = handlerSource.match(/const parseAgentMessageJson = express\.json\(\{ limit: "(\d+)kb", /);
   assert.ok(kilobytes, "handler.ts sets a JSON body limit in kilobytes beside the limit of POST /");
   const agentMessageBodyLimit = Number(kilobytes[1]) * 1024;
   const auth = { Authorization: "Bearer demo-token" };

@@ -33,18 +33,14 @@ import { RateLimiterMemory } from "rate-limiter-flexible";
 const app = express();
 // Express names itself in an X-Powered-By header on every response otherwise.
 app.disable("x-powered-by");
-const port = parsePort(process.env.PORT ?? "3000");
-
 // Exit with one line naming the variable instead of the stack trace that
 // app.listen throws for a port it cannot use. An empty PORT is rejected like
 // any other value that is not a port, not treated as unset.
-function parsePort(value: string): number {
-  const parsed = /^\d+$/.test(value) ? Number(value) : NaN;
-  if (!(parsed >= 1 && parsed <= 65535)) {
-    console.error(`PORT must be a number from 1 to 65535; got ${JSON.stringify(value)}`);
-    process.exit(1);
-  }
-  return parsed;
+const portValue = process.env.PORT ?? "3000";
+const port = /^\d+$/.test(portValue) ? Number(portValue) : NaN;
+if (!(port >= 1 && port <= 65535)) {
+  console.error(`PORT must be a number from 1 to 65535; got ${JSON.stringify(portValue)}`);
+  process.exit(1);
 }
 
 // --- Rate Limiting ---
@@ -544,23 +540,29 @@ function parseAgentMessage(body: unknown): ParsedRequest {
 // Parse the body only after rate limiting and authentication pass, so
 // rate-limited and unauthenticated clients never reach the JSON parser.
 //
-// The limit holds the most file bytes the schema allows: 10 file parts of
-// 1,048,576 base64 characters take 10 MB, and the last 1 MB is room for the
-// rest of the request. A smaller limit answers file bytes the schema accepts
-// with 413 before the schema runs.
-const parseJson = express.json({ limit: "11mb" });
-
-// POST /a2a/message reads far less than POST /, so it has a parser with a
-// limit of its own. The 200, 200 and 10,000 characters AgentMessageSchema
-// allows take at most 62,400 bytes, when each is written as a six-byte \uXXXX
-// escape, and the rest of the 64 KB is room for the rest of the message.
-const parseAgentMessageJson = express.json({ limit: "64kb" });
-
-// POST /message:send reads the message POST / reads, without the JSON-RPC
-// request around it, so its parser has the limit of POST /. It also reads a
-// body sent as application/a2a+json, the media type section 11.1 of A2A v1.0
-// says requests in the HTTP+JSON binding should use.
-const parseSendMessageJson = express.json({ limit: "11mb", type: ["application/json", "application/a2a+json"] });
+// Transport limits belong to the platform, so each parser sets the options
+// of express.json that bound what it reads, with explicit values, and the
+// error middleware below answers each error the parser raises. limit is the
+// most bytes a body may have; a longer one gets 413 from the parser. inflate
+// is false: a body sent with a Content-Encoding other than identity gets 415
+// from the parser before any of it is read, in place of being inflated. type
+// is the media types the parser reads; a body of another type reaches its
+// route as an empty object and fails schema validation there.
+//
+// The limit of POST / holds the most file bytes the schema allows: 10 file
+// parts of 1,048,576 base64 characters take 10 MB, and the last 1 MB is room
+// for the rest of the request. A smaller limit answers file bytes the schema
+// accepts with 413 before the schema runs. POST /a2a/message reads far less,
+// so it has a limit of its own: the 200, 200 and 10,000 characters
+// AgentMessageSchema allows take at most 62,400 bytes, when each is written
+// as a six-byte \uXXXX escape, and the rest of the 64 KB is room for the rest
+// of the message. POST /message:send reads the message POST / reads, without
+// the JSON-RPC request around it, so it has the limit of POST /, and it also
+// reads a body sent as application/a2a+json, the media type section 11.1 of
+// A2A v1.0 says requests in the HTTP+JSON binding should use.
+const parseJson = express.json({ limit: "11mb", inflate: false, type: "application/json" });
+const parseAgentMessageJson = express.json({ limit: "64kb", inflate: false, type: "application/json" });
+const parseSendMessageJson = express.json({ limit: "11mb", inflate: false, type: ["application/json", "application/a2a+json"] });
 
 type Task = Awaited<ReturnType<typeof processTask>>;
 
@@ -817,15 +819,10 @@ app.use((_req, res) => {
 
 // Errors raised before a route handler runs, such as a body that is not valid
 // JSON, would otherwise reach Express's default handler, which answers with an
-// HTML page containing the stack trace.
-//
-// A client that closes the connection before sending the whole body is
-// reported here as request.aborted only once the connection has closed, so the
-// rejection is audited but the JSON reply below never reaches the client; it
-// gets at most the bare HTTP 400 that Node's HTTP server writes. An upload
-// that stalls until the request timeout is reported as request.aborted too,
-// after Node has answered it with a bare HTTP 408, so the audit line records
-// 408 for it.
+// HTML page containing the stack trace. The parser gives the errors it raises
+// the HTTP status of the reply and a type that names the rejection, such as
+// entity.parse.failed or entity.too.large; the reply keeps that status and
+// the audit line records the type. Any other error gets 500.
 app.use(
   (
     err: unknown,
@@ -838,13 +835,9 @@ app.use(
       return;
     }
 
-    const { status, type, code } = (err ?? {}) as {
-      status?: unknown;
-      type?: unknown;
-      code?: unknown;
-    };
+    const { status, type } = (err ?? {}) as { status?: unknown; type?: unknown };
     const clientError = typeof status === "number" && status >= 400 && status < 500;
-    const responseStatus = requestTimedOut(req) ? 408 : clientError ? status : 500;
+    const responseStatus = clientError ? status : 500;
 
     audit({
       timestamp: new Date().toISOString(),
@@ -853,7 +846,7 @@ app.use(
       action: "request_rejected",
       details: {
         status: responseStatus,
-        reason: rejectionReason(type, code),
+        reason: typeof type === "string" ? type : "unknown",
       },
     });
 
@@ -877,23 +870,6 @@ app.use(
     }
   }
 );
-
-// The parser names most rejections in the error's type. A compressed body that
-// does not inflate arrives as the zlib error instead, which has no type and a
-// Z_* code such as Z_DATA_ERROR.
-function rejectionReason(type: unknown, code: unknown): string {
-  if (typeof type === "string") return type;
-  if (typeof code === "string" && code.startsWith("Z_")) return "body.inflate.failed";
-  return "unknown";
-}
-
-// When the request timeout expires, Node writes its bare HTTP 408 and destroys
-// the socket with ERR_HTTP_REQUEST_TIMEOUT before the parser reports the
-// unfinished body.
-function requestTimedOut(req: express.Request): boolean {
-  const errored = req.socket.errored as NodeJS.ErrnoException | null;
-  return errored?.code === "ERR_HTTP_REQUEST_TIMEOUT";
-}
 
 // --- Task Processing ---
 
