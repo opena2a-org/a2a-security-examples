@@ -285,14 +285,19 @@ async function withServer(options, fn) {
 }
 
 // The body of a reply sent with Transfer-Encoding: chunked, with the chunks
-// joined.
+// joined. A body cut short before its zero-size chunk, or with a size line
+// that is not hexadecimal, throws rather than being read past its end.
 function dechunk(body) {
   const chunks = [];
   let at = 0;
   for (;;) {
     const lineEnd = body.indexOf("\r\n", at);
-    const size = parseInt(body.subarray(at, lineEnd).toString("latin1"), 16);
+    if (lineEnd === -1) throw new Error(`the chunked body ends at byte ${body.length} with no zero-size chunk`);
+    const line = body.subarray(at, lineEnd).toString("latin1");
+    if (!/^[0-9a-f]+(;.*)?$/i.test(line)) throw new Error(`the chunk size line at byte ${at} is not hexadecimal: ${JSON.stringify(line)}`);
+    const size = parseInt(line, 16);
     if (size === 0) break;
+    if (lineEnd + 2 + size + 2 > body.length) throw new Error(`the chunk at byte ${at} of ${size} bytes runs past the end of the body, at byte ${body.length}`);
     chunks.push(body.subarray(lineEnd + 2, lineEnd + 2 + size));
     at = lineEnd + 2 + size + 2;
   }
@@ -300,7 +305,8 @@ function dechunk(body) {
 }
 
 // The status, header lines and body of the reply in raw, as the server wrote
-// them. An empty raw is a connection closed with no reply.
+// them. An empty raw is a connection closed with no reply. A chunked body that
+// cannot be read throws, with raw in the message.
 function parseReply(raw) {
   if (raw.length === 0) return { status: undefined, headers: [], body: "", raw: "" };
   const end = raw.indexOf("\r\n\r\n");
@@ -308,9 +314,25 @@ function parseReply(raw) {
   const status = Number(head[0].match(/^HTTP\/1\.1 (\d{3})/)?.[1]);
   const headers = head.slice(1);
   let body = end === -1 ? Buffer.alloc(0) : raw.subarray(end + 4);
-  if (headers.some((line) => /^transfer-encoding:\s*chunked$/i.test(line))) body = dechunk(body);
+  if (headers.some((line) => /^transfer-encoding:\s*chunked$/i.test(line))) {
+    try {
+      body = dechunk(body);
+    } catch (err) {
+      throw new Error(`${err.message}, in the reply:\n${raw.toString("latin1")}`);
+    }
+  }
   return { status, headers, body: body.toString("utf8"), raw: raw.toString("latin1") };
 }
+
+test("a chunked reply cut short before its zero-size chunk fails at once, with the raw reply in the message", () => {
+  const head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+  const whole = parseReply(Buffer.from(`${head}5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n`, "latin1"));
+  assert.equal(whole.body, "hello world");
+  for (const body of ["5\r\nhello\r\n", "5\r\nhello\r\n6\r\n wo", "5\r\nhel", "5\r\nhello\r\nzz\r\n", "5", ""]) {
+    const raw = `${head}${body}`;
+    assert.throws(() => parseReply(Buffer.from(raw, "latin1")), (err) => err.message.endsWith(`, in the reply:\n${raw}`), JSON.stringify(body));
+  }
+});
 
 // Send a row's request to the server on port as one HTTP/1.1 request on a
 // connection of its own, and resolve with the reply once the connection has
@@ -344,7 +366,13 @@ function send(port, request) {
     socket.on("error", (err) => (failure = err));
     socket.on("close", () => {
       if (chunks.length === 0 && failure) reject(failure);
-      else resolve(parseReply(Buffer.concat(chunks)));
+      else {
+        try {
+          resolve(parseReply(Buffer.concat(chunks)));
+        } catch (err) {
+          reject(err);
+        }
+      }
     });
   });
 }
